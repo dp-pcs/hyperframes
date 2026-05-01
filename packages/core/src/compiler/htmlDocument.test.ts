@@ -15,10 +15,10 @@ describe("htmlDocument helpers", () => {
   it("strips every known embedded HyperFrames runtime marker", () => {
     const html = `
 <script src="hyperframe.runtime.iife.js"></script>
-<script src="hyperframes-runtime.modular.inline.js"></script>
+<script src="hyperframes-runtime.modular.inline.js"></script >
 <script src="hyperframe-runtime.modular-runtime.inline.js"></script>
 <script data-hyperframes-preview-runtime="1"></script>
-<script>window.__playerReady = true;</script>
+<script>window.__playerReady = true;</script >
 <script>window.authored = true;</script>`;
 
     const stripped = stripEmbeddedRuntimeScripts(html);
@@ -29,6 +29,12 @@ describe("htmlDocument helpers", () => {
     expect(stripped).not.toContain("data-hyperframes-preview-runtime");
     expect(stripped).not.toContain("window.__playerReady");
     expect(stripped).toContain("window.authored = true");
+  });
+
+  it("does not treat non-script tags as scripts when stripping runtimes", () => {
+    const html = "<scripture>window.__playerReady = true;</scripture>";
+
+    expect(stripEmbeddedRuntimeScripts(html)).toBe(html);
   });
 
   it("injects head and body scripts without replacement-token interpolation", () => {
@@ -44,5 +50,18 @@ describe("htmlDocument helpers", () => {
     const injected = injectScriptsAtHeadStart(html, ["window.early = true;"]);
 
     expect(injected.indexOf("window.early = true")).toBeLessThan(injected.indexOf('id="authored"'));
+  });
+
+  it("escapes inline scripts so authored script text cannot break out of the wrapper tag", () => {
+    const html = "<html><head></head><body></body></html>";
+    const injected = injectScriptsIntoHtml(
+      html,
+      ['window.payload = "</script ><script>window.pwned = true;</script>";'],
+      ["window.comment = '<!-- kept as script text';"],
+    );
+
+    expect(injected).toContain("<\\/script ><script>window.pwned = true;<\\/script>");
+    expect(injected).toContain("<\\!-- kept as script text");
+    expect(injected).not.toContain("</script ><script>window.pwned = true;");
   });
 });
