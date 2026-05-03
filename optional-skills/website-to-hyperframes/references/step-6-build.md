@@ -86,7 +86,7 @@ Check the storyboard's transition specification for this beat:
 - **Shader transition**: no exit animation needed — the shader handles the blend. Read `packages/shader-transitions/README.md` for the API, available shaders, and setup. The package handles WebGL init, capture, and GSAP integration — do not copy raw GLSL manually.
 - **Hard cut**: no exit animation. The scene simply ends.
 
-For all CSS transition types and their GSAP implementations, read `skills/hyperframes/references/transitions/catalog.md`.
+For all CSS transition types and their GSAP implementations, read `optional-skills/hyperframes/references/transitions/catalog.md`.
 
 ### 7. Asset cross-reference
 

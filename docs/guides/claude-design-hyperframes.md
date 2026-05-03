@@ -496,7 +496,7 @@ Opens the HyperFrames Studio at `http://localhost:3002` with frame-accurate scru
 This project was drafted in Claude Design. To polish animations, timing, and pacing:
 
 ```bash
-npx skills add heygen-com/hyperframes   # install HyperFrames skills (one-time)
+npx skills add heygen-com/hyperframes --full-depth   # install HyperFrames skills (one-time)
 npx hyperframes lint                     # verify structure (should pass with zero errors)
 npx hyperframes preview                  # open the studio for live feedback
 ```
@@ -1222,8 +1222,8 @@ tl.to("#s5-headline", { backgroundSize: "100% 30%", duration: 0.6, ease: "power2
 Everything critical is inlined above. These are for edge cases:
 
 - Core composition contract (data attributes, sub-comp wiring): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/SKILL.md
-- Motion theory (easing as emotion, direction rules): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/motion-principles.md
-- Typography (full banned list, weight contrast, OpenType): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/typography.md
-- Transitions (shader catalog, CSS transition patterns): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/transitions.md
-- Captions synced to audio: https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/captions.md
+- Motion theory (easing as emotion, direction rules): https://github.com/heygen-com/hyperframes/blob/main/optional-skills/hyperframes/references/motion-principles.md
+- Typography (full banned list, weight contrast, OpenType): https://github.com/heygen-com/hyperframes/blob/main/optional-skills/hyperframes/references/typography.md
+- Transitions (shader catalog, CSS transition patterns): https://github.com/heygen-com/hyperframes/blob/main/optional-skills/hyperframes/references/transitions.md
+- Captions synced to audio: https://github.com/heygen-com/hyperframes/blob/main/optional-skills/hyperframes/references/captions.md
 - Full docs: https://hyperframes.heygen.com/

@@ -14,7 +14,7 @@ function hasNpx(): boolean {
 
 function runSkillsAdd(repo: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("npx", ["skills", "add", repo, "--all"], {
+    const child = spawn("npx", ["skills", "add", repo, "--all", "--full-depth"], {
       stdio: "inherit",
       timeout: 120_000,
       // GH #316 — the upstream `skills` CLI shells out to `git clone`.

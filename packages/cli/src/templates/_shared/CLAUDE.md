@@ -2,24 +2,30 @@
 
 ## Skills — USE THESE FIRST
 
-**Always invoke the relevant skill before writing or modifying compositions.** Skills encode framework-specific patterns (e.g., `window.__timelines` registration, `data-*` attribute semantics, shader-compatible CSS rules) that are NOT in generic web docs. Skipping them produces broken compositions.
+**Always invoke the relevant skill before writing or modifying compositions.** The default HyperFrames video skill is lightweight: it checks the local environment before CLI use and keeps the core composition contract in context. Runtime-specific skills encode patterns that are NOT in generic web docs.
 
-| Skill                      | Command                   | When to use                                                                                       |
-| -------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------- |
-| **hyperframes**            | `/hyperframes`            | Creating or editing HTML compositions, captions, TTS, audio-reactive animation, marker highlights |
-| **hyperframes-cli**        | `/hyperframes-cli`        | CLI commands: init, lint, preview, render, transcribe, tts                                        |
-| **hyperframes-registry**   | `/hyperframes-registry`   | Installing blocks and components via `hyperframes add`                                            |
-| **website-to-hyperframes** | `/website-to-hyperframes` | Capturing a URL and turning it into a video — full website-to-video pipeline                      |
-| **tailwind**               | `/tailwind`               | Tailwind v4 browser-runtime styles for projects created with `hyperframes init --tailwind`        |
-| **gsap**                   | `/gsap`                   | GSAP animations for HyperFrames — tweens, timelines, easing, performance                          |
-| **animejs**                | `/animejs`                | Anime.js animations registered on `window.__hfAnime`                                              |
-| **css-animations**         | `/css-animations`         | CSS keyframes that HyperFrames can pause and seek                                                 |
-| **lottie**                 | `/lottie`                 | `lottie-web` and dotLottie players registered on `window.__hfLottie`                              |
-| **three**                  | `/three`                  | Three.js scenes rendered from HyperFrames `hf-seek` events                                        |
-| **waapi**                  | `/waapi`                  | Web Animations API motion driven through `document.getAnimations()`                               |
+| Skill                    | Command                 | When to use                                                                                |
+| ------------------------ | ----------------------- | ------------------------------------------------------------------------------------------ |
+| **hyperframes**          | `/hyperframes`          | Default lightweight video entry point, environment preflight, core composition contract    |
+| **hyperframes-cli**      | `/hyperframes-cli`      | CLI commands: init, lint, preview, render, transcribe, tts                                 |
+| **hyperframes-registry** | `/hyperframes-registry` | Installing blocks and components via `hyperframes add`                                     |
+| **tailwind**             | `/tailwind`             | Tailwind v4 browser-runtime styles for projects created with `hyperframes init --tailwind` |
+| **gsap**                 | `/gsap`                 | GSAP animations for HyperFrames — tweens, timelines, easing, performance                   |
+| **animejs**              | `/animejs`              | Anime.js animations registered on `window.__hfAnime`                                       |
+| **css-animations**       | `/css-animations`       | CSS keyframes that HyperFrames can pause and seek                                          |
+| **lottie**               | `/lottie`               | `lottie-web` and dotLottie players registered on `window.__hfLottie`                       |
+| **three**                | `/three`                | Three.js scenes rendered from HyperFrames `hf-seek` events                                 |
+| **waapi**                | `/waapi`                | Web Animations API motion driven through `document.getAnimations()`                        |
+
+Optional full-production skills may also be available:
+
+| Optional skill             | Command                   | When to use                                               |
+| -------------------------- | ------------------------- | --------------------------------------------------------- |
+| **hyperframes-production** | `/hyperframes-production` | Detailed authoring, captions, TTS, audio-reactive visuals |
+| **website-to-hyperframes** | `/website-to-hyperframes` | Full website-to-video pipeline                            |
 
 > **Skills not available?** Ask the user to run `npx hyperframes skills` and restart their
-> agent session, or install manually: `npx skills add heygen-com/hyperframes`.
+> agent session, or install manually: `npx skills add heygen-com/hyperframes --full-depth`.
 
 ## Commands
 

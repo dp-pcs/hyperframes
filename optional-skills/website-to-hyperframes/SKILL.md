@@ -1,7 +1,7 @@
 ---
 name: website-to-hyperframes
 description: |
-  Capture a website and create a HyperFrames video from it. Use when: (1) a user provides a URL and wants a video, (2) someone says "capture this site", "turn this into a video", "make a promo from my site", (3) the user wants a social ad, product tour, or any video based on an existing website, (4) the user shares a link and asks for any kind of video content. Even if the user just pastes a URL — this is the skill to use.
+  Optional full workflow for capturing a website and creating a HyperFrames video from it. Use when: (1) a user provides a URL and wants a video, (2) someone says "capture this site", "turn this into a video", "make a promo from my site", (3) the user wants a social ad, product tour, or any video based on an existing website, (4) the user shares a link and asks for any kind of video content. Even if the user just pastes a URL — this is the skill to use when optional HyperFrames production skills are enabled.
 ---
 
 # Website to HyperFrames
@@ -70,7 +70,7 @@ Generate TTS audio, transcribe for word-level timestamps, and map timestamps to 
 
 ## Step 6: Build Compositions
 
-**Read:** The `hyperframes` skill (load it — every rule matters)
+**Read:** The optional `hyperframes-production` skill if installed (load it — every rule matters)
 **Read:** [references/step-6-build.md](references/step-6-build.md)
 
 Build each composition following the storyboard. After each one: self-review for layout, asset placement, and animation quality.

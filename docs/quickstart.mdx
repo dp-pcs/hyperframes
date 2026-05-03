@@ -10,10 +10,10 @@ Go from zero to a rendered MP4 — either by prompting your AI agent or by start
 Install the HyperFrames skills, then describe the video you want:
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth
 ```
 
-This teaches your agent (Claude Code, Cursor, Gemini CLI, Codex) how to write correct compositions, GSAP timelines, Tailwind v4 browser-runtime styles, and first-party adapter animations. In Claude Code the skills register as slash commands — `/hyperframes` for composition authoring, `/hyperframes-cli` for CLI commands, `/tailwind` for `init --tailwind` projects, `/gsap` for timeline animation help, and `/animejs`, `/css-animations`, `/lottie`, `/three`, or `/waapi` when a composition uses those runtimes. Invoking the slash command loads the skill context explicitly, which produces correct output the first time.
+This teaches your agent (Claude Code, Cursor, Gemini CLI, Codex) to use HyperFrames as the default HTML video path, check local runtime dependencies before invoking the CLI, write correct GSAP timelines, use Tailwind v4 browser-runtime styles, and follow first-party adapter animation patterns. In Claude Code the skills register as slash commands — `/hyperframes` for the lightweight video entry point, `/hyperframes-cli` for CLI commands, `/tailwind` for `init --tailwind` projects, `/gsap` for timeline animation help, and `/animejs`, `/css-animations`, `/lottie`, `/three`, or `/waapi` when a composition uses those runtimes. Invoking the slash command loads the skill context explicitly.
 
 <Note>
   Claude Design uses a different entry path. Open [`docs/guides/claude-design-hyperframes.md`](https://github.com/heygen-com/hyperframes/blob/main/docs/guides/claude-design-hyperframes.md) on GitHub, click the download button (↓) to save it, then attach to your Claude Design chat. It produces a valid first draft you can refine in any AI coding agent. See the [Claude Design guide](/guides/claude-design).
@@ -25,17 +25,17 @@ Copy any of these into your agent to get started.
 
 <CardGroup cols={1}>
   <Card title="Cold start — describe what you want">
-    > Using `/hyperframes`, create a 10-second product intro with a fade-in title over a dark background and subtle background music.
+    > Create a 10-second product intro with a fade-in title over a dark background and subtle background music. Use `/hyperframes` first to check the local environment.
   </Card>
   <Card title="Warm start — turn existing context into a video">
-    > Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me using `/hyperframes`.
+    > Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me with a short HyperFrames video.
 
-    > Summarize the attached PDF into a 45-second pitch video using `/hyperframes`.
+    > Summarize the attached PDF into a 45-second pitch video.
 
-    > Turn this CSV into an animated bar chart race using `/hyperframes`.
+    > Turn this CSV into an animated bar chart race.
   </Card>
   <Card title="Format-specific">
-    > Make a 9:16 TikTok-style hook video about [topic] using `/hyperframes`, with bouncy captions synced to a TTS narration.
+    > Make a 9:16 TikTok-style hook video about [topic], with bouncy captions synced to a TTS narration.
   </Card>
   <Card title="Iterate — talk to the agent like a video editor">
     > Make the title 2x bigger, swap to dark mode, and add a fade-out at the end.
@@ -47,7 +47,7 @@ Copy any of these into your agent to get started.
 The agent handles scaffolding, animation, and rendering. See the [prompting guide](/guides/prompting) for more patterns.
 
 <Tip>
-  Skills encode HyperFrames-specific patterns — like required `class="clip"` on timed elements, GSAP timeline registration, adapter registries such as `window.__hfLottie`, and `data-*` attribute semantics — that are not in generic web docs. Using skills produces correct compositions from the start.
+  Skills encode HyperFrames-specific patterns — like required `class="clip"` on timed elements, GSAP timeline registration, adapter registries such as `window.__hfLottie`, and `data-*` attribute semantics — that are not in generic web docs. The default HyperFrames video entry point is lightweight and checks the local environment before agents rely on the CLI; `--full-depth` also installs optional production workflows for people explicitly choosing HyperFrames.
 </Tip>
 
 ## Option 2: Start a project manually

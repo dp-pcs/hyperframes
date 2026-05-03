@@ -12,7 +12,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
-const SKILLS_DIR = join(import.meta.dirname, "..", "skills");
+const SKILL_DIRS = ["skills", "optional-skills"].map((dir) => join(import.meta.dirname, "..", dir));
 
 interface Violation {
   file: string;
@@ -95,12 +95,16 @@ function lintFile(filePath: string): Violation[] {
 // Main
 // ---------------------------------------------------------------------------
 
-if (!statSync(SKILLS_DIR, { throwIfNoEntry: false })?.isDirectory()) {
-  console.log("No skills/ directory found — skipping skill lint.");
+const existingSkillDirs = SKILL_DIRS.filter((dir) =>
+  statSync(dir, { throwIfNoEntry: false })?.isDirectory(),
+);
+
+if (existingSkillDirs.length === 0) {
+  console.log("No skills/ or optional-skills/ directory found — skipping skill lint.");
   process.exit(0);
 }
 
-const files = collectSkillFiles(SKILLS_DIR);
+const files = existingSkillDirs.flatMap((dir) => collectSkillFiles(dir));
 if (files.length === 0) {
   console.log("No SKILL.md files found.");
   process.exit(0);

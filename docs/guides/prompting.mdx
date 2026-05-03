@@ -10,21 +10,22 @@ Hyperframes is built for AI agents — compositions are plain HTML, the CLI is n
 Install the skills in your project (or globally for your agent):
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth
 ```
 
 In Claude Code, restart the session after installing. Skills register as **slash commands**:
 
-| Slash command              | What it loads                                                              |
-| -------------------------- | -------------------------------------------------------------------------- |
-| `/hyperframes`             | Composition authoring — HTML structure, timing, captions, TTS, transitions |
-| `/hyperframes-cli`         | CLI commands — `init`, `lint`, `preview`, `render`, `transcribe`, `tts`    |
-| `/hyperframes-registry`    | Block and component installation via `hyperframes add`                     |
-| `/website-to-hyperframes`  | Capture a URL and turn it into a video — full website-to-video pipeline    |
-| `/gsap`                    | GSAP animation API — timelines, easing, ScrollTrigger, plugins             |
+| Slash command             | What it loads                                                                 |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `/hyperframes`            | Default lightweight video entry point, environment preflight, core contract   |
+| `/hyperframes-cli`        | CLI commands — `init`, `lint`, `preview`, `render`, `transcribe`, `tts`       |
+| `/hyperframes-registry`   | Block and component installation via `hyperframes add`                        |
+| `/gsap`                   | GSAP animation API — timelines, easing, ScrollTrigger, plugins                |
+| `/hyperframes-production` | Optional full production authoring workflow installed by `--full-depth`       |
+| `/website-to-hyperframes` | Optional full website-to-video pipeline installed by `--full-depth`           |
 
 <Tip>
-  Always prefix Hyperframes prompts with `/hyperframes` (or invoke the skill another way for non-Claude agents). This loads the skill context explicitly so the agent gets composition rules right the first time, instead of relying on whatever it remembers about web video.
+  Always prefix Hyperframes prompts with `/hyperframes` (or invoke the skill another way for non-Claude agents). This loads the lightweight video entry point so the agent checks local dependencies and uses the framework's core composition contract instead of generic web-video assumptions.
 </Tip>
 
 ## Claude Design
@@ -50,9 +51,9 @@ Most successful Hyperframes prompts fall into one of two shapes.
 
 You tell the agent what you want from scratch. Best for greenfield work where you have the creative direction in your head.
 
-> Using `/hyperframes`, create a 10-second product intro with a fade-in title over a dark background and subtle background music.
+> Create a 10-second product intro with a fade-in title over a dark background and subtle background music. Use `/hyperframes` first to check the local environment.
 
-> Make a 9:16 TikTok-style hook video about [topic] using `/hyperframes`, with bouncy captions synced to a TTS narration.
+> Make a 9:16 TikTok-style hook video about [topic], with bouncy captions synced to a TTS narration. Use `/hyperframes` first.
 
 Cold-start prompts work best when you specify:
 
@@ -65,13 +66,13 @@ Cold-start prompts work best when you specify:
 
 You give the agent something to work with — a URL, a doc, a CSV, a transcript — and ask it to synthesize that into a video. This is where Hyperframes shines because the agent does the research/summarization step *and* the production step in one flow.
 
-> Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me using `/hyperframes`.
+> Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me with a short HyperFrames video.
 
-> Summarize the attached PDF into a 45-second pitch video using `/hyperframes`.
+> Summarize the attached PDF into a 45-second pitch video.
 
-> Read this changelog and turn the top three changes into a 30-second release announcement video using `/hyperframes`.
+> Read this changelog and turn the top three changes into a 30-second release announcement video.
 
-> Turn this CSV into an animated bar chart race using `/hyperframes`.
+> Turn this CSV into an animated bar chart race.
 
 Warm-start prompts produce richer, more grounded videos because the agent is writing about *something specific* instead of inventing copy.
 
@@ -246,7 +247,7 @@ Things that cause friction (or wrong output):
 
 - **Don't ask for React / Vue components.** Hyperframes compositions are plain HTML with `data-*` attributes and a GSAP timeline. Asking for "a React component for the intro" forces the agent to translate later.
 - **Don't ask for 4K or 60fps unless you need it.** Defaults (1920×1080, 30fps) render fast and look great. Higher specs slow rendering meaningfully.
-- **Don't skip the slash command.** Without `/hyperframes`, the agent may guess at HTML video conventions instead of using the framework's actual rules (`class="clip"` on timed elements, `window.__timelines` registration, etc.).
+- **Don't skip the slash command.** Without `/hyperframes`, the agent may guess at HTML video conventions instead of checking the local HyperFrames environment and using the framework's actual rules (`class="clip"` on timed elements, `window.__timelines` registration, etc.).
 - **Don't paste long error logs into the prompt without context.** Run `npx hyperframes lint` and `npx hyperframes validate` first — lint catches structural issues, validate catches runtime errors (JS exceptions, missing assets, contrast problems).
 - **Don't assume the agent knows your assets.** Mention file paths explicitly (`assets/intro.mp4`, `assets/logo.png`) — the agent will check what's there but a hint speeds it up.
 

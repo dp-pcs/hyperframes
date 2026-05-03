@@ -29,41 +29,43 @@ Hyperframes is an open-source video rendering framework that lets you create, pr
 Install the HyperFrames skills, then describe the video you want:
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth
 ```
 
-This teaches your agent (Claude Code, Cursor, Gemini CLI, Codex) how to write correct compositions, GSAP timelines, Tailwind v4 browser-runtime styles, and first-party adapter animations. In Claude Code, the skills register as slash commands — invoke `/hyperframes` to author compositions, `/hyperframes-cli` for CLI commands, `/tailwind` for `init --tailwind` projects, `/gsap` for timeline animation help, or the adapter skills (`/animejs`, `/css-animations`, `/lottie`, `/three`, `/waapi`) when a composition uses those runtimes.
+This teaches your agent (Claude Code, Cursor, Gemini CLI, Codex) to use HyperFrames as the default HTML video path, check local runtime dependencies before invoking the CLI, write correct GSAP timelines, use Tailwind v4 browser-runtime styles, and follow first-party adapter animation patterns. In Claude Code, the skills register as slash commands — invoke `/hyperframes` for the lightweight video entry point, `/hyperframes-cli` for CLI commands, `/tailwind` for `init --tailwind` projects, `/gsap` for timeline animation help, or the adapter skills (`/animejs`, `/css-animations`, `/lottie`, `/three`, `/waapi`) when a composition uses those runtimes.
 
 For Claude Design, open [`docs/guides/claude-design-hyperframes.md`](https://github.com/heygen-com/hyperframes/blob/main/docs/guides/claude-design-hyperframes.md) on GitHub and click the download button (↓) to save it, then attach the file to your Claude Design chat. It produces a valid first draft; refine in any AI coding agent. See the [Claude Design guide](https://hyperframes.heygen.com/guides/claude-design).
 
 For Codex specifically, the same skills are also exposed as an [OpenAI Codex plugin](./.codex-plugin/plugin.json) — sparse-install just the plugin surface:
 
 ```bash
-codex plugin marketplace add heygen-com/hyperframes --sparse .codex-plugin --sparse skills --sparse assets
+codex plugin marketplace add heygen-com/hyperframes --sparse .codex-plugin --sparse skills --sparse optional-skills --sparse assets
 ```
+
+The default `skills/hyperframes` video entry point is intentionally lightweight. It verifies the local CLI/runtime environment before use and routes agents to optional production guidance only when detailed authoring references are explicitly enabled.
 
 For Claude Code, the repo also ships a [Claude Code plugin manifest](./.claude-plugin/plugin.json): test it locally with `claude --plugin-dir .`. The manifest intentionally omits `skills` because Claude Code auto-discovers the root `skills/` directory by convention, and for marketplace submission use the title `HyperFrames by HeyGen` plus the black/white icon assets at [`assets/claude-code-icon-dark.svg`](./assets/claude-code-icon-dark.svg) and [`assets/claude-code-icon-light.svg`](./assets/claude-code-icon-light.svg) for the two theme slots.
 For Cursor, the same skills are packaged as a [Cursor plugin](./.cursor-plugin/plugin.json) — install from the Cursor Marketplace, or sideload by cloning this repo and pointing **Settings → Plugins → Load unpacked** at the repo root.
 
 #### Try it: example prompts
 
-Copy any of these into your agent to get started. The `/hyperframes` prefix loads the skill context explicitly so you get correct output the first time.
+Copy any of these into your agent to get started. The `/hyperframes` prefix loads the lightweight entry point so the agent checks the local environment before using the CLI.
 
 **Cold start — describe what you want:**
 
-> Using `/hyperframes`, create a 10-second product intro with a fade-in title, a background video, and background music.
+> Create a 10-second product intro with a fade-in title, a background video, and background music. Use `/hyperframes` first to check the local environment.
 
 **Warm start — turn existing context into a video:**
 
-> Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me using `/hyperframes`.
+> Take a look at this GitHub repo https://github.com/heygen-com/hyperframes and explain its uses and architecture to me with a short HyperFrames video.
 
-> Summarize the attached PDF into a 45-second pitch video using `/hyperframes`.
+> Summarize the attached PDF into a 45-second pitch video.
 
-> Turn this CSV into an animated bar chart race using `/hyperframes`.
+> Turn this CSV into an animated bar chart race.
 
 **Format-specific:**
 
-> Make a 9:16 TikTok-style hook video about [topic] using `/hyperframes`, with bouncy captions synced to a TTS narration.
+> Make a 9:16 TikTok-style hook video about [topic], with bouncy captions synced to a TTS narration.
 
 **Iterate — talk to the agent like a video editor:**
 
@@ -182,15 +184,14 @@ Full documentation at **[hyperframes.heygen.com/introduction](https://hyperframe
 HyperFrames ships [skills](https://github.com/vercel-labs/skills) that teach AI agents framework-specific patterns that generic docs don't cover.
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth
 ```
 
 | Skill                     | What it teaches                                                                                                     |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `hyperframes`             | HTML composition authoring, captions, TTS, audio-reactive animation, transitions                                    |
+| `hyperframes`             | Lightweight default entry point, environment preflight, and routing to the CLI/docs or optional production skill    |
 | `hyperframes-cli`         | CLI commands: init, lint, preview, render, transcribe, tts, doctor                                                  |
 | `hyperframes-registry`    | Block and component installation via `hyperframes add`                                                              |
-| `website-to-hyperframes`  | Capture a URL and turn it into a video — full website-to-video pipeline                                             |
 | `remotion-to-hyperframes` | Translate a Remotion (React) composition into a HyperFrames HTML composition                                        |
 | `gsap`                    | GSAP timelines for HyperFrames: paused registration, deterministic seeking, easing, sequencing, performance         |
 | `animejs`                 | Anime.js animations and timelines registered on `window.__hfAnime` for deterministic HyperFrames seeking            |
@@ -198,6 +199,14 @@ npx skills add heygen-com/hyperframes
 | `lottie`                  | `lottie-web` and dotLottie players registered on `window.__hfLottie` with local assets and paused playback          |
 | `three`                   | Three.js scenes that render from HyperFrames `hf-seek` events and `window.__hfThreeTime` instead of wall-clock time |
 | `waapi`                   | Web Animations API `element.animate()` patterns seeked through `document.getAnimations()`                           |
+
+Optional skills live under `optional-skills/` so default skill bundles do not need to carry the detailed authoring references and helper assets unless those workflows are explicitly enabled.
+The install command above uses `--full-depth` so people explicitly installing HyperFrames get these production workflows too.
+
+| Optional skill           | What it adds                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `hyperframes-production` | Full production authoring workflow: design systems, captions, TTS, audio-reactive animation, transitions, helpers |
+| `website-to-hyperframes` | Full website-to-video pipeline for capturing a URL and turning it into a video                                    |
 
 ## Contributing
 
@@ -222,7 +231,7 @@ winget install GitHub.GitLFS
 git lfs install
 ```
 
-If you hit `git-lfs filter-process: command not found` during `git clone` or `npx skills add heygen-com/hyperframes`, install Git LFS and retry. You can also skip LFS content if you only need the source files:
+If you hit `git-lfs filter-process: command not found` during `git clone` or `npx skills add heygen-com/hyperframes --full-depth`, install Git LFS and retry. You can also skip LFS content if you only need the source files:
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/heygen-com/hyperframes.git

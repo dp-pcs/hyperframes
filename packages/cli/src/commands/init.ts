@@ -669,7 +669,7 @@ export default defineCommand({
       console.log("Get started:");
       console.log();
       console.log(`  ${c.accent("1.")} Install AI coding skills (one-time):`);
-      console.log(`     ${c.accent("npx skills add heygen-com/hyperframes")}`);
+      console.log(`     ${c.accent("npx skills add heygen-com/hyperframes --full-depth")}`);
       console.log();
       console.log(`  ${c.accent("2.")} Open this project with your AI coding agent:`);
       console.log(

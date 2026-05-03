@@ -5,7 +5,18 @@ description: HyperFrames CLI tool — hyperframes init, lint, inspect, preview, 
 
 # HyperFrames CLI
 
-Everything runs through `npx hyperframes`. Requires Node.js >= 22 and FFmpeg.
+Everything runs through `npx hyperframes`; do not require a global install. Known minimum runtime for the current CLI is Node.js 20.12+. Supported and CI-tested baseline is Node.js 22+. Rendering requires FFmpeg and FFprobe.
+
+## Preflight
+
+Before running HyperFrames CLI commands in a new environment:
+
+```bash
+node --version
+npx hyperframes doctor
+```
+
+If Node.js is missing or older than 20.12, stop and tell the user. If Node.js is 20.12-21.x, continue only after surfacing that it is below the supported Node.js 22+ baseline and package managers may warn because package manifests still declare Node.js 22+. If `doctor` reports missing FFmpeg, FFprobe, Chrome, Docker, or resource checks, stop before render-only workflows and surface the exact failed check plus install hint. Do not try to render and let it crash. Do not install large dependencies or download a browser unless the user asks you to. If Chrome is the only missing dependency and the user wants the CLI to manage it, run `npx hyperframes browser ensure`.
 
 ## Workflow
 
@@ -114,6 +125,8 @@ npx hyperframes render --docker                       # byte-identical
 | `--strict-all` | flag                  | off                        | Fail on errors AND warnings |
 
 **Quality guidance:** `draft` while iterating, `standard` for review, `high` for final delivery.
+
+Before rendering in a new environment, run `npx hyperframes doctor`. If FFmpeg, FFprobe, Chrome, Docker, or resource checks fail, stop and report the clean install hint instead of attempting `render`.
 
 ## Transcription
 

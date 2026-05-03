@@ -6,8 +6,9 @@
  *   - CLAUDE.md  — Claude Code convention
  *
  * This file generates a DATA INVENTORY that tells the AI agent what files
- * exist and what they contain. The actual workflow lives in the
- * website-to-hyperframes skill — this file points agents there.
+ * exist and what they contain. The default HyperFrames skill handles the
+ * lightweight video path; the optional website-to-hyperframes skill adds a
+ * guided capture-to-video workflow when available.
  */
 
 import { writeFileSync } from "node:fs";
@@ -100,7 +101,7 @@ function buildPrompt(
 
 Source: ${url}
 
-To create a video from this capture, use the \`website-to-hyperframes\` skill.
+To create a video from this capture, use the \`hyperframes\` skill. If the optional \`website-to-hyperframes\` skill is available, use it for the full guided capture-to-video workflow.
 
 ## What's in This Capture
 

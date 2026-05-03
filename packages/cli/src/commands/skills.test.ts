@@ -44,6 +44,7 @@ describe("hyperframes skills", () => {
     expect(first!.command).toBe("npx");
     expect(first!.args).toContain("skills");
     expect(first!.args).toContain("add");
+    expect(first!.args).toContain("--full-depth");
     expect(first!.env?.GIT_CLONE_PROTECTION_ACTIVE).toBe("0");
   });
 });

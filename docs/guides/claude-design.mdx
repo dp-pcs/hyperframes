@@ -23,7 +23,7 @@ Claude Design produces a **valid first draft** of a HyperFrames video — brand 
   <Step title="Refine in any AI coding agent">
     Open the project in Claude Code, Cursor, Codex, or any agent with terminal access for animation polish, timing, and production QA.
     ```bash
-    npx skills add heygen-com/hyperframes   # install skills (one-time)
+    npx skills add heygen-com/hyperframes --full-depth   # install skills (one-time)
     npx hyperframes lint                     # should pass with zero errors
     npx hyperframes preview                  # open the studio
     ```
@@ -39,8 +39,8 @@ Claude Design produces a **valid first draft** of a HyperFrames video — brand 
 | Surface                     | Recommended setup                                                                                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | Claude Design               | Download [`claude-design-hyperframes.md`](https://github.com/heygen-com/hyperframes/blob/main/docs/guides/claude-design-hyperframes.md) from GitHub and attach to your chat |
-| Claude Code                 | `npx skills add heygen-com/hyperframes`, then use `/hyperframes`                                                              |
-| Cursor / Codex / Gemini CLI | `npx skills add heygen-com/hyperframes`                                                                                       |
+| Claude Code                 | `npx skills add heygen-com/hyperframes --full-depth`, then use `/hyperframes`                                                              |
+| Cursor / Codex / Gemini CLI | `npx skills add heygen-com/hyperframes --full-depth`                                                                                       |
 
 ## How it works
 
@@ -124,7 +124,7 @@ The more specific your prompt, the better the output. Include palette, fonts, du
 Claude Design's output is a valid first draft. Open it in Claude Code, Cursor, Codex, or any AI coding agent with terminal access:
 
 ```bash
-npx skills add heygen-com/hyperframes   # one-time setup
+npx skills add heygen-com/hyperframes --full-depth   # one-time setup
 npx hyperframes lint                     # verify structure
 npx hyperframes preview                  # open the studio
 ```

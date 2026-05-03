@@ -370,7 +370,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     The capture command extracts everything an AI agent needs to understand a website's visual identity: viewport screenshots at every scroll depth, color palette (pixel-sampled + DOM computed), font files, images with semantic names, SVGs, Lottie animations, video previews, WebGL shaders, visible text, and page structure.
 
-    Output is a self-contained directory with a `CLAUDE.md` file that any AI agent can read to understand the captured site. Used by the `/website-to-hyperframes` skill as step 1 of the video production pipeline.
+    Output is a self-contained directory with a `CLAUDE.md` file that any AI agent can read to understand the captured site. Use `/hyperframes` to turn the capture into a video; if optional skills are enabled, `/website-to-hyperframes` provides the full guided pipeline.
 
     Set `GEMINI_API_KEY` in a `.env` file for AI-powered image descriptions via Gemini vision (~$0.001/image). See the [Website to Video](/guides/website-to-video#enriching-captures-with-gemini-vision) guide for details.
 
@@ -722,7 +722,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     | `--codex` | Install to Codex CLI (`~/.codex/skills/`) |
     | `--cursor` | Install to Cursor (`.cursor/skills/` in current project) |
 
-    Skills are fetched from GitHub and include composition authoring, Tailwind v4 browser-runtime guidance, GSAP animation patterns, Anime.js, CSS animation, Lottie, Three.js, and WAAPI adapter patterns, registry block/component wiring, and other domain-specific knowledge. The `init` command also offers to install skills automatically after scaffolding a project.
+    Skills are fetched from GitHub and include a lightweight HyperFrames video entry point with environment preflight, Tailwind v4 browser-runtime guidance, GSAP animation patterns, Anime.js, CSS animation, Lottie, Three.js, and WAAPI adapter patterns, registry block/component wiring, and other domain-specific knowledge. `hyperframes skills` installs with `--full-depth`, so HyperFrames-first installs also include optional full-production authoring skills from `optional-skills/`. The `init` command also offers to install skills automatically after scaffolding a project.
 
     #### Troubleshooting: `fatal: active post-checkout hook found during git clone`
 
@@ -736,10 +736,10 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     **Using `hyperframes skills` is already fine** — as of v0.4.5 the CLI sets `GIT_CLONE_PROTECTION_ACTIVE=0` on the child environment, which is the opt-in knob Git provides for exactly this case. You don't need to do anything.
 
-    **If you ran `npx skills add heygen-com/hyperframes` directly** (bypassing the HyperFrames CLI), set the env var yourself:
+    **If you ran `npx skills add heygen-com/hyperframes --full-depth` directly** (bypassing the HyperFrames CLI), set the env var yourself:
 
     ```bash
-    GIT_CLONE_PROTECTION_ACTIVE=0 npx skills add heygen-com/hyperframes
+    GIT_CLONE_PROTECTION_ACTIVE=0 npx skills add heygen-com/hyperframes --full-depth
     ```
 
     This is tracked in [GH #316](https://github.com/heygen-com/hyperframes/issues/316). An upstream fix in the `skills` CLI itself is the right long-term answer; until that lands, the env var is the correct workaround.

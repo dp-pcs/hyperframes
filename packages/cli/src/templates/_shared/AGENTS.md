@@ -5,10 +5,10 @@
 This project uses AI agent skills for framework-specific patterns. Install them if not already present:
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth
 ```
 
-Skills encode patterns like `window.__timelines` registration, `data-*` attribute semantics, Tailwind v4 browser-runtime styling for `--tailwind` projects, and shader-compatible CSS rules that are not in generic web docs. Using them produces correct compositions from the start.
+The default HyperFrames skill is lightweight: it checks the local environment before CLI use and keeps the core composition contract in context. Other installed skills encode patterns like `window.__timelines` registration, `data-*` attribute semantics, Tailwind v4 browser-runtime styling for `--tailwind` projects, and shader-compatible CSS rules that are not in generic web docs.
 
 ## Commands
 
