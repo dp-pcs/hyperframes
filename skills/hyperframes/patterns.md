@@ -1,5 +1,47 @@
 # Composition Patterns
 
+## Responsive Sizing (preferred for multi-ratio support)
+
+Use container-relative units (`cqw`/`cqh`) instead of pixels for positioning, sizing, and typography. The composition root is a CSS container — these units resolve to percentages of its dimensions, so the same CSS works at 16:9, 9:16, 1:1, or any custom ratio without layout breakage.
+
+```html
+<div
+  data-composition-id="responsive-demo"
+  data-width="1920"
+  data-height="1080"
+  data-duration="10"
+  style="position:relative; width:100%; height:100%; container-type:size; overflow:hidden; background:#0a0a0a;"
+>
+  <!-- Positioned at 5% from left, 10% from top — works at any ratio -->
+  <h1
+    style="position:absolute; left:5cqw; top:10cqh; font-size:4.5cqw; font-weight:700; color:#fff;"
+  >
+    Title Text
+  </h1>
+
+  <!-- Centered card — 60% of container width -->
+  <div
+    style="position:absolute; left:20cqw; top:30cqh; width:60cqw; padding:3cqw; background:rgba(255,255,255,0.08); border-radius:1.2cqw;"
+  >
+    <p style="font-size:1.8cqw; color:rgba(255,255,255,0.7);">Body text scales proportionally.</p>
+  </div>
+</div>
+```
+
+**When to use `cqw`/`cqh` vs `px`:**
+
+- Typography, spacing, border-radius, padding → `cqw` (scales with width)
+- Vertical positioning → `cqh` (scales with height)
+- Media elements that fill a region → `width:100%; height:100%` on the element, size the wrapper with `cqw`/`cqh`
+- Pixel values are fine for: border widths (`1px`, `2px`), box shadows, blur radii — things that shouldn't scale
+
+**GSAP animations with container units:** GSAP can animate to container-unit values directly:
+
+```js
+tl.from("#title", { y: "5cqh", opacity: 0, duration: 0.8 });
+tl.to("#card", { width: "80cqw", duration: 0.6 }, 0.3);
+```
+
 ## Picture-in-Picture (Video in a Frame)
 
 Animate a wrapper div for position/size. The video fills the wrapper. The wrapper has NO data attributes.

@@ -230,6 +230,7 @@ export function initSandboxRuntimeModular(): void {
     if (forcedHeight) rootEl.style.height = forcedHeight;
     if (forcedWidth) rootEl.style.setProperty("--comp-width", forcedWidth);
     if (forcedHeight) rootEl.style.setProperty("--comp-height", forcedHeight);
+    rootEl.style.containerType = "size";
   };
 
   const sanitizeCompositionDurationAttributes = () => {
