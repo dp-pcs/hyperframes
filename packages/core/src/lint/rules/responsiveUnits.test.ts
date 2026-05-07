@@ -43,24 +43,24 @@ describe("prefer_container_units", () => {
 
   it("ignores small px values (borders, shadows)", () => {
     const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
-      <div style="border-radius:2px; width:4px;">content</div>
+      <div style="width:4px; height:2px;">content</div>
     </div>`;
     const findings = findByCode(html, "prefer_container_units");
     expect(findings).toHaveLength(0);
   });
 
-  it("ignores composition root elements", () => {
+  it("skips composition root but flags children with px", () => {
     const html = `<div data-composition-id="test" data-width="1920" data-height="1080" style="width:1920px; height:1080px;">
-      <p>content</p>
+      <div style="left:200px;">child</div>
     </div>`;
     const findings = findByCode(html, "prefer_container_units");
-    expect(findings).toHaveLength(0);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].message).toContain("left");
   });
 
   it("ignores script, style, and audio tags", () => {
     const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
       <script style="width:500px;"></script>
-      <style>body { width: 1920px; }</style>
       <audio style="width:100px;" data-start="0" src="vo.mp3"></audio>
     </div>`;
     const findings = findByCode(html, "prefer_container_units");
@@ -73,5 +73,82 @@ describe("prefer_container_units", () => {
     </div>`;
     const findings = findByCode(html, "prefer_container_units");
     expect(findings[0].severity).toBe("info");
+  });
+
+  it("does not flag border-radius", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <div style="border-radius:16px;">content</div>
+    </div>`;
+    const findings = findByCode(html, "prefer_container_units");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("flags px in style blocks", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <style>.title { left: 96px; font-size: 64px; }</style>
+      <div class="title">content</div>
+    </div>`;
+    const findings = findByCode(html, "prefer_container_units");
+    expect(findings.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("returns no findings for HTML without a composition root", () => {
+    const html = `<div><h1 style="left:200px;">no composition</h1></div>`;
+    const findings = findByCode(html, "prefer_container_units");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("handles malformed data-width gracefully", () => {
+    const html = `<div data-composition-id="test" data-width="abc" data-height="1080">
+      <div style="left:96px;">content</div>
+    </div>`;
+    const findings = findByCode(html, "prefer_container_units");
+    expect(findings).toHaveLength(1);
+    expect(findings[0].message).toContain("5cqw");
+  });
+});
+
+describe("composition_root_missing_container_type", () => {
+  it("warns when cqw/cqh used but root lacks container-type", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <h1 style="font-size:3.33cqw;">Title</h1>
+    </div>`;
+    const findings = findByCode(html, "composition_root_missing_container_type");
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warning");
+  });
+
+  it("does not warn when root has container-type:size", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080" style="container-type:size;">
+      <h1 style="font-size:3.33cqw;">Title</h1>
+    </div>`;
+    const findings = findByCode(html, "composition_root_missing_container_type");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("does not warn when no cqw/cqh units are used", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <h1 style="font-size:64px;">Title</h1>
+    </div>`;
+    const findings = findByCode(html, "composition_root_missing_container_type");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("detects cqw/cqh in style blocks", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <style>.title { font-size: 3.33cqw; }</style>
+      <h1 class="title">Title</h1>
+    </div>`;
+    const findings = findByCode(html, "composition_root_missing_container_type");
+    expect(findings).toHaveLength(1);
+  });
+
+  it("accepts container-type from style block on root", () => {
+    const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+      <style>[data-composition-id="test"] { container-type: size; }</style>
+      <h1 style="font-size:3.33cqw;">Title</h1>
+    </div>`;
+    const findings = findByCode(html, "composition_root_missing_container_type");
+    expect(findings).toHaveLength(0);
   });
 });

@@ -1,17 +1,48 @@
+import postcss from "postcss";
 import type { LintContext, HyperframeLintFinding, OpenTag } from "../context";
 import { readAttr, truncateSnippet } from "../utils";
 
-const POSITION_PROPS =
-  /\b(left|right|top|bottom|width|height|font-size|padding|margin|gap|border-radius)\s*:\s*(\d+(?:\.\d+)?)px/gi;
+const HORIZONTAL_PROPS = new Set([
+  "left",
+  "right",
+  "width",
+  "max-width",
+  "min-width",
+  "padding-left",
+  "padding-right",
+  "margin-left",
+  "margin-right",
+  "gap",
+  "column-gap",
+  "font-size",
+]);
+
+const VERTICAL_PROPS = new Set([
+  "top",
+  "bottom",
+  "height",
+  "max-height",
+  "min-height",
+  "padding-top",
+  "padding-bottom",
+  "margin-top",
+  "margin-bottom",
+  "row-gap",
+]);
+
+const ALL_FLAGGED_PROPS = new Set([...HORIZONTAL_PROPS, ...VERTICAL_PROPS]);
+
+const PX_VALUE_PATTERN = /^(\d+(?:\.\d+)?)px$/;
+const CQ_UNIT_PATTERN = /\b\d+(?:\.\d+)?cq[wh]\b/;
+const CONTAINER_TYPE_PATTERN = /container-type\s*:\s*(size|inline-size)/;
+const MIN_PX_THRESHOLD = 4;
 
 function isCompositionRoot(tag: OpenTag): boolean {
   return Boolean(readAttr(tag.raw, "data-composition-id"));
 }
 
 function suggestUnit(prop: string): string {
-  const p = prop.toLowerCase();
-  if (p === "top" || p === "bottom" || p === "height") return "cqh";
-  return "cqw";
+  return VERTICAL_PROPS.has(prop) ? "cqh" : "cqw";
 }
 
 function pxToContainerUnit(
@@ -22,50 +53,132 @@ function pxToContainerUnit(
 ): string {
   const unit = suggestUnit(prop);
   const base = unit === "cqh" ? compHeight : compWidth;
-  if (base <= 0) return `${px}px`;
+  if (!Number.isFinite(base) || base <= 0) return `${px}px`;
   const value = (px / base) * 100;
   const rounded = Math.round(value * 100) / 100;
   return `${rounded}${unit}`;
 }
 
+function extractPxFindings(
+  style: string,
+  compWidth: number,
+  compHeight: number,
+  elementId: string | undefined,
+  snippet: string | undefined,
+): HyperframeLintFinding[] {
+  const findings: HyperframeLintFinding[] = [];
+  const pairs = style.split(";");
+  for (const pair of pairs) {
+    const colonIdx = pair.indexOf(":");
+    if (colonIdx === -1) continue;
+    const prop = pair.slice(0, colonIdx).trim().toLowerCase();
+    const value = pair.slice(colonIdx + 1).trim();
+    if (!ALL_FLAGGED_PROPS.has(prop)) continue;
+    const match = PX_VALUE_PATTERN.exec(value);
+    if (!match) continue;
+    const px = parseFloat(match[1] ?? "0");
+    if (px <= MIN_PX_THRESHOLD) continue;
+    const suggested = pxToContainerUnit(px, prop, compWidth, compHeight);
+    findings.push({
+      code: "prefer_container_units",
+      severity: "info",
+      message: `${prop}: ${px}px could be ${suggested} for aspect-ratio independence.`,
+      elementId,
+      fixHint: `Use container-relative units (cqw/cqh) instead of px. Ensure the composition root has container-type:size, then replace ${prop}: ${px}px with ${prop}: ${suggested}.`,
+      snippet,
+    });
+  }
+  return findings;
+}
+
 export const responsiveUnitRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
+  // prefer_container_units — suggest cqw/cqh for px layout properties
   (ctx) => {
     const findings: HyperframeLintFinding[] = [];
-    if (!ctx.rootTag) return findings;
+    if (!ctx.rootTag || !readAttr(ctx.rootTag.raw, "data-composition-id")) return findings;
 
-    const widthAttr = readAttr(ctx.rootTag.raw, "data-width");
-    const heightAttr = readAttr(ctx.rootTag.raw, "data-height");
-    const compWidth = parseInt(widthAttr || "1920", 10);
-    const compHeight = parseInt(heightAttr || "1080", 10);
+    const widthRaw = parseInt(readAttr(ctx.rootTag.raw, "data-width") || "", 10);
+    const heightRaw = parseInt(readAttr(ctx.rootTag.raw, "data-height") || "", 10);
+    const compWidth = Number.isFinite(widthRaw) && widthRaw > 0 ? widthRaw : 1920;
+    const compHeight = Number.isFinite(heightRaw) && heightRaw > 0 ? heightRaw : 1080;
 
     for (const tag of ctx.tags) {
       if (isCompositionRoot(tag)) continue;
       if (tag.name === "script" || tag.name === "style" || tag.name === "audio") continue;
-
       const style = readAttr(tag.raw, "style") || "";
       if (!style) continue;
+      const elementId = readAttr(tag.raw, "id") || undefined;
+      findings.push(
+        ...extractPxFindings(style, compWidth, compHeight, elementId, truncateSnippet(tag.raw)),
+      );
+    }
 
-      let match: RegExpExecArray | null;
-      POSITION_PROPS.lastIndex = 0;
-      while ((match = POSITION_PROPS.exec(style)) !== null) {
-        const prop = match[1] ?? "";
-        const px = parseFloat(match[2] ?? "0");
-        if (px <= 4) continue;
-
-        const elementId = readAttr(tag.raw, "id") || undefined;
-        const suggested = pxToContainerUnit(px, prop, compWidth, compHeight);
-
-        findings.push({
-          code: "prefer_container_units",
-          severity: "info",
-          message: `${prop}: ${px}px could be ${suggested} for aspect-ratio independence.`,
-          elementId,
-          fixHint: `Use container-relative units (cqw/cqh) instead of px for layout properties. Add container-type:size to the composition root, then replace ${prop}: ${px}px with ${prop}: ${suggested}.`,
-          snippet: truncateSnippet(tag.raw),
+    for (const block of ctx.styles) {
+      try {
+        const root = postcss.parse(block.content);
+        root.walkDecls((decl) => {
+          const prop = decl.prop.toLowerCase();
+          if (!ALL_FLAGGED_PROPS.has(prop)) return;
+          const match = PX_VALUE_PATTERN.exec(decl.value.trim());
+          if (!match) return;
+          const px = parseFloat(match[1] ?? "0");
+          if (px <= MIN_PX_THRESHOLD) return;
+          const suggested = pxToContainerUnit(px, prop, compWidth, compHeight);
+          findings.push({
+            code: "prefer_container_units",
+            severity: "info",
+            message: `${prop}: ${px}px could be ${suggested} for aspect-ratio independence.`,
+            fixHint: `Use container-relative units (cqw/cqh) instead of px. Ensure the composition root has container-type:size, then replace ${prop}: ${px}px with ${prop}: ${suggested}.`,
+          });
         });
+      } catch {
+        void 0;
       }
     }
 
     return findings;
+  },
+
+  // composition_root_missing_container_type — fires when cqw/cqh used but root lacks container-type
+  (ctx) => {
+    if (!ctx.rootTag || !readAttr(ctx.rootTag.raw, "data-composition-id")) return [];
+    const rootStyle = readAttr(ctx.rootTag.raw, "style") || "";
+    const hasContainerType = CONTAINER_TYPE_PATTERN.test(rootStyle);
+    if (hasContainerType) return [];
+
+    for (const block of ctx.styles) {
+      if (CONTAINER_TYPE_PATTERN.test(block.content)) return [];
+    }
+
+    let usesCqUnits = false;
+    for (const tag of ctx.tags) {
+      const style = readAttr(tag.raw, "style") || "";
+      if (CQ_UNIT_PATTERN.test(style)) {
+        usesCqUnits = true;
+        break;
+      }
+    }
+    if (!usesCqUnits) {
+      for (const block of ctx.styles) {
+        if (CQ_UNIT_PATTERN.test(block.content)) {
+          usesCqUnits = true;
+          break;
+        }
+      }
+    }
+
+    if (!usesCqUnits) return [];
+
+    return [
+      {
+        code: "composition_root_missing_container_type",
+        severity: "warning",
+        message:
+          "Composition uses cqw/cqh units but the root element is missing container-type:size. Container query units will resolve against the viewport instead of the composition dimensions.",
+        fixHint:
+          'Add style="container-type:size" to the composition root element (the one with data-composition-id).',
+        snippet: truncateSnippet(ctx.rootTag.raw),
+      },
+    ];
   },
 ];
