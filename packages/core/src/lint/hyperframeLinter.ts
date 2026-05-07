@@ -7,6 +7,7 @@ import { gsapRules } from "./rules/gsap";
 import { captionRules } from "./rules/captions";
 import { compositionRules } from "./rules/composition";
 import { adapterRules } from "./rules/adapters";
+import { responsiveUnitRules } from "./rules/responsiveUnits";
 
 const ALL_RULES = [
   ...coreRules,
@@ -15,6 +16,7 @@ const ALL_RULES = [
   ...captionRules,
   ...compositionRules,
   ...adapterRules,
+  ...responsiveUnitRules,
 ];
 
 export function lintHyperframeHtml(
