@@ -10,9 +10,20 @@
 
 **Split the work: spawn a sub-agent for each beat.** By this step your context is full of captured data, DESIGN.md, SCRIPT, STORYBOARD, and transcript. Building compositions on top of all that means the detailed rules below compete with thousands of tokens of prior work. Each sub-agent gets a fresh context focused on one beat — dramatically better output.
 
+**Before dispatching sub-agents, prepare two things:**
+
+**1. Build the @font-face block.** Sub-agents will not figure out font-file-to-family mapping on their own (proven by testing — 2 out of 3 sites ship with zero @font-face when agents are left to do it themselves). Build it for them:
+
+1. Read DESIGN.md to get font family names and weights
+2. Run `ls capture/assets/fonts/` to get the `.woff2` filenames
+3. Map each filename to its family and weight (e.g., `Inter-Medium.woff2` → Inter, weight 500)
+4. Write the complete `@font-face` CSS block and save it for pasting into every sub-agent prompt
+
+**2. Build the asset inventory for this beat.** For each beat, list the exact assets the storyboard assigned with their `../capture/assets/` paths. This is what gets pasted into the sub-agent prompt.
+
 **How to dispatch each sub-agent:**
 
-Pass file PATHS, not file contents. The #1 failure mode is reading an asset file and pasting its SVG/image data into the sub-agent prompt. The sub-agent then uses inline content instead of referencing the file on disk. Same with fonts — pass the local woff2 path, don't substitute Google Fonts.
+Pass file PATHS, not file contents. The #1 failure mode is reading an asset file and pasting its SVG/image data into the sub-agent prompt.
 
 ```
 Build the composition for beat 1. Save to compositions/beat-1-hook.html.
@@ -23,17 +34,26 @@ STORYBOARD for this beat:
 ASSETS — reference by path, do NOT read/inline the file contents:
 - Logo: <img src="../capture/assets/favicon.svg"> (top-left, 40x40px)
 - Hero image: <img src="../capture/assets/hero-bg.png"> (full-bleed background)
-- Noise texture: ../capture/assets/noise.png (full-frame overlay, 3% opacity)
 
-FONTS — use @font-face with the captured font files, NOT Google Fonts:
-@font-face { font-family: 'BrandFont'; src: url('../capture/assets/fonts/BrandFont-Regular.woff2'); }
+FONTS — paste this COMPLETE @font-face block into your <style> tag verbatim.
+Do NOT use fonts.googleapis.com. Do NOT skip any declarations:
+[paste the @font-face block you built above]
 
 Read DESIGN.md for exact colors and Do's/Don'ts.
-Read techniques.md for animation code patterns.
+Read techniques.md for animation code patterns and the easing vocabulary table.
 Load the `hyperframes` skill for composition structure rules.
 ```
 
-After each sub-agent finishes, verify the composition references `../capture/assets/` — if it used inline SVGs or Google Fonts instead of the captured files, fix it before moving on.
+**After each sub-agent finishes, run the lint gate:**
+
+```bash
+npx hyperframes lint compositions/beat-N-name.html
+```
+
+If the linter reports `font_family_without_font_face` or `google_fonts_import`, fix the composition before moving to the next beat. Also verify:
+
+1. The `@font-face` block is present in the `<style>` tag — if the sub-agent dropped it, paste it back in
+2. Every storyboard-assigned asset appears in the HTML — grep for each filename. Missing assets = broken beat, fix now.
 
 Load the `hyperframes` skill first — it has the rules for data attributes, timeline contracts, deterministic rendering, and layout. Everything below supplements those rules, not replaces them.
 
@@ -106,10 +126,14 @@ This step catches the two most common failures: compositions ending up text-only
 After building the composition, check WITH ACTUAL CODE:
 
 - [ ] Asset cross-reference passed (step 7 above — every assigned asset is in the HTML)
+- [ ] **Every `font-family` in CSS has a matching `@font-face`** with `src: url('../capture/assets/fonts/...')`. Linter: `font_family_without_font_face`.
+- [ ] **No Google Fonts.** No `fonts.googleapis.com` in `<link>` or `@import`. Linter: `google_fonts_import`.
 - [ ] Elements are where the storyboard says they should be (no misplacement)
 - [ ] No overlapping text (text covering text is always ugly)
-- [ ] Depth layers present (2+ layers minimum)
+- [ ] Depth layers present (background + midground + foreground — see Depth Layers section above)
 - [ ] Every visible element has mid-scene activity (not just entrance + exit)
+- [ ] **Animation density**: count the `tl.to()`, `tl.from()`, `tl.fromTo()`, and `tl.set()` calls. Production compositions average 30-70 GSAP calls. If yours has fewer than 15, the composition is under-animated — add more choreography, varied entrances, ambient loops, and exit transitions. For calibration, read `launch-video-2/compositions/act-1-cold-open.html` (72 GSAP operations in 12 seconds).
+- [ ] **Easing variety**: check that you used at least 3 different easing functions. If everything uses `power2.out`, the motion feels monotonous. See the easing vocabulary table in techniques.md for the full palette.
 - [ ] Font sizes above minimum (20px body text, 16px labels — sub-14px is unreadable after encoding)
 - [ ] No full-screen dark linear gradients (H.264 creates visible banding — use solid + localized radial glows)
 - [ ] Timeline registered: `window.__timelines["comp-id"] = tl`
@@ -130,6 +154,18 @@ Read the summaries. Fix every flag: offscreen, collision, invisible, pacing issu
 
 ---
 
+## Depth Layers
+
+Every composition needs at least three visual layers. Flat compositions (text on solid color) look like slide decks.
+
+| Layer          | z-index range | What goes here                                    | Examples                                                                       |
+| -------------- | ------------- | ------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **Background** | 0-10          | Ambient treatment that fills the frame            | Radial gradient glow, subtle grid, slow-drifting particles, blurred screenshot |
+| **Midground**  | 10-50         | Main content — the elements the viewer focuses on | Product screenshots, text blocks, logos, data cards                            |
+| **Foreground** | 50-100        | Texture and atmosphere overlaid on everything     | Grain texture (opacity 0.03-0.06), floating particles, light leaks, vignette   |
+
+The background and foreground layers are what separate motion graphics from slide decks. The midground is the content; the other two are the production quality. Choose what fits the brand — a tech brand might use a dot grid background + particle foreground; a luxury brand might use a radial glow + grain.
+
 ## Asset Presentation
 
 Never embed a raw flat image. Every image must have motion treatment:
@@ -139,6 +175,7 @@ Never embed a raw flat image. Every image must have motion treatment:
 - **Device frame**: Wrap in a laptop/phone shape using CSS `border-radius` and `box-shadow`
 - **Floating UI**: Extract a key element and animate it at a different z-depth for parallax
 - **Scroll reveal**: Clip the image to a viewport window and animate `y` position
+- **VFX block**: If `html-in-canvas` blocks are installed (`ls skills/` or check registry), use iPhone/MacBook mockups or liquid glass effects for hero treatments. Run `npx hyperframes add html-in-canvas` to install them.
 
 ---
 
@@ -148,7 +185,29 @@ In the root `index.html`:
 
 - **Narration**: `<audio id="narration" src="narration.wav" data-start="0" data-duration="..." data-track-index="0" data-volume="1">`
 - **Underscore/music** (if storyboard specifies): `<audio id="underscore" src="underscore.mp3" data-start="0" data-duration="..." data-track-index="3" data-volume="0.15">`
-- **SFX** (if storyboard specifies): individual `<audio>` elements at specific `data-start` timestamps
+- **SFX**: If `sfx/` directory exists in the project, wire sound effects at beat boundaries. Each SFX gets its own track index (41+) to avoid conflicts:
+
+```html
+<audio
+  id="sfx-whoosh-1"
+  src="sfx/whoosh.mp3"
+  data-start="BEAT2_START"
+  data-duration="1.5"
+  data-track-index="41"
+  data-volume="0.5"
+></audio>
+<audio
+  id="sfx-pop-1"
+  src="sfx/pop.mp3"
+  data-start="REVEAL_TIME"
+  data-duration="0.8"
+  data-track-index="42"
+  data-volume="0.4"
+></audio>
+```
+
+SFX timing: whoosh 0.1s before a beat transition, pop/click at the moment an element appears, typing aligned to character animation starts, impact on stat counter or hero text landing. Volume 0.2-0.5 — never compete with VO.
+
 - **Captions** (optional — only if user requests): sub-composition on a parallel track. Skip unless explicitly asked for.
 
 ---

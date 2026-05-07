@@ -376,6 +376,27 @@ Keep text/logo intensity subtle (≤5% scale, ≤30% glow) — audio-reactive mo
 
 ---
 
+## Easing Vocabulary
+
+GSAP offers a deep easing library. Every composition should use at least 3 different easings — using `power2.out` for everything produces flat, monotonous motion. Think of easings as tone of voice: a video that only whispers is boring; one that varies between whisper, normal, and punch is engaging.
+
+**The full palette** (each family has `.in`, `.out`, `.inOut` variants):
+
+| Family               | Character                                                                    | Typical use                                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `power1`–`power4`    | Gentle (1) to aggressive (4) acceleration curves                             | General purpose. power2 is the workhorse, power4 for dramatic snaps                                |
+| `back(N)`            | Overshoot then settle. N controls how far past the target (1=subtle, 4=wild) | Logo reveals, badge pops, card entrances. `back.out(2.5)` for playful, `back.out(1.2)` for elegant |
+| `elastic(amp, freq)` | Spring bounce. amp=magnitude, freq=oscillation speed                         | Panel scatter, energetic drops, fun reveals                                                        |
+| `bounce`             | Ball-drop bouncing                                                           | Physical interactions, icons landing, score counters                                               |
+| `expo`               | Extreme acceleration curve (much steeper than power4)                        | Premium/luxury reveals, dramatic entrances                                                         |
+| `sine`               | Smooth, organic, no hard edges                                               | Ambient float, breathing, Ken Burns, anything that loops. `.inOut` for yoyo motion                 |
+| `circ`               | Circular acceleration (starts very fast, ends very gentle or vice versa)     | Camera moves, scene transitions, orbital motion                                                    |
+| `steps(N)`           | Discrete N-step jumps, no interpolation                                      | Typing effects, cursor blink, counter ticks, retro/digital aesthetics                              |
+
+**Mood mapping:** Match easing intensity to the beat's emotional content. A calm brand insight gets `sine.inOut` drifts. A big stat reveal gets `power4.out` snap. A playful feature showcase gets `back.out(2)` bounces. The storyboard's mood description should guide easing choice.
+
+---
+
 ## When to Use What
 
 | Video energy                   | Techniques to combine                                           |
