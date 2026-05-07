@@ -79,6 +79,11 @@ export function refreshRuntimeMediaCache(params?: {
 // inactive so the next activation gets a hard resync on its first tick.
 const lastOffset = new WeakMap<HTMLMediaElement, number>();
 
+// Per-element consecutive over-threshold drift sample counter for strict mode.
+// Mirrors the consecutive-sample gating from the parent-proxy path to avoid
+// reacting to single-frame jitter spikes.
+const strictDriftSamples = new WeakMap<HTMLMediaElement, number>();
+
 // Elements that had a seek past their buffered range (common with streaming
 // MP3 where preload="metadata" only fetches the first few seconds). After
 // setting preload="auto" and calling load(), we mark the element so subsequent
@@ -130,6 +135,13 @@ export function syncRuntimeMedia(params: {
    * outbound message; further invocations are suppressed by the caller.
    */
   onAutoplayBlocked?: () => void;
+  /**
+   * Force a hard media sync on this tick, bypassing the normal drift
+   * thresholds. Set this on play, pause, seek, and playback-rate changes
+   * so that accumulated sub-threshold drift from pause/play toggling is
+   * immediately corrected instead of persisting until catastrophic (3s).
+   */
+  forceSync?: boolean;
 }): void {
   // Either flag silences output. Combined up front so the per-clip loop is
   // a single branch instead of two.
@@ -165,26 +177,23 @@ export function syncRuntimeMedia(params: {
         // ignore unsupported playbackRate
         swallow("runtime.media.site1", err);
       }
-      // Drift correction. Forcing `el.currentTime = relTime` every frame
-      // causes an audible seek+rebuffer hiccup (readyState drops briefly).
+      // Drift correction. Two tiers:
       //
-      // We only want to correct drift that came from an *event* — an explicit
-      // user seek, a sub-composition activation, or a timeline jump — not
-      // drift that grew naturally from initial-buffer latency. Telling them
-      // apart by timing: scrubs move the timeline-to-media offset by seconds
-      // in a single tick; buffer catch-up grows the offset by ~one frame
-      // (<20ms) per tick.
+      // 1. Hard sync (0.5s threshold): fires on first tick, timeline jumps,
+      //    catastrophic drift (>3s), or explicit forceSync. Unconditional
+      //    seek — accepts the brief rebuffer cost.
       //
-      // The first tick a clip is active we don't have a previous offset to
-      // compare against — treat that as a hard resync so sub-compositions
-      // with non-zero `mediaStart` land on the right frame.
+      // 2. Strict sync (80ms threshold, consecutive-sample gated): catches
+      //    accumulated drift from pause/play toggling that the hard sync
+      //    misses. Two consecutive over-threshold samples required to avoid
+      //    reacting to single-frame jitter. Mirrors the parent-proxy path's
+      //    MIRROR_DRIFT_THRESHOLD_SECONDS strategy.
       //
-      // Tradeoff: the 3 s catastrophic-drift valve means an unnoticed
-      // steady-state drift can accumulate up to ~3 s before we correct.
-      // For music / motion graphics this is inaudible; for lip-synced
-      // dialogue it is not. If that becomes a target use case, switch to
-      // a short-window tight threshold (e.g. tighten to 0.15 s when the
-      // last play/pause transition was >500 ms ago).
+      // Together, these ensure narration stays within ~80ms of the visual
+      // timeline without introducing audible seek hiccups on every frame.
+      const STRICT_DRIFT_THRESHOLD = 0.08;
+      const STRICT_REQUIRED_SAMPLES = 2;
+
       const currentElTime = el.currentTime || 0;
       const drift = Math.abs(currentElTime - relTime);
       const offset = relTime - currentElTime;
@@ -193,7 +202,33 @@ export function syncRuntimeMedia(params: {
       const firstTickOfClip = prevOffset === undefined;
       const offsetJumped = !firstTickOfClip && Math.abs(offset - prevOffset!) > 0.5;
       const catastrophicDrift = drift > 3;
-      if (drift > 0.5 && (firstTickOfClip || offsetJumped || catastrophicDrift)) {
+      const hardSync = drift > 0.5 && (firstTickOfClip || offsetJumped || catastrophicDrift);
+      // Strict sync: tighter threshold with consecutive-sample gating.
+      // Catches accumulated drift from repeated pause/play that never
+      // crosses the 0.5s hard-sync threshold.
+      //
+      // Guard: only apply strict sync when offset has stabilized (not
+      // growing). During initial buffering, the offset grows ~16ms per
+      // tick as the timeline advances while media stays at 0. That's
+      // expected catch-up, not accumulated drift. Accumulated drift from
+      // pause/play toggling shows up as a stable, non-zero offset.
+      // Offset change < 0.04s/tick = "stabilized". At 60fps, each tick
+      // advances ~16ms, so during buffering (media stuck at 0, timeline
+      // advancing) the offset grows by ~16ms/tick. For accumulated drift
+      // (both advancing, offset persists), the delta is near 0.
+      const offsetStabilized = prevOffset !== undefined && Math.abs(offset - prevOffset) < 0.004;
+      let strictSync = false;
+      if (!hardSync && !firstTickOfClip && offsetStabilized && drift > STRICT_DRIFT_THRESHOLD) {
+        const samples = (strictDriftSamples.get(el) ?? 0) + 1;
+        strictDriftSamples.set(el, samples);
+        if (samples >= STRICT_REQUIRED_SAMPLES) {
+          strictSync = true;
+          strictDriftSamples.set(el, 0);
+        }
+      } else if (drift <= STRICT_DRIFT_THRESHOLD) {
+        strictDriftSamples.set(el, 0);
+      }
+      if (hardSync || strictSync || (params.forceSync && drift > 0.02)) {
         try {
           el.currentTime = relTime;
         } catch (err) {
@@ -258,6 +293,7 @@ export function syncRuntimeMedia(params: {
     // Clip left its active window — drop the offset baseline so the next
     // activation (e.g. re-entering a sub-composition) gets a hard resync.
     lastOffset.delete(el);
+    strictDriftSamples.delete(el);
     seekLoadRetried.delete(el);
     if (!el.paused) el.pause();
   }

@@ -350,15 +350,21 @@ describe("syncRuntimeMedia", () => {
     expect(clip.el.currentTime).toBe(5);
   });
 
-  it("does not seek on sub-0.5s drift in steady-state — avoids pause/play hiccups", () => {
+  it("corrects stable sub-0.5s drift after consecutive over-threshold ticks", () => {
     const clip = createMockClip({ start: 0, end: 10, mediaStart: 0 });
     Object.defineProperty(clip.el, "currentTime", { value: 5.4, writable: true });
-    // Establish a baseline offset of 0 with a steady-state tick first.
+    // Establish a baseline offset of 0 with a steady-state tick.
     syncRuntimeMedia({ clips: [clip], timeSeconds: 5.4, playing: true, playbackRate: 1 });
-    // Now a small transient drift: timeline backs up 0.4s (typical of
-    // pause/play ordering). Below the 0.5s threshold — don't seek.
+    // Drift appears: timeline at 5, media at 5.4, offset jumps from 0 to -0.4.
+    // This tick establishes the new offset — strict sync counter hasn't started.
     syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
     expect(clip.el.currentTime).toBe(5.4);
+    // Offset stabilizes at -0.4: strict sync sample 1.
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
+    expect(clip.el.currentTime).toBe(5.4);
+    // Strict sync sample 2 — threshold met, correction fires.
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
+    expect(clip.el.currentTime).toBe(5);
   });
 
   it("does not force audio forward while it's still buffering (gradual drift growth)", () => {
@@ -376,6 +382,23 @@ describe("syncRuntimeMedia", () => {
       syncRuntimeMedia({ clips: [clip], timeSeconds: t, playing: true, playbackRate: 1 });
     }
     expect(clip.el.currentTime).toBe(0);
+  });
+
+  it("forceSync corrects any drift above 20ms immediately", () => {
+    const clip = createMockClip({ start: 0, end: 10, mediaStart: 0 });
+    Object.defineProperty(clip.el, "currentTime", { value: 5.1, writable: true });
+    // Steady-state baseline.
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5.1, playing: true, playbackRate: 1 });
+    // 100ms drift — normally below the 0.5s hard-sync threshold and would
+    // need 2 consecutive strict-sync samples. With forceSync, corrects immediately.
+    syncRuntimeMedia({
+      clips: [clip],
+      timeSeconds: 5,
+      playing: true,
+      playbackRate: 1,
+      forceSync: true,
+    });
+    expect(clip.el.currentTime).toBe(5);
   });
 
   it("re-syncs on a scrub — offset jumps in one tick", () => {

@@ -1297,6 +1297,8 @@ export function initSandboxRuntimeModular(): void {
         return sourceDuration ?? hostRemaining;
       },
     });
+    const forceSync = state.mediaForceSyncNextTick;
+    if (forceSync) state.mediaForceSyncNextTick = false;
     syncRuntimeMedia({
       clips: cache.mediaClips,
       timeSeconds: state.currentTime,
@@ -1305,6 +1307,7 @@ export function initSandboxRuntimeModular(): void {
       outputMuted: state.mediaOutputMuted,
       userMuted: state.bridgeMuted,
       userVolume: state.bridgeVolume,
+      forceSync,
       onAutoplayBlocked: () => {
         if (state.mediaAutoplayBlockedPosted) return;
         state.mediaAutoplayBlockedPosted = true;
@@ -1481,6 +1484,7 @@ export function initSandboxRuntimeModular(): void {
     } else {
       state.playbackRate = Math.max(0.1, Math.min(5, parsed));
     }
+    state.mediaForceSyncNextTick = true;
     if (state.capturedTimeline && typeof state.capturedTimeline.timeScale === "function") {
       state.capturedTimeline.timeScale(state.playbackRate);
     }
@@ -1505,6 +1509,7 @@ export function initSandboxRuntimeModular(): void {
       (window.__timelines ?? {}) as Record<string, RuntimeTimelineLike | undefined>,
     getIsPlaying: () => state.isPlaying,
     setIsPlaying: (playing) => {
+      if (state.isPlaying !== playing) state.mediaForceSyncNextTick = true;
       state.isPlaying = playing;
     },
     getPlaybackRate: () => state.playbackRate,
@@ -1512,6 +1517,7 @@ export function initSandboxRuntimeModular(): void {
     getCanonicalFps: () => state.canonicalFps,
     onSyncMedia: (timeSeconds, playing) => {
       state.currentTime = Math.max(0, Number(timeSeconds) || 0);
+      if (state.isPlaying !== playing) state.mediaForceSyncNextTick = true;
       state.isPlaying = playing;
       syncMediaForCurrentState();
     },

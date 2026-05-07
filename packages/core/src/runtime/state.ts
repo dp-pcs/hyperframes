@@ -26,6 +26,13 @@ export type RuntimeState = {
    * takes over playback and further rejections are the same problem.
    */
   mediaAutoplayBlockedPosted: boolean;
+  /**
+   * One-shot flag: force a hard media sync on the next tick. Set on
+   * play/pause/seek/rate transitions to immediately correct any
+   * accumulated sub-threshold drift from pause/play toggling.
+   * Consumed (reset to false) by `syncMediaForCurrentState`.
+   */
+  mediaForceSyncNextTick: boolean;
   playbackRate: number;
   bridgeLastPostedFrame: number;
   bridgeLastPostedAt: number;
@@ -82,6 +89,7 @@ export function createRuntimeState(): RuntimeState {
     bridgeVolume: 1,
     mediaOutputMuted: false,
     mediaAutoplayBlockedPosted: false,
+    mediaForceSyncNextTick: false,
     playbackRate: 1,
     bridgeLastPostedFrame: -1,
     bridgeLastPostedAt: 0,
