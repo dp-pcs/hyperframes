@@ -34,20 +34,37 @@ async function getSharedBrowser(): Promise<import("puppeteer-core").Browser | nu
   if (_browser?.connected) return _browser;
   if (_browserLaunchPromise) return _browserLaunchPromise;
   _browserLaunchPromise = (async () => {
-    const puppeteer = await import("puppeteer-core");
-    const executablePath = [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium-browser",
-    ].find((p) => existsSync(p));
-    if (!executablePath) return null;
-    _browser = await puppeteer.default.launch({
-      headless: true,
-      executablePath,
-      args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-    });
-    _browserLaunchPromise = null;
-    return _browser;
+    try {
+      const puppeteer = await import("puppeteer-core");
+      const executablePath = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+      ].find((p) => existsSync(p));
+      if (!executablePath) return null;
+      _browser = await puppeteer.default.launch({
+        headless: true,
+        executablePath,
+        // 10s is enough for any healthy local launch; the default 30s lets a
+        // wedged handshake stall every pending thumbnail before failing.
+        timeout: 10_000,
+        args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      });
+      return _browser;
+    } catch (err) {
+      // Without this guard, a launch failure (timeout, missing libs, etc.)
+      // surfaces as an unhandled rejection through puppeteer's internal RxJS
+      // chain and crashes the Vite dev server. Log + degrade gracefully —
+      // the thumbnail route returns a 500 and the rest of the studio keeps
+      // working.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Studio] puppeteer launch failed — thumbnails disabled: ${msg}`);
+      return null;
+    } finally {
+      // Reset on every outcome so a transient failure doesn't poison the
+      // singleton: subsequent thumbnail requests can retry the launch.
+      _browserLaunchPromise = null;
+    }
   })();
   return _browserLaunchPromise;
 }
@@ -115,7 +132,13 @@ function createViteAdapter(dataDir: string, server: ViteDevServer): StudioApiAda
           quality: "draft" | "standard" | "high";
           format: string;
           renderBodyScripts?: string[];
-          outputResolution?: "landscape" | "portrait" | "landscape-4k" | "portrait-4k";
+          outputResolution?:
+            | "landscape"
+            | "portrait"
+            | "landscape-4k"
+            | "portrait-4k"
+            | "square"
+            | "square-4k";
         }) => unknown;
         executeRenderJob: (
           job: unknown,
@@ -282,7 +305,10 @@ function createViteAdapter(dataDir: string, server: ViteDevServer): StudioApiAda
           const { createRenderJob, executeRenderJob } = await getProducerModule();
           const renderBodyScripts = createStudioDevRenderBodyScripts(opts.project.dir);
           const job = createRenderJob({
-            fps: opts.fps as 24 | 30 | 60,
+            // opts.fps is already an Fps rational — the studio-api route
+            // normalized any wire-format `number | string` into the structured
+            // form before calling this adapter.
+            fps: opts.fps,
             quality: opts.quality as "draft" | "standard" | "high",
             format: opts.format,
             ...(renderBodyScripts.length > 0 ? { renderBodyScripts } : {}),

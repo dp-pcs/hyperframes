@@ -2,6 +2,21 @@ import { memo, useState, useRef, useEffect } from "react";
 import { RenderQueueItem } from "./RenderQueueItem";
 import type { RenderJob, ResolutionPreset } from "./useRenderQueue";
 
+export interface CompositionDimensions {
+  width: number;
+  height: number;
+}
+
+const RESOLUTION_OPTIONS: { value: ResolutionPreset | "auto"; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "landscape", label: "1080p" },
+  { value: "landscape-4k", label: "4K" },
+  { value: "portrait", label: "1080p ↕" },
+  { value: "portrait-4k", label: "4K ↕" },
+  { value: "square", label: "Square" },
+  { value: "square-4k", label: "Square 4K" },
+];
+
 type StartRenderHandler = (
   format: "mp4" | "webm" | "mov",
   quality: "draft" | "standard" | "high",
@@ -16,37 +31,13 @@ interface RenderQueueProps {
   onClearCompleted: () => void;
   onStartRender: StartRenderHandler;
   isRendering: boolean;
+  /**
+   * Authored dimensions of the active composition. Used to pick the
+   * matching preset (landscape / portrait / square) when the user selects
+   * a 1080p or 4K scale. `null` falls back to landscape (legacy default).
+   */
+  compositionDimensions?: CompositionDimensions | null;
 }
-
-// Indexing the table by `ResolutionPreset | "auto"` makes adding a new preset
-// to `core.types` (e.g. an 8K row) a TypeScript error here instead of a
-// silently missing dropdown entry. Order is fixed by the array below.
-const RESOLUTION_LABELS: Record<ResolutionPreset | "auto", { label: string; title: string }> = {
-  auto: { label: "Auto", title: "Render at the composition's authored resolution" },
-  landscape: { label: "1080p ↔", title: "1920×1080 landscape" },
-  portrait: { label: "1080p ↕", title: "1080×1920 portrait" },
-  "landscape-4k": {
-    label: "4K ↔",
-    title: "3840×2160 — supersamples a 1080p composition via Chrome DPR. Slower, larger files.",
-  },
-  "portrait-4k": {
-    label: "4K ↕",
-    title: "2160×3840 — supersamples a 1080p portrait composition via Chrome DPR.",
-  },
-};
-
-const RESOLUTION_OPTION_ORDER: (ResolutionPreset | "auto")[] = [
-  "auto",
-  "landscape",
-  "portrait",
-  "landscape-4k",
-  "portrait-4k",
-];
-
-const RESOLUTION_OPTIONS = RESOLUTION_OPTION_ORDER.map((value) => ({
-  value,
-  ...RESOLUTION_LABELS[value],
-}));
 
 const FORMAT_INFO: Record<"mp4" | "webm" | "mov", { label: string; desc: string }> = {
   mp4: { label: "MP4", desc: "Best for general use. Smallest file, universal playback." },
@@ -150,12 +141,11 @@ function FormatExportButton({
         value={resolution}
         onChange={(e) => setResolution(e.target.value as ResolutionPreset | "auto")}
         disabled={isRendering}
-        title={RESOLUTION_OPTIONS.find((r) => r.value === resolution)?.title}
         className="h-5 px-1 text-[10px] rounded-l bg-neutral-800 border border-neutral-700 text-neutral-300 outline-none disabled:opacity-50"
       >
-        {RESOLUTION_OPTIONS.map((r) => (
-          <option key={r.value} value={r.value} title={r.title}>
-            {r.label}
+        {RESOLUTION_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
           </option>
         ))}
       </select>
