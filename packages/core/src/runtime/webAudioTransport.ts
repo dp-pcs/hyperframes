@@ -1,5 +1,10 @@
 import { swallow } from "./diagnostics";
 
+function normalizeRate(rate: number): number {
+  if (!Number.isFinite(rate) || rate <= 0) return 1;
+  return rate;
+}
+
 export type ScheduledSource = {
   el: HTMLMediaElement;
   sourceNode: AudioBufferSourceNode;
@@ -15,7 +20,12 @@ export class WebAudioTransport {
   private _bufferCache = new Map<string, AudioBuffer>();
   private _activeSources: ScheduledSource[] = [];
   private _masterGain: GainNode | null = null;
-  private _scheduleOffset = 0;
+  // Composition-time reference frame: at AudioContext time `_rateAnchorCtx`,
+  // composition time was `_rateAnchorComp`, and time has been advancing at
+  // `_rate` composition-seconds per wallclock-second since.
+  private _rateAnchorCtx = 0;
+  private _rateAnchorComp = 0;
+  private _rate = 1;
   private _paused = true;
   private _playGeneration = 0;
 
@@ -36,7 +46,7 @@ export class WebAudioTransport {
 
   getTime(): number {
     if (!this._ctx || this._paused) return -1;
-    return this._ctx.currentTime - this._scheduleOffset;
+    return this._rateAnchorComp + (this._ctx.currentTime - this._rateAnchorCtx) * this._rate;
   }
 
   async decodeAudioElement(el: HTMLMediaElement): Promise<AudioBuffer | null> {
@@ -73,6 +83,7 @@ export class WebAudioTransport {
     compositionTime: number,
     volume: number,
     generation: number,
+    rate = 1,
   ): Promise<ScheduledSource | null> {
     if (!this._ctx || !this._masterGain) return null;
     if (generation !== this._playGeneration) return null;
@@ -83,8 +94,11 @@ export class WebAudioTransport {
       }
       if (generation !== this._playGeneration) return null;
 
+      const safeRate = normalizeRate(rate);
+
       const sourceNode = this._ctx.createBufferSource();
       sourceNode.buffer = buffer;
+      sourceNode.playbackRate.value = safeRate;
 
       const gainNode = this._ctx.createGain();
       gainNode.gain.value = volume;
@@ -93,12 +107,20 @@ export class WebAudioTransport {
 
       const elapsed = compositionTime - compositionStart;
       const scheduledAt = this._ctx.currentTime;
-      this._scheduleOffset = scheduledAt - compositionTime;
+      this._rate = safeRate;
+      this._rateAnchorCtx = scheduledAt;
+      this._rateAnchorComp = compositionTime;
 
       if (elapsed >= 0) {
+        // Audio that has already been "playing" for `elapsed` composition
+        // seconds at rate r has advanced exactly `elapsed` buffer seconds —
+        // wallclock elapsed is `elapsed / r` and the source plays at rate r,
+        // so buffer advance = (elapsed / r) × r = elapsed.
         sourceNode.start(0, elapsed + mediaStart);
       } else {
-        const delay = -elapsed;
+        // Future clip: composition time will reach `compositionStart` after
+        // `-elapsed` composition seconds, which is `-elapsed / r` wallclock.
+        const delay = -elapsed / safeRate;
         sourceNode.start(scheduledAt + delay, mediaStart);
       }
 
@@ -120,6 +142,33 @@ export class WebAudioTransport {
     } catch (err) {
       swallow("webAudioTransport.schedule", err);
       return null;
+    }
+  }
+
+  /**
+   * Change the playback rate of every currently-active source in place.
+   *
+   * Also rebases the composition-time reference frame so `getTime()` keeps
+   * returning the same value across the rate change (i.e. the clock doesn't
+   * jump, it just advances at a different slope from here on).
+   *
+   * Note: sources scheduled to start in the future via `sourceNode.start(when)`
+   * keep their original wallclock start time. Callers that need rate-correct
+   * future-start times should `stopAll()` and reschedule.
+   */
+  setRate(rate: number): void {
+    const safeRate = normalizeRate(rate);
+    if (this._ctx && !this._paused) {
+      this._rateAnchorComp = this.getTime();
+      this._rateAnchorCtx = this._ctx.currentTime;
+    }
+    this._rate = safeRate;
+    for (const source of this._activeSources) {
+      try {
+        source.sourceNode.playbackRate.value = safeRate;
+      } catch (err) {
+        swallow("webAudioTransport.setRate", err);
+      }
     }
   }
 

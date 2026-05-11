@@ -1589,6 +1589,7 @@ export function initSandboxRuntimeModular(): void {
     onSetPlaybackRate: (rate) => {
       applyPlaybackRate(rate);
       if (state.transportClock) state.transportClock.setRate(state.playbackRate);
+      webAudio.setRate(state.playbackRate);
     },
     onEnablePickMode: () => picker.enablePickMode(),
     onDisablePickMode: () => picker.disablePickMode(),
@@ -1858,6 +1859,7 @@ export function initSandboxRuntimeModular(): void {
             clock.now(),
             vol * state.bridgeVolume,
             gen,
+            state.playbackRate,
           );
         });
       }
