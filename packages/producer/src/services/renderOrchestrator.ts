@@ -45,10 +45,6 @@ import {
   type CaptureSession,
   type BeforeCaptureHook,
   createVideoFrameInjector,
-  encodeFramesFromDir,
-  encodeFramesChunkedConcat,
-  muxVideoWithAudio,
-  applyFaststart,
   getEncoderPreset,
   calculateOptimalWorkers,
   distributeFrames,
@@ -86,6 +82,8 @@ import { runAudioStage } from "./render/stages/audioStage.js";
 import { runCaptureStage } from "./render/stages/captureStage.js";
 import { runCaptureStreamingStage } from "./render/stages/captureStreamingStage.js";
 import { runCaptureHdrStage } from "./render/stages/captureHdrStage.js";
+import { runEncodeStage } from "./render/stages/encodeStage.js";
+import { runAssembleStage } from "./render/stages/assembleStage.js";
 
 /**
  * Wrap a cleanup operation so it never throws, but logs any failure.
@@ -2436,78 +2434,30 @@ export async function executeRenderJob(
 
         perfStages.captureMs = Date.now() - stage4Start;
 
-        if (isPngSequence) {
-          // ── Stage 5 (png-sequence): copy captured PNGs to outputDir ──────
-          // No encoder, no mux, no faststart — captured frames already carry
-          // alpha and are the deliverable. We rename to `frame_NNNNNN.png`
-          // (zero-padded) so consumers (After Effects, Nuke, Fusion, ffmpeg
-          // image2 demuxer) can globbed-import without surprises.
-          const stage5Start = Date.now();
-          updateJobStatus(job, "encoding", "Writing PNG sequence", 75, onProgress);
-          if (!existsSync(outputPath)) mkdirSync(outputPath, { recursive: true });
-          const captured = readdirSync(framesDir)
-            .filter((name) => name.endsWith(".png"))
-            .sort();
-          if (captured.length === 0) {
-            throw new Error(
-              `[Render] png-sequence output requested but no PNGs were captured to ${framesDir}`,
-            );
-          }
-          captured.forEach((name, i) => {
-            const dst = join(outputPath, `frame_${String(i + 1).padStart(6, "0")}.png`);
-            copyFileSync(join(framesDir, name), dst);
-          });
-          if (hasAudio && existsSync(audioOutputPath)) {
-            // Sidecar audio for callers that need to re-mux later. png-sequence
-            // has no container of its own, so this is the only place audio
-            // can land alongside the frames.
-            copyFileSync(audioOutputPath, join(outputPath, "audio.aac"));
-            log.info(`[Render] png-sequence: audio.aac sidecar written to ${outputPath}/audio.aac`);
-          }
-          perfStages.encodeMs = Date.now() - stage5Start;
-        } else {
-          // ── Stage 5: Encode ───────────────────────────────────────────────
-          const stage5Start = Date.now();
-          updateJobStatus(job, "encoding", "Encoding video", 75, onProgress);
-
-          const frameExt = needsAlpha ? "png" : "jpg";
-          const framePattern = `frame_%06d.${frameExt}`;
-          const encoderOpts = {
-            fps: job.config.fps,
-            width,
-            height,
-            codec: preset.codec,
-            preset: preset.preset,
-            quality: effectiveQuality,
-            bitrate: effectiveBitrate,
-            pixelFormat: preset.pixelFormat,
-            useGpu: job.config.useGpu,
-            hdr: preset.hdr,
-          };
-          const encodeResult = enableChunkedEncode
-            ? await encodeFramesChunkedConcat(
-                framesDir,
-                framePattern,
-                videoOnlyPath,
-                encoderOpts,
-                chunkedEncodeSize,
-                abortSignal,
-              )
-            : await encodeFramesFromDir(
-                framesDir,
-                framePattern,
-                videoOnlyPath,
-                encoderOpts,
-                abortSignal,
-              );
-          assertNotAborted();
-
-          if (!encodeResult.success) {
-            throw new Error(`Encoding failed: ${encodeResult.error}`);
-          }
-
-          perfStages.encodeMs = Date.now() - stage5Start;
-        }
+        const encodeRes = await runEncodeStage({
+          job,
+          log,
+          outputPath,
+          framesDir,
+          videoOnlyPath,
+          width,
+          height,
+          fps: job.config.fps,
+          needsAlpha,
+          hasAudio,
+          audioOutputPath,
+          isPngSequence,
+          preset,
+          effectiveQuality,
+          effectiveBitrate,
+          useGpu: job.config.useGpu,
+          enableChunkedEncode,
+          chunkedEncodeSize,
+          abortSignal,
+          assertNotAborted,
+          onProgress,
+        });
+        perfStages.encodeMs = encodeRes.encodeMs;
       }
     } // end SDR capture paths block
 
@@ -2528,29 +2478,17 @@ export async function executeRenderJob(
     // Skipped for png-sequence — there is no encoded video to mux/faststart.
     // The frames were copied directly to outputPath in Stage 5.
     if (!isPngSequence) {
-      const stage6Start = Date.now();
-      updateJobStatus(job, "assembling", "Assembling final video", 90, onProgress);
-
-      if (hasAudio) {
-        const muxResult = await muxVideoWithAudio(
-          videoOnlyPath,
-          audioOutputPath,
-          outputPath,
-          abortSignal,
-        );
-        assertNotAborted();
-        if (!muxResult.success) {
-          throw new Error(`Audio muxing failed: ${muxResult.error}`);
-        }
-      } else {
-        const faststartResult = await applyFaststart(videoOnlyPath, outputPath, abortSignal);
-        assertNotAborted();
-        if (!faststartResult.success) {
-          throw new Error(`Faststart failed: ${faststartResult.error}`);
-        }
-      }
-
-      perfStages.assembleMs = Date.now() - stage6Start;
+      const assembleRes = await runAssembleStage({
+        job,
+        videoOnlyPath,
+        audioOutputPath,
+        outputPath,
+        hasAudio,
+        abortSignal,
+        assertNotAborted,
+        onProgress,
+      });
+      perfStages.assembleMs = assembleRes.assembleMs;
     }
 
     // ── Complete ─────────────────────────────────────────────────────────
