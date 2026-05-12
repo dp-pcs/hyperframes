@@ -20,6 +20,12 @@ export default defineConfig({
   entry: {
     cli: "src/cli.ts",
     shaderTransitionWorker: "../producer/src/services/shaderTransitionWorker.ts",
+    // hf#732 lever-4: mirror the shader-blend worker entry for the new
+    // PNG decode + alpha-blit worker pool. Same rationale — the pool's
+    // `new Worker(<path>)` is a filesystem load that probes for
+    // `pngDecodeBlitWorker.js` next to its own module; we need the .js
+    // to exist in the CLI's shipped `dist/` next to `cli.js`.
+    pngDecodeBlitWorker: "../producer/src/services/pngDecodeBlitWorker.ts",
   },
   format: ["esm"],
   outDir: "dist",
@@ -78,6 +84,11 @@ var __dirname = __hf_dirname(__filename);`,
         __dirname,
         "../engine/src/utils/shaderTransitions.ts",
       ),
+      // hf#732 lever-4: alias for the PNG decode+blit worker's import.
+      // `alphaBlit.ts` is import-free (only zlib) so the worker survives
+      // the worker_thread loader boundary the same way the shader-blend
+      // worker does.
+      "@hyperframes/engine/alpha-blit": resolve(__dirname, "../engine/src/utils/alphaBlit.ts"),
     };
     options.loader = { ...options.loader, ".browser.js": "text" };
   },
