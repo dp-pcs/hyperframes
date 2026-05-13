@@ -21,13 +21,13 @@
  *     paths so they don't run twice when the success path already closed.
  *   - `hdrVideoFrameSources` is drained + cleared in the outer `finally`
  *     regardless of how the body exits.
- *   - The layered path unconditionally captures in screenshot mode
- *     because `captureAlphaPng` hangs under `--enable-begin-frame-control`.
- *     Previously the stage mutated `cfg.forceScreenshot = true` directly;
- *     the value is now derived into a local `hdrCfg` so the caller-owned
- *     `cfg` survives the stage unchanged. The sequencer is expected to
- *     pass `forceScreenshot: true` for the layered branch as a contract
- *     check.
+ *   - The DOM session capture mode is chosen per HDR-presence: HDR layered
+ *     content forces screenshot mode (`captureAlphaPng` via
+ *     Page.captureScreenshot) because beginFrame readback on the heavier
+ *     HDR pipeline exceeds the CDP protocolTimeout (regression-shards (hdr)
+ *     for #787). SDR shader-transition keeps the caller-owned `cfg` so
+ *     `captureAlphaPngBeginFrame` powers the 5x BeginFrame win. The local
+ *     `domSessionCfg` derivation never mutates the caller-owned `cfg`.
  *
  * Resource setup (HDR video extraction, image decode, dim probing) lives
  * in `captureHdrResources.ts`; per-frame work lives in
@@ -86,8 +86,10 @@ export interface CaptureHdrStageInput {
    * Capture-mode flag threaded from `compileStage`. The HDR layered
    * branch requires `true` (see file header for the
    * `captureAlphaPng` / `--enable-begin-frame-control` constraint);
-   * the stage throws if called with `false`. Stored locally as
-   * `hdrCfg.forceScreenshot` so the caller-owned `cfg` is not mutated.
+   * the stage throws if called with `false`. The actual DOM session is
+   * created from a locally-derived `domSessionCfg` that forces screenshot
+   * mode only when HDR content is present; the caller-owned `cfg` is
+   * never mutated.
    */
   forceScreenshot: boolean;
   log: ProducerLogger;
@@ -197,20 +199,6 @@ export async function runCaptureHdrStage(
   );
   const hdrPerf: HdrPerfCollector = createHdrPerfCollector();
 
-  // Layered compositing relies on captureAlphaPng (Page.captureScreenshot
-  // with a transparent background) for DOM layers. That CDP call hangs
-  // indefinitely when Chrome is launched with --enable-begin-frame-control
-  // (the default on Linux/headless-shell), because the compositor is paused
-  // and never produces a frame to capture. Use screenshot mode for the
-  // entire layered path — same constraint as alpha output formats. We
-  // derive a local `hdrCfg` instead of mutating the caller-owned `cfg`
-  // so the value flowing through the rest of the pipeline is the one the
-  // sequencer locked at compile time. (The HDR path is end-of-pipeline
-  // today, but Phase 3 chunked rendering depends on stages not mutating
-  // caller config.)
-  const hdrCfg: EngineConfig = { ...cfg, forceScreenshot: true };
-
-
   if (!fileServer) throw new Error("fileServer must be initialized before HDR compositing");
 
   // Plan HDR resources (videos to extract, images to decode, layout-probe
@@ -224,12 +212,19 @@ export async function runCaptureHdrStage(
     existsSync,
   });
 
+  // HDR composite paths run on Page.captureScreenshot — beginFrame readback
+  // on the heavier HDR pipeline exceeds the CDP protocolTimeout (verified
+  // on regression-shards (hdr) for #787). Force the DOM session into
+  // screenshot mode for HDR; SDR shader-transition continues in
+  // beginframe mode and uses captureAlphaPngBeginFrame for the 5x win.
+  const domSessionCfg = hasHdrContent ? { ...cfg, forceScreenshot: true } : cfg;
+
   const domSession = await createCaptureSession(
     fileServer.url,
     framesDir,
     buildCaptureOptions(),
     createRenderVideoFrameInjector(),
-    hdrCfg,
+    domSessionCfg,
   );
 
   let hdrEncoder: StreamingEncoder | null = null;
@@ -376,7 +371,7 @@ export async function runCaptureHdrStage(
       const effectiveWorkerCount =
         workerCount !== undefined
           ? Math.max(1, workerCount)
-          : calculateOptimalWorkers(totalFrames, job.config.workers, hdrCfg);
+          : calculateOptimalWorkers(totalFrames, job.config.workers, cfg);
       const transitionFrameCount = partitionTransitionFrames(transitionRanges, totalFrames).size;
       const useHybrid = shouldUseHybridLayeredPath({
         hasHdrContent,
@@ -397,7 +392,7 @@ export async function runCaptureHdrStage(
       if (useHybrid) {
         await runHybridLayeredFrameLoop({
           job,
-          cfg: hdrCfg,
+          cfg,
           log,
           framesDir,
           width,
