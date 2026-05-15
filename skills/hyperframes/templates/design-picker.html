@@ -1135,12 +1135,6 @@
             <div class="scene-grid" id="sc-scene-grid"></div>
           </div>
 
-          <!-- Slide specimens: remaining slides from the template, rendered small -->
-          <div class="showcase-section" id="sc-specimens">
-            <div class="showcase-eyebrow">/ Slides</div>
-            <div class="specimen-grid" id="sc-specimen-grid"></div>
-          </div>
-
           <!-- Palette swatches -->
           <div class="showcase-section" id="sc-palette">
             <div class="showcase-eyebrow">/ Palette</div>
@@ -2295,7 +2289,7 @@
           var _overrideCss = buildTemplateOverrideCss(bg, fg, ac, mt, t, cr);
           // Apply to ALL template iframes (hero + specimens)
           var _slug = window._currentTemplateSlug || "";
-          document.querySelectorAll("#sc-scene-grid iframe, #sc-specimen-grid iframe").forEach(function(_tIfr) {
+          document.querySelectorAll("#sc-scene-grid iframe").forEach(function(_tIfr) {
             applyOverrideToIframe(_tIfr, _overrideCss, _slug);
           });
         }
@@ -2611,95 +2605,6 @@
                 }
                 var scale = wrap.offsetWidth / 1920;
                 ifr.style.transform = "scale(" + scale + ")";
-
-                // Build specimen grid: load each remaining slide in its own small iframe
-                var specGrid = document.getElementById("sc-specimen-grid");
-                if (specGrid && tot > 1) {
-                  specGrid.innerHTML = "";
-                  for (var si = 1; si < Math.min(tot, 7); si++) {
-                    (function(slideIdx) {
-                      var cell = document.createElement("div");
-                      cell.className = "specimen-cell";
-                      var specIfr = document.createElement("iframe");
-                      specIfr.src = "../templates/" + pick.slug + "/template.html";
-                      specIfr.sandbox = "allow-same-origin";
-                      specIfr.style.cssText = "width:1920px;height:1080px;border:none;transform-origin:top left;pointer-events:none;";
-                      specIfr.loading = "lazy";
-                      cell.appendChild(specIfr);
-                      var label = document.createElement("div");
-                      label.className = "specimen-label";
-                      label.textContent = "Slide " + (slideIdx + 1);
-                      cell.appendChild(label);
-                      specGrid.appendChild(cell);
-
-                      specIfr.addEventListener("load", function() {
-                        var sDoc = specIfr.contentDocument;
-                        if (!sDoc) return;
-                        sDoc.querySelectorAll("script").forEach(function(s) { s.remove(); });
-                        sDoc.querySelectorAll("*").forEach(function(el) {
-                          try { if (specIfr.contentWindow.getComputedStyle(el).opacity === "0") el.style.opacity = "1"; } catch(e) {}
-                        });
-                        // Handle deck-stage
-                        var sDs = sDoc.querySelector("deck-stage");
-                        if (sDs) {
-                          var sStyle = sDoc.createElement("style");
-                          sStyle.textContent = "deck-stage{display:block;width:1920px;height:1080px;position:relative;overflow:hidden;}deck-stage>section{position:absolute;top:0;left:0;width:100%;height:100%;visibility:hidden;opacity:0;}deck-stage>section.active{visibility:visible;opacity:1;}";
-                          sDoc.head.appendChild(sStyle);
-                          var allSections = sDs.querySelectorAll("section");
-                          allSections.forEach(function(s,i) {
-                            s.classList.remove("active");
-                            if (i === slideIdx) { s.classList.add("active"); s.style.visibility = "visible"; s.style.opacity = "1"; }
-                          });
-                        } else {
-                          // Scroll-stacked or active-class templates
-                          var sSlides = sDoc.querySelectorAll("section.slide, div.slide, .slide, section[class]");
-                          if (sSlides.length > slideIdx) {
-                            var sTarget = sSlides[slideIdx];
-                            var sParent = sTarget.parentElement;
-                            if (sParent && specIfr.contentWindow.getComputedStyle(sSlides[0]).position !== "absolute") {
-                              sParent.style.height = "1080px";
-                              sParent.style.overflow = "hidden";
-                              sParent.style.transform = "translateY(-" + sTarget.offsetTop + "px)";
-                            } else {
-                              sSlides.forEach(function(s,i) {
-                                if (i === slideIdx) { s.classList.add("active"); s.style.visibility = "visible"; s.style.opacity = "1"; }
-                                else { s.classList.remove("active"); s.style.visibility = "hidden"; s.style.opacity = "0"; }
-                              });
-                            }
-                          }
-                        }
-                        sDoc.body.style.overflow = "hidden";
-                        sDoc.documentElement.style.overflow = "hidden";
-                        var sScale = cell.offsetWidth / 1920;
-                        specIfr.style.transform = "scale(" + sScale + ")";
-
-                        // Apply same text injection
-                        if (pick.promptText) {
-                          var pt2 = pick.promptText;
-                          var tone2 = pick.tone || "bold";
-                          var d2=[pt2.taglines&&pt2.taglines[tone2]||"",pt2.headline||""], h2=pt2.headlines||[], b2=pt2.body||[], st2=pt2.stats||[], sL2=pt2.statLabels||[], lb2=pt2.labels||[], sm2=pt2.smalls||[];
-                          var _di=0,_hi=0,_bi=0,_si=0,_sli=0,_li=0,_smi=0;
-                          sDoc.querySelectorAll("*").forEach(function(el) {
-                            if (el.children.length > 0) return;
-                            var txt = el.textContent.trim();
-                            if (!txt) return;
-                            try { var ecs = specIfr.contentWindow.getComputedStyle(el); } catch(e) { return; }
-                            if (ecs.display==="none"||ecs.visibility==="hidden") return;
-                            var efs = parseFloat(ecs.fontSize);
-                            if (efs>=60&&d2.length) { el.textContent=d2[_di%d2.length]; _di++; }
-                            else if (efs>=32&&h2.length) { el.textContent=h2[_hi%h2.length]; _hi++; }
-                            else if (efs>=18&&txt.length>20&&b2.length) { el.textContent=b2[_bi%b2.length]; _bi++; }
-                            else if (efs>=18&&sm2.length) { el.textContent=sm2[_smi%sm2.length]; _smi++; }
-                            else if (/^\d/.test(txt)&&txt.length<10&&st2.length) { el.textContent=st2[_si%st2.length]; _si++; }
-                            else if (efs<14&&txt===txt.toUpperCase()&&lb2.length) { el.textContent=lb2[_li%lb2.length]; _li++; }
-                            else if (txt.length>20&&b2.length) { el.textContent=b2[_bi%b2.length]; _bi++; }
-                            else if (sm2.length) { el.textContent=sm2[_smi%sm2.length]; _smi++; }
-                          });
-                        }
-                      });
-                    })(si);
-                  }
-                }
 
                 // Inject contextual text
                 if (pick.promptText) {
