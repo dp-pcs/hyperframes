@@ -385,30 +385,30 @@ function getSlides(doc) {
 }
 
 function showSlide(doc, slides, mode, idx) {
-  if (mode === "scroll") {
-    var target = slides[idx];
-    if (target) target.scrollIntoView({behavior: "instant", inline: "start", block: "start"});
-  } else {
-    slides.forEach(function(sl, i) {
-      if (i === idx) {
-        sl.classList.add("active");
-        sl.style.display = "";
-        sl.style.visibility = "visible";
-        sl.style.opacity = "1";
-        sl.style.position = "";
-        // Reset any animation start states within this slide
-        sl.querySelectorAll("*").forEach(function(el) {
-          try {
-            if (el.style.opacity === "0" || window.getComputedStyle(el).opacity === "0") el.style.opacity = "1";
-            if (el.style.visibility === "hidden") el.style.visibility = "visible";
-          } catch(e) {}
-        });
-      } else {
-        sl.classList.remove("active");
-        sl.style.visibility = "hidden";
-      }
-    });
-  }
+  var target = slides[idx];
+  if (!target) return;
+
+  // Universal: scroll to the target slide
+  target.scrollIntoView({behavior: "instant", inline: "start", block: "start"});
+
+  // Also set active class and ensure visibility
+  slides.forEach(function(sl, i) {
+    if (i === idx) {
+      sl.classList.add("active");
+      sl.style.visibility = "visible";
+      sl.style.opacity = "1";
+      sl.style.display = "";
+      // Reset animation start states within this slide
+      sl.querySelectorAll("*").forEach(function(el) {
+        try {
+          var w = target.ownerDocument.defaultView;
+          if (w && w.getComputedStyle(el).opacity === "0") el.style.opacity = "1";
+        } catch(e) {}
+      });
+    } else {
+      sl.classList.remove("active");
+    }
+  });
 }
 
 function goSlide(slug, delta) {
@@ -469,18 +469,10 @@ function onLoad(slug) {
   var slides = info.slides;
   states[slug] = { cur: 0, tot: slides.length, mode: info.mode };
 
-  if (info.mode === "scroll") {
-    var container = slides[0] ? slides[0].parentElement : null;
-    if (container) {
-      container.style.overflow = "hidden";
-      container.scrollLeft = 0;
-      if (container.parentElement) container.parentElement.style.overflow = "hidden";
-    }
-    doc.body.style.overflow = "hidden";
-    doc.documentElement.style.overflow = "hidden";
-  } else {
-    showSlide(doc, slides, info.mode, 0);
-  }
+  // Lock overflow so only one slide is visible at a time
+  doc.body.style.overflow = "hidden";
+  doc.documentElement.style.overflow = "hidden";
+  showSlide(doc, slides, info.mode, 0);
 
   var card = ifr.closest(".cprev");
   if (card) {
