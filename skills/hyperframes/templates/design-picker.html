@@ -2285,13 +2285,21 @@
         if (!_scGrid.querySelector("iframe")) {
           _scGrid.innerHTML = sceneHtml;
         } else {
-          // Build override CSS from current fine-tune selections
-          var _overrideCss = buildTemplateOverrideCss(bg, fg, ac, mt, t, cr);
-          // Apply to ALL template iframes (hero + specimens)
           var _slug = window._currentTemplateSlug || "";
-          document.querySelectorAll("#sc-scene-grid iframe").forEach(function(_tIfr) {
-            applyOverrideToIframe(_tIfr, _overrideCss, _slug);
-          });
+          if (picks.palette === 0) {
+            // Template Default: clear all overrides
+            document.querySelectorAll("#sc-scene-grid iframe").forEach(function(_tIfr) {
+              if (_tIfr.contentDocument) {
+                var s = _tIfr.contentDocument.getElementById("finetune-override");
+                if (s) s.textContent = "";
+              }
+            });
+          } else {
+            var _overrideCss = buildTemplateOverrideCss(bg, fg, ac, mt, t, cr);
+            document.querySelectorAll("#sc-scene-grid iframe").forEach(function(_tIfr) {
+              applyOverrideToIframe(_tIfr, _overrideCss, _slug);
+            });
+          }
         }
 
         // Three.js shader background — rendered by module script, triggered via global hook
