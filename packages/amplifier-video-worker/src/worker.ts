@@ -64,11 +64,54 @@ function trimToWords(text: string, maxWords: number) {
   return `${words.slice(0, maxWords).join(" ")}...`;
 }
 
-function pickParagraphs(source: ExplainerSourceArtifact) {
-  return source.article.paragraphs
-    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
-    .filter((paragraph) => paragraph.length > 70)
-    .slice(0, 10);
+function sanitizeCandidateParagraph(paragraph: string, article: ExplainerVideoBrief["article"]) {
+  const cleaned = paragraph.replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+
+  const lower = cleaned.toLowerCase();
+  const title = article.title.toLowerCase();
+  const subtitle = (article.subtitle || "").toLowerCase();
+
+  if (cleaned.length < 60) return null;
+  if (lower === title || lower === subtitle) return null;
+  if (lower.startsWith("thanks for reading")) return null;
+  if (lower.startsWith("discussion about this post")) return null;
+  if (lower.startsWith("install:")) return null;
+  if (lower.includes("start your substack")) return null;
+  if (lower.includes("privacy ∙ terms")) return null;
+  if (lower.includes("this site requires javascript")) return null;
+
+  return cleaned;
+}
+
+function expandParagraphCandidates(
+  source: ExplainerSourceArtifact,
+  article: ExplainerVideoBrief["article"],
+) {
+  const seed = [...source.article.paragraphs, ...source.article.text.split(/\n+/)];
+
+  const expanded = seed.flatMap((paragraph) => {
+    const cleaned = sanitizeCandidateParagraph(paragraph, article);
+    if (!cleaned) return [];
+    if (cleaned.length <= 420) return [cleaned];
+
+    const sentences = splitSentences(cleaned);
+    const chunks: string[] = [];
+    let current = "";
+    for (const sentence of sentences) {
+      const next = current ? `${current} ${sentence}` : sentence;
+      if (next.length > 360 && current) {
+        chunks.push(current);
+        current = sentence;
+      } else {
+        current = next;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  });
+
+  return expanded.filter(Boolean);
 }
 
 function fingerprintText(text: string) {
@@ -148,7 +191,7 @@ function buildExplainerScript(args: {
   plan: ExplainerVideoRenderPlan;
   source: ExplainerSourceArtifact;
 }): ExplainerScript {
-  const paragraphs = dedupeParagraphs(pickParagraphs(args.source));
+  const paragraphs = dedupeParagraphs(expandParagraphCandidates(args.source, args.brief.article));
   const primaryAuthor = args.brief.article.primaryAuthor;
   const ctaUrl = args.plan.cta.url || args.brief.article.url;
   const publicationName = args.brief.article.publication?.name || "Amplifier";
