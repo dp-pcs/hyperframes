@@ -113,6 +113,12 @@ Beat entrance animations scheduled early in the timeline may have already "playe
 
 Not a skill issue but tooling friction. Workaround: Bash `cat <<'EOF'`.
 
+### P1 (Post-run investigation): `data-start="0"` on all beats → all beats blank after ~5s
+
+**Arc-launch v3 rendered blank from t=5.5s onwards.** Diagnosed from render frames: content disappeared exactly at t=5.5s — the BEAT constant in beat-2's GSAP timeline. Root cause confirmed: the arc agent set `data-start="0"` and `data-duration="26"` (total video length) on ALL beat host divs. The HyperFrames engine seeks each sub-composition timeline to `global_time - data_start`. With `data-start=0`, beat-2's 5.5s GSAP timeline is seeked to global_t=7 at t=7s — past its end. Engine marks the sub-composition invisible. All beats go blank as soon as their individual GSAP timelines are exhausted.
+
+**Fix verified**: set each beat's `data-start` to its HyperShader transition point, `data-duration` to the beat's actual GSAP timeline length, all on `data-track-index="1"`. Re-rendered arc-launch — all 5 beats visible and animated correctly. Fixed in commit `f74beb83`, documented in step-5-build.md.
+
 ---
 
 ## Still Repeating from v2
