@@ -1247,16 +1247,22 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     message: "Worker claimed the job and is loading the render inputs.",
   });
 
-  const script = buildExplainerScript({
-    brief: job.videoBrief,
-    plan: job.plan,
-    source,
-  });
-  const scriptArtifact = await uploadJsonArtifact(
-    message.assetsBucket,
-    `${message.baseKey}/script.json`,
-    script,
-  );
+  let scriptArtifact = job.artifacts.script ?? null;
+  let script: ExplainerScript;
+  if (scriptArtifact?.key) {
+    script = await readJsonArtifact<ExplainerScript>(message.assetsBucket, scriptArtifact.key);
+  } else {
+    script = buildExplainerScript({
+      brief: job.videoBrief,
+      plan: job.plan,
+      source,
+    });
+    scriptArtifact = await uploadJsonArtifact(
+      message.assetsBucket,
+      `${message.baseKey}/script.json`,
+      script,
+    );
+  }
 
   job = await mergeExplainerVideoJob(message.jobId, {
     status: "storyboarding",
