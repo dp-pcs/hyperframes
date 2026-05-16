@@ -14,25 +14,19 @@ npx hyperframes validate
 
 ## Visual Verification (snapshot)
 
-After lint and validate pass, capture snapshot frames to SEE your own output. **Always use `hyperframes snapshot`** — do not roll your own ffmpeg/headless Chrome script; the default naming (`frame-XX-at-Ys.png`) is expected by later tooling.
+After lint and validate pass, capture snapshot frames to SEE your own output. **Take many snapshots — at least 15 for a 30-second video** (roughly every 2 seconds). This is your only visual feedback before the user sees the project. 5-6 frames miss almost everything.
 
 ```bash
-npx hyperframes snapshot <project-dir> --at <beat-midpoints>
+npx hyperframes snapshot <project-dir> --frames 15
 ```
 
-If the snapshot command isn't available, fall back to:
+Or for precise control, calculate timestamps every 2 seconds:
 
 ```bash
-npx tsx packages/cli/src/cli.ts snapshot <project-dir> --at <beat-midpoints>
+npx hyperframes snapshot <project-dir> --at 1,3,5,7,9,11,13,15,17,19,21,23,25,27,29
 ```
 
-Calculate the midpoint of each beat from your STORYBOARD.md timings. For a 4-beat video with beats at 0-5.8s, 5.8-15.0s, 15.0-22.5s, 22.5-25.3s:
-
-```bash
-npx hyperframes snapshot <project-dir> --at 2.9,10.4,18.7,23.9
-```
-
-This renders one frame per beat at the moment when content is most visible. Use timestamps where the most content is on screen — usually 60-70% into each beat, after entrances finish but before exits start. Output lands in `<project-dir>/snapshots/` with filenames like `frame-00-at-2.9s.png`.
+Output lands in `<project-dir>/snapshots/` with filenames like `frame-00-at-1.0s.png`.
 
 **View every snapshot image carefully.** Don't glance and move on. For each frame, check:
 
@@ -61,7 +55,9 @@ This renders one frame per beat at the moment when content is most visible. Use 
 - If a snapshot shows nothing at a timestamp, try a slightly different time (1-2 seconds later). Compositions may still be in entrance animations.
 - The snapshot command is fast — run it multiple times at different timestamps if needed.
 
-If any frame has issues, go back to Step 6 and fix that composition before proceeding.
+**If any frame has issues, fix it now.** Go back to that composition, fix the problem, re-snapshot at that timestamp, and verify the fix. Don't accumulate issues — fix as you find. This is not wasted time; it's the difference between a polished video and a broken one.
+
+**Take your time reviewing.** Read every snapshot carefully. A 30-second video has ~900 frames at 30fps — your 15 snapshots sample 1.7% of them. If something looks off in a snapshot, it's probably off for dozens of surrounding frames too.
 
 ## Preview
 

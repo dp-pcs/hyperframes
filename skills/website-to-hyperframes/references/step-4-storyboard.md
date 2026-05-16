@@ -57,6 +57,19 @@ If VFX blocks are available (vfx-liquid-glass, vfx-iphone-device, vfx-shatter, v
 
 Do NOT list SFX files in the storyboard. SFX are wired in Step 6 (Audio Wiring) after compositions are built — matched to the creative direction, not the other way around.
 
+### HTML-in-Canvas — the most powerful visual tool available
+
+This is HyperFrames' standout capability. The `drawElementImage` API captures any live HTML/CSS as a GPU-accelerated texture at 60fps. This means you can take a captured product screenshot, a dashboard UI, a code snippet — any HTML content — and render it through:
+
+- **3D geometry** — map it onto a rotating iPhone or laptop model, wrap it around a sphere, project it onto a curved surface
+- **WebGL shaders** — liquid glass refraction, shatter into fragments, portal reveal, magnetic assembly, noise distortion, chromatic aberration
+- **Post-processing** — bloom, depth-of-field, film grain, color grading — all running in real-time on the GPU
+- **Custom effects** — anything you can write in Three.js or raw WebGL
+
+When planning the storyboard, think about which beats deserve a cinematic HTML-in-Canvas treatment vs a standard GSAP animation. A product screenshot with flat perspective tilt is fine — but that same screenshot mapped onto a 3D device rotating in space with depth-of-field blur is extraordinary. A feature list sliding in from the right is adequate — but that list floating above a rippling liquid surface is memorable.
+
+The API pattern: put HTML inside `<canvas layoutsubtree>`, call `ctx.drawElementImage(element, x, y, w, h)`, use as a Three.js `CanvasTexture`. HyperFrames auto-enables the Chrome flag during renders. Read `docs/guides/html-in-canvas.mdx` for code patterns. Pre-built examples exist via `npx hyperframes add --tag html-in-canvas`, or build custom effects from scratch. Spawn a sub-agent for complex Three.js/WebGL work if needed.
+
 ---
 
 ## Asset Audit

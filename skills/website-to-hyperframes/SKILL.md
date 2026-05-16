@@ -8,6 +8,8 @@ description: |
 
 Capture a website, then produce a professional video from it.
 
+**Take your time. There is no rush.** Quality matters more than speed. Read every reference file the steps point you to — don't skip reads to save time. Take 15+ snapshots per video and actually look at each one. If a composition looks weak, revise it before moving on. A polished video is worth more than a rushed one delivered 5 minutes faster.
+
 Users say things like:
 
 - "Capture https://... and make me a 25-second product launch video"

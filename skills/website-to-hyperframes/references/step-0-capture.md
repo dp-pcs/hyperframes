@@ -1,4 +1,4 @@
-# Step 1: Capture & Understand
+# Step 0: Capture & Understand
 
 ## Run the capture
 
@@ -8,13 +8,14 @@ No API keys required for the base capture. However, before running, ask the user
 
 If the user provides the key or already has one set, proceed. If they skip it, proceed anyway — the capture works without it, but `asset-descriptions.md` will have DOM-context descriptions only (position, size, alt text) instead of AI vision descriptions (what the image actually shows).
 
-Create a project directory for your video IF doesn't exists yet, then capture the website into a `capture/` subfolder within it:
+Create a project directory for your video if it doesn't exist yet, then capture the website into a `capture/` subfolder within it:
 
 ```bash
-npx hyperframes capture <URL> -o <project-dir>/capture
+# Use the local CLI (includes paginated contact sheets and SVG root scan fixes):
+npx tsx packages/cli/src/cli.ts capture <URL> -o <project-dir>/capture
 ```
 
-Example: `npx hyperframes capture https://stripe.com -o videos/stripe-launch/capture`
+Example: `npx tsx packages/cli/src/cli.ts capture https://stripe.com -o videos/stripe-launch/capture`
 
 Keeping the capture artifacts (`screenshots/`, `assets/`, `extracted/`, `AGENTS.md`, `CLAUDE.md`) in a dedicated `capture/` subfolder keeps them isolated from the later build files (`SCRIPT.md`, `STORYBOARD.md`, `DESIGN.md`, `compositions/`, `index.html`, `narration.wav`, `transcript.json`, `renders/`, `snapshots/`), which all live at `<project-dir>/` root.
 
@@ -24,15 +25,17 @@ Wait for the capture to complete. Print how many screenshots, assets, sections, 
 
 ## Read and summarize
 
-You are required to read every single file below!!! After reading each one, **write a 3-4 sentence summary** of what you learned. These summaries are your working memory — the raw file content may be cleared from context later.
+Read every file below. After each one, **write a 3-4 sentence summary** of what you learned. These summaries carry forward — the raw file content may be cleared from context later, and your summaries are what keep the capture data usable through the rest of the pipeline.
 
-### REQUIRED to read
+### Read these
 
-1. **View the scroll screenshots** — viewport-sized captures covering the full page height (the number depends on the page length). Start with:
-   - `capture/screenshots/scroll-000.png` — the hero section at full 1920x1080 resolution. Describe: is the background light or dark? What's the dominant visual element? What colors jump out?
-   - Then scan at least 50% more screenshots throught the page to see the full page. Each screenshot overlaps the previous by ~30%.
+1. **View the contact sheets** — these are labeled grids that let you see many images at once instead of opening them one by one. Contact sheets are paginated: look for `contact-sheet-1.jpg`, `contact-sheet-2.jpg`, etc. (or `contact-sheet.jpg` for older single-page captures). View ALL pages for each category.
+   - `capture/screenshots/contact-sheet-*.jpg` — scroll screenshots grid. View FIRST. Each cell numbered with scroll percentage. List the directory if unsure how many pages exist.
+   - `capture/assets/contact-sheet-*.jpg` — all downloaded raster images grid. Each cell labeled with filename.
+   - `capture/assets/svgs/contact-sheet-*.jpg` — all SVGs rendered as thumbnails. Each cell labeled with filename. Check `capture/assets/` root too — some captures store SVGs there instead of `svgs/`.
+   - `capture/screenshots/full-page.png` — the entire page as one tall image. Useful for scrolling animation videos.
 
-   After viewing them, write 3-4 sentences describing the site's visual mood, layout patterns, color strategy, and overall feel.
+   After viewing the screenshot contact sheets, write 3-4 sentences describing the site's visual mood, layout patterns, color strategy, and overall feel.
 
 2. **`capture/extracted/tokens.json`** — Note the top 5-7 colors (HEX), all font families with their weights (e.g. `Inter (400,700)` or `Sohne (100-900 variable)`), number of sections, and number of headings/CTAs.
 
@@ -48,13 +51,17 @@ You are required to read every single file below!!! After reading each one, **wr
 
 7. **`capture/extracted/lottie-manifest.json`** — View each preview image at `capture/assets/lottie/previews/` to see what the animations look like. It will help you think of what you can do in the video.
 
-8. **`capture/extracted/video-manifest.json`** — View each preview at `capture/assets/videos/previews/` to see what each video shows. 
+8. **`capture/extracted/video-manifest.json`** — View each preview at `capture/assets/videos/previews/` to see what each video shows.
 
 9. **`capture/extracted/shaders.json`** — If present, this contains the actual GLSL shader code that powers the site's WebGL visual effects (gradient waves, particle systems, noise fields). Read the fragment shaders to extract: color values used in gradients, noise algorithms, blend functions. You are able to recreate similar effects in your compositions using Canvas 2D, Three.js, HTML-in-canvas or by embedding the shader patterns with a `<canvas>` + WebGL context. Absolutely read the patterns in `techniques.md`!!
 
-### Required On-demand (read when building scenes)
+### Required On-demand (only when actually needed in Step 5)
 
-10. **Individual images in `capture/assets/`** — Use `capture/extracted/asset-descriptions.md` as your index. Read the descriptions, and for the top 30 the most interesting ones - VIEW specific images like actually view visually.
+10. **Individual images in `capture/assets/`** — The contact sheet pages cover all assets. Only open an individual file when:
+    - You are placing text over a screenshot and need to check the safe zone / exact content at full resolution
+    - A storyboard-assigned asset's contact sheet thumbnail is too small to judge its content
+
+    Do NOT batch-view individual assets at this stage. That is what the contact sheets are for.
 
 11. **`capture/extracted/assets-catalog.json`** — If you notice there is something interesting in remote URLs assets, you are more than welcome to use them!!
 
@@ -62,9 +69,13 @@ You are required to read every single file below!!! After reading each one, **wr
 
 If asset-descriptions.md has mostly bare descriptions (no AI vision — check if entries say things like 'icon: icon 0' instead of actual descriptions), launch a sub-agent to view and describe all of those.
 
+## Carry-forward to Step 1
+
+After reading `tokens.json` and `design-styles.json` here, **summarize the key values** (top colors, font families, key component styles) in your step-0 site summary. Step 1 reads your summary — it does NOT re-read these files. If your summary is thorough, Step 1 can write DESIGN.md without opening them again.
+
 ## Gate
 
-Print your site summary before proceeding to Step 2:
+Print your site summary before proceeding to Step 1 (DESIGN.md):
 
 - **Site:** [name]
 - **Colors:** [top 3-5 HEX values with roles]

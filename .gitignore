@@ -20,6 +20,8 @@ Thumbs.db
 # non-generated assets (logos, svgs) that should stay in the repo.
 docs/images/
 
+videos/
+
 # IDE
 .vscode/
 .idea/
