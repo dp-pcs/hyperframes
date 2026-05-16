@@ -54,6 +54,26 @@ All 7 videos rendered and in eval arena at: https://www.heygenverse.com/a/c92778
 
 4. **Transcript CLI writes to CWD, not next to audio file** — Fixed in `transcribe.ts`: defaults `dir` to `dirname(inputPath)`. Commit `a2ccc1e6`.
 
+**v4 run results (same 7 sites, same prompts, completed May 16 2026)**
+
+All 7 videos rendered and in eval arena. Snapshot bugs fixed this round finally unblocked visual QA.
+
+New P0 found and fixed — snapshot tool had two bugs causing "last beat always black":
+
+1. Wait fired when first sub-comp registered → later beats not yet loaded when snapshot sought into their range
+2. Sub-comp timelines seeked to global time, not local time → exit-fade compositions appeared at final-opacity-0 state
+
+Both fixed in `4ae59e5a`. Verified: "Join the Movement" beat-5 now visible at t=29s (previously always black).
+
+Gemini vision descriptions added to snapshot in `841f8770`:
+
+- Runs automatically (when GEMINI_API_KEY set) after every snapshot
+- Writes `snapshots/descriptions.md` — objective per-frame descriptions
+- Agents must read this before claiming "snapshots look good"
+- Custom questions via `--describe "your question here"`
+
+Other v4 fixes: autonomous mode (no more forced gates when user says "decide for me"), block-name ≠ shader-name documented, CSS transform+GSAP xPercent/yPercent, Kokoro SSML tags, HyperShader last-scene workaround.
+
 **Full commit list on `feat/pipeline-quality-v2` (newest first):**
 
 ```
