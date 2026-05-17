@@ -1,5 +1,5 @@
 ---
-name: promo-video
+name: hyperframes-promo-video
 description: Use when the user wants to generate a rendered promotional video (not just a script) for a PR, feature, or product change — produces a HyperFrames HTML composition, iterates with `npx hyperframes preview`, and outputs mp4 + poster for X/LinkedIn/social.
 author: Alem Tuzlak (@AlemTuzlak)
 ---
@@ -589,7 +589,7 @@ npx hyperframes init <project-path> --non-interactive --example blank
 
 If `--example blank` is not available in the installed CLI version, run `npx hyperframes init --help` to see the current example list and pick the most neutral one (an empty / minimal template). Document the substitution in the final summary.
 
-This creates the HyperFrames skeleton (`package.json`, base `index.html`, `compositions/`, registry config, FFmpeg + Chrome integration). The skill then **overlays** these files from `skills/promo-video/templates/`:
+This creates the HyperFrames skeleton (`package.json`, base `index.html`, `compositions/`, registry config, FFmpeg + Chrome integration). The skill then **overlays** these files from `skills/hyperframes-promo-video/templates/`:
 
 ```
 <project-root>/

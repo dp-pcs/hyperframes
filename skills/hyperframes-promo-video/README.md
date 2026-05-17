@@ -1,4 +1,4 @@
-# promo-video
+# hyperframes-promo-video
 
 Generate an actual rendered `mp4` + poster image from a PR, feature, or product change — using [HyperFrames](https://hyperframes.dev) (HTML/CSS/GSAP-based video).
 
@@ -32,8 +32,8 @@ In resolution order:
 ## Invoke
 
 ```
-/promo-video #1234
-/promo-video .tmp/marketing-brief.md
+/hyperframes-promo-video #1234
+/hyperframes-promo-video .tmp/marketing-brief.md
 ```
 
 Or trigger by description:
