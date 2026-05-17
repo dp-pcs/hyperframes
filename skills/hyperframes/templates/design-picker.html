@@ -2547,12 +2547,10 @@
         if (window._templatePreviewInline) {
           var overrideCss = ":root {\n";
 
-          // Palette (skip --tp-secondary when shader bg is active — shader makes it transparent)
-          var _shaderActive = picks.bg_mode !== null && picks.bg_mode > 0;
           if (picks.palette !== null && picks.palette > 0) {
             overrideCss +=
               "  --tp-primary: " + p.primary + " !important;\n" +
-              (_shaderActive ? "" : "  --tp-secondary: " + p.secondary + " !important;\n") +
+              "  --tp-secondary: " + p.secondary + " !important;\n" +
               "  --tp-tertiary: " + p.tertiary + " !important;\n" +
               "  --tp-accent: " + p.accent + " !important;\n";
           }
@@ -2791,115 +2789,273 @@
           ]
         };
 
+        // ── Fetch template summary ──
+        var templateSummary = "";
+        if (templateSlug) {
+          var xhr = new XMLHttpRequest();
+          xhr.open("GET", "templates/" + templateSlug + "/summary.html?t=" + Date.now(), false);
+          xhr.send();
+          if (xhr.status === 200) templateSummary = xhr.responseText;
+        }
+
+        // ── Shader sources ──
+        var _sg = window._sgShaders || {};
+        var vtxSrc = _sg.vertex || '';
+        var fragSrc = bgpObj ? (bgpObj.fragmentShader || _sg[bgpObj.shader] || _sg.defaults || '') : '';
+        var _grainEnabled = bgpObj ? document.getElementById("se-grain").checked : false;
+
+        // ── Build DESIGN.html — everything visible ──
         var h = '<!doctype html>\n<html lang="en">\n<head>\n';
         h += '<meta charset="UTF-8">\n';
         h += '<title>Design System — ' + spec.name + '</title>\n';
         h += '<link rel="preconnect" href="https://fonts.googleapis.com">\n';
         h += '<link href="https://fonts.googleapis.com/css2?family=' + t.headline.family.replace(/ /g,'+') + ':wght@' + t.headline.weight + '&family=' + t.body.family.replace(/ /g,'+') + ':wght@' + t.body.weight + '&display=swap" rel="stylesheet">\n';
-        h += '<style>\n:root {\n';
-        h += '  --tp-primary: ' + p.primary + ';\n  --tp-secondary: ' + p.secondary + ';\n  --tp-tertiary: ' + p.tertiary + ';\n  --tp-accent: ' + p.accent + ';\n';
-        h += '  --bg: ' + bg + ';\n  --fg: ' + fg + ';\n  --accent: ' + p.accent + ';\n  --muted: ' + p.tertiary + ';\n';
-        h += '  --font-headline: "' + t.headline.family + '", serif;\n  --font-headline-weight: ' + t.headline.weight + ';\n';
-        h += '  --font-body: "' + t.body.family + '", sans-serif;\n  --font-body-weight: ' + t.body.weight + ';\n';
-        h += '  --corner-radius: ' + cr.value + ';\n  --padding: ' + padVal + ';\n  --gap: ' + gapVal + ';\n';
-        h += '  --shadow: ' + spec.surface.shadow + ';\n';
-        if (easeObj) h += '  --easing: ' + easeObj.value + ';\n';
+        h += '<style>\n';
+        h += ':root {\n';
+        h += '  --bg:' + bg + '; --fg:' + fg + '; --accent:' + ac + '; --muted:' + mt + ';\n';
+        h += '  --font-hl:"' + t.headline.family + '",sans-serif; --font-hl-w:' + t.headline.weight + ';\n';
+        h += '  --font-bd:"' + t.body.family + '",sans-serif; --font-bd-w:' + t.body.weight + ';\n';
+        h += '  --radius:' + cr.value + '; --pad:' + padVal + '; --gap:' + gapVal + ';\n';
         h += '}\n';
-        h += 'body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-body);font-weight:var(--font-body-weight);}\n';
+        h += 'body{margin:0;background:transparent;color:var(--fg);font:var(--font-bd-w) 15px/1.6 var(--font-bd);}\n';
+        h += '.ds{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:48px 24px;}\n';
+        h += '.ds h1{font:var(--font-hl-w) clamp(36px,6vw,64px)/1 var(--font-hl);margin:0 0 4px;}\n';
+        h += '.ds h2{font:600 11px/1 var(--font-bd);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:40px 0 16px;}\n';
+        h += '.ds-sub{font-size:13px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:48px;}\n';
+        h += '.ds-row{display:flex;gap:var(--gap);flex-wrap:wrap;}\n';
+        h += '.ds-sw{width:110px;height:72px;border-radius:var(--radius);display:flex;align-items:flex-end;padding:6px;}\n';
+        h += '.ds-sw span{background:rgba(0,0,0,.45);color:#fff;padding:2px 6px;border-radius:2px;font:500 10px/1.4 monospace;}\n';
+        h += '.ds-hl{font:var(--font-hl-w) clamp(24px,4vw,44px)/1.1 var(--font-hl);margin:0 0 10px;}\n';
+        h += '.ds-bd{opacity:.65;max-width:55ch;}\n';
+        h += '.ds-meta{font:11px/1.4 monospace;color:var(--muted);margin-top:6px;}\n';
+        h += '.ds-card{background:var(--fg);color:var(--bg);border-radius:var(--radius);padding:var(--pad);box-shadow:' + spec.surface.shadow + ';display:inline-flex;flex-direction:column;gap:6px;min-width:180px;}\n';
+        h += '.ds-card strong{font-size:14px;}\n';
+        h += '.ds-card small{font-size:12px;opacity:.6;}\n';
+        h += '.ds-props{display:flex;flex-direction:column;gap:6px;font-size:12px;opacity:.6;}\n';
+        h += '.ds-props strong{opacity:1;}\n';
+        h += '.ds-rules{display:grid;grid-template-columns:1fr 1fr;gap:24px;}\n';
+        h += '.ds-rules ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px;}\n';
+        h += '.ds-rules li{font-size:13px;opacity:.7;line-height:1.5;padding-left:16px;position:relative;}\n';
+        h += '.ds-do li::before{content:"\\2713";position:absolute;left:0;color:var(--accent);}\n';
+        h += '.ds-dont li::before{content:"\\2717";position:absolute;left:0;opacity:.4;}\n';
+        h += '.ds-do h3,.ds-dont h3{font:600 12px/1 var(--font-bd);letter-spacing:.1em;text-transform:uppercase;margin:0 0 10px;}\n';
+        h += '.ds-do h3{color:var(--accent);}\n';
+        h += '.ds-dont h3{opacity:.4;}\n';
+        h += '.ds-hr{height:1px;background:var(--fg);opacity:.08;margin:32px 0;}\n';
+        h += 'pre{background:rgba(128,128,128,.08);border:1px solid rgba(128,128,128,.12);border-radius:var(--radius);padding:16px;overflow-x:auto;font:13px/1.5 monospace;color:var(--fg);white-space:pre-wrap;}\n';
+        h += '.ds-gallery{display:flex;flex-wrap:wrap;gap:16px;}\n';
+        h += '.ds-slide-wrap{border:1px solid rgba(128,128,128,.15);border-radius:var(--radius);overflow:hidden;position:relative;}\n';
+        h += '.ds-slide-frame{width:1920px;height:1080px;overflow:hidden;}\n';
+        h += '.ds-slide-name{padding:4px 10px;font:500 10px/1.4 monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--fg);opacity:.45;border-top:1px solid rgba(128,128,128,.1);}\n';
+        h += '@media(max-width:640px){.ds-rules{grid-template-columns:1fr;}.ds-row{flex-direction:column;}.ds-gallery{grid-template-columns:1fr;}}\n';
         h += '</style>\n';
+
+        // Shader dependencies
         if (bgpObj) {
-          h += '<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"><\/script>\n';
           h += '<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.167.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.167.0/examples/jsm/"}}<\/script>\n';
         }
         h += '</head>\n<body>\n\n';
 
-        // Machine-readable spec
-        h += '<script type="application/json" id="design-spec">\n';
-        h += JSON.stringify(spec, null, 2) + '\n';
-        h += '<\/script>\n\n';
-
-        // Shader background module (if selected)
+        // ── Live shader canvas (visible background) ──
         if (bgpObj) {
-          h += '<!-- Working Three.js shader background — copy this script into compositions -->\n';
-          h += '<canvas id="design-bg" style="position:fixed;inset:0;width:100%;height:100%;z-index:-1;"><\/canvas>\n';
-          h += '<script type="module" id="design-background">\n';
-          h += 'import * as THREE from "three";\n';
-          h += 'import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";\n';
-          h += 'import { RenderPass } from "three/addons/postprocessing/RenderPass.js";\n';
-          h += 'import { HalftonePass } from "three/addons/postprocessing/HalftonePass.js";\n';
-          h += 'const spec = JSON.parse(document.getElementById("design-spec").textContent);\n';
-          h += 'const bg = spec.background;\n';
-          h += 'if (bg) {\n';
-          h += '  const canvas = document.getElementById("design-bg");\n';
-          h += '  const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});\n';
-          h += '  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));\n';
-          h += '  const scene = new THREE.Scene();\n';
-          h += '  const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);\n';
-          h += '  const isSphere = bg.type === "sphere";\n';
-          h += '  const dist = isSphere ? 14 : bg.camera.distance;\n';
-          h += '  const az = bg.camera.azimuth * Math.PI / 180;\n';
-          h += '  const pol = bg.camera.polar * Math.PI / 180;\n';
-          h += '  camera.position.set(dist*Math.sin(pol)*Math.sin(az), dist*Math.cos(pol), dist*Math.sin(pol)*Math.cos(az));\n';
-          h += '  camera.lookAt(0,0,0);\n';
-          h += '  camera.zoom = isSphere ? bg.camera.zoom : 1;\n';
-          h += '  camera.updateProjectionMatrix();\n';
-          h += '  scene.add(new THREE.AmbientLight(0xffffff, 0.6));\n';
-          h += '  const dl = new THREE.DirectionalLight(0xffffff, 0.8); dl.position.set(5,5,5); scene.add(dl);\n\n';
-
-          // Vertex shader
-          var _sg = window._sgShaders || {};
-          var vtxSrc = (_sg.vertex || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
-          h += '  const vertexShader = `' + vtxSrc + '`;\n\n';
-
-          var fragSrc = bgpObj.fragmentShader || (_sg[bgpObj.shader]) || (_sg.defaults) || '';
-          h += '  const fragmentShader = `' + fragSrc.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$') + '`;\n';
-
-          h += '\n  const uniforms = {\n';
-          h += '    uTime:{value:0}, uSpeed:{value:' + bgpObj.speed + '}, uDensity:{value:' + bgpObj.density + '}, uStrength:{value:' + bgpObj.strength + '},\n';
-          h += '    uColor1:{value:new THREE.Color("' + bgColors[0] + '")},\n';
-          h += '    uColor2:{value:new THREE.Color("' + bgColors[1] + '")},\n';
-          h += '    uColor3:{value:new THREE.Color("' + bgColors[2] + '")},\n';
-          var _r = bgpObj._render || { brightness:1, contrast:1, saturation:1 };
-          h += '    uBrightness:{value:' + _r.brightness + '}, uContrast:{value:' + _r.contrast + '}, uSaturation:{value:' + _r.saturation + '}\n';
-          h += '  };\n';
-          h += '  const material = new THREE.ShaderMaterial({vertexShader, fragmentShader, uniforms, side:THREE.DoubleSide});\n';
-          h += '  const geometry = isSphere ? new THREE.SphereGeometry(1,256,256) : new THREE.PlaneGeometry(10,10,128,128);\n';
-          h += '  const mesh = new THREE.Mesh(geometry, material);\n';
-          h += '  mesh.rotation.set(' + (bgpObj.rotX*Math.PI/180).toFixed(3) + ',' + (bgpObj.rotY*Math.PI/180).toFixed(3) + ',' + (bgpObj.rotZ*Math.PI/180).toFixed(3) + ');\n';
-          h += '  mesh.position.set(' + (bgpObj.posX||0) + ',' + (bgpObj.posY||0) + ',' + (bgpObj.posZ||0) + ');\n';
-          h += '  scene.add(mesh);\n\n';
-          // HalftonePass grain
-          var _grainEnabled = document.getElementById("se-grain").checked;
-          var _gr = bgpObj._render || { grainRadius:2, grainScatter:1, grainBlending:1 };
-          h += '  const composer = new EffectComposer(renderer);\n';
-          h += '  composer.addPass(new RenderPass(scene, camera));\n';
-          if (_grainEnabled) {
-            h += '  composer.addPass(new HalftonePass(innerWidth, innerHeight, {shape:1, radius:' + _gr.grainRadius + ', rotateR:Math.PI/12, rotateG:(Math.PI/12)*2, rotateB:(Math.PI/12)*3, scatter:' + _gr.grainScatter + ', blending:' + _gr.grainBlending + ', blendingMode:1, greyscale:false}));\n';
-          }
-          h += '  function renderAt(time){renderer.setSize(innerWidth,innerHeight,false);composer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();uniforms.uTime.value=time;composer.render();}\n';
-          h += '  window.addEventListener("hf-seek",e=>renderAt(e.detail.time));\n';
-          h += '  renderAt(window.__hfThreeTime||0);\n';
-          h += '}\n';
-          h += '<\/script>\n\n';
+          h += '<canvas id="design-bg" style="position:fixed;inset:0;width:100%;height:100%;z-index:-1;"><\/canvas>\n\n';
         }
 
-        // Embed the original template HTML (from ALL_TEMPLATES data, not the mutated iframe DOM)
-        if (templateSlug) {
-          var tmplData = null;
-          for (var ti = 0; ti < ALL_TEMPLATES.length; ti++) {
-            if (ALL_TEMPLATES[ti].slug === templateSlug) { tmplData = ALL_TEMPLATES[ti]; break; }
+        // ── Visible content ──
+        h += '<div class="ds">\n\n';
+
+        // Parsing guide
+        h += '<!-- DESIGN.html — HyperFrames Design System\n';
+        h += '     This file is both human-viewable and agent-parseable.\n';
+        h += '     Structure: Palette > Typography > Surface > Motion > Background > Guidelines > Template\n';
+        h += '     Template section contains CSS design tokens and HTML slide skeletons with {{placeholders}}.\n';
+        h += '     Shader GLSL is in the Background section. The live canvas renders it behind this content. -->\n\n';
+
+        // Title
+        h += '<h1>' + spec.name + '</h1>\n';
+        h += '<div class="ds-sub">Design System' + (templateSlug ? ' &middot; ' + templateSlug : '') + '</div>\n\n';
+
+        // ── Palette ──
+        h += '<h2>Palette</h2>\n';
+        h += '<div class="ds-row">\n';
+        var roles = [["Primary", p.primary], ["Secondary", p.secondary], ["Tertiary", p.tertiary], ["Accent", p.accent]];
+        for (var ri = 0; ri < roles.length; ri++) {
+          h += '  <div class="ds-sw" style="background:' + roles[ri][1] + '"><span>' + roles[ri][0] + ' ' + roles[ri][1] + '</span></div>\n';
+        }
+        h += '</div>\n\n';
+
+        // ── Typography ──
+        h += '<h2>Typography</h2>\n';
+        h += '<div class="ds-hl">The quick brown fox jumps</div>\n';
+        h += '<div class="ds-bd">Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump.</div>\n';
+        h += '<div class="ds-meta">Headline: ' + t.headline.family + ' ' + t.headline.weight + ' &middot; Body: ' + t.body.family + ' ' + t.body.weight + '</div>\n\n';
+
+        // ── Surface ──
+        h += '<h2>Surface</h2>\n';
+        h += '<div class="ds-row" style="align-items:flex-start">\n';
+        h += '  <div class="ds-card"><strong>Example Card</strong><small>Configured corners, padding, and shadow.</small></div>\n';
+        h += '  <div class="ds-props">\n';
+        h += '    <div>Corners <strong>' + cr.value + '</strong></div>\n';
+        h += '    <div>Padding <strong>' + padVal + '</strong></div>\n';
+        h += '    <div>Gap <strong>' + gapVal + '</strong></div>\n';
+        h += '    <div>Elevation <strong>' + dp.name + '</strong></div>\n';
+        h += '    <div>Density <strong>' + dn.name + ' — ' + dn.desc + '</strong></div>\n';
+        h += '  </div>\n';
+        h += '</div>\n\n';
+
+        // ── Motion ──
+        if (easeObj) {
+          h += '<h2>Motion</h2>\n';
+          h += '<div class="ds-meta"><strong>' + easeObj.name + '</strong> — ' + easeObj.desc + '</div>\n';
+          h += '<pre>' + easeObj.value + '</pre>\n\n';
+        }
+
+        // ── Background ──
+        if (bgpObj) {
+          var _r = bgpObj._render || { brightness:1, contrast:1, saturation:1 };
+          var _gr = bgpObj._render || { grainRadius:2, grainScatter:1, grainBlending:1 };
+          h += '<h2>Background</h2>\n';
+          h += '<div class="ds-meta"><strong>' + bgpObj.name + '</strong> &middot; ' + bgpObj.type + ' geometry';
+          if (_grainEnabled) h += ' &middot; grain enabled';
+          h += '</div>\n';
+          h += '<div class="ds-row" style="margin:12px 0">\n';
+          for (var ci = 0; ci < bgColors.length; ci++) {
+            h += '  <div class="ds-sw" style="background:' + bgColors[ci] + ';width:80px;height:48px"><span>' + bgColors[ci] + '</span></div>\n';
           }
-          if (tmplData) {
-            // Fetch the original template file
-            var xhr = new XMLHttpRequest();
-            xhr.open("GET", "templates/" + templateSlug + "/template.html", false);
-            xhr.send();
-            if (xhr.status === 200) {
-              h += '\n<script type="text/html" id="template-source">\n';
-              h += xhr.responseText;
-              h += '\n<\/script>\n\n';
-            }
+          h += '</div>\n';
+
+          // Shader config
+          h += '<details><summary style="cursor:pointer;font-size:13px;color:var(--accent);margin:8px 0">Shader Config</summary>\n';
+          h += '<pre>{\n';
+          h += '  "type": "' + bgpObj.type + '",\n';
+          h += '  "density": ' + bgpObj.density + ', "speed": ' + bgpObj.speed + ', "strength": ' + bgpObj.strength + ',\n';
+          h += '  "colors": ' + JSON.stringify(bgColors) + ',\n';
+          h += '  "rotation": [' + bgpObj.rotX + ', ' + bgpObj.rotY + ', ' + bgpObj.rotZ + '],\n';
+          h += '  "camera": { "distance": ' + bgpObj.camDist + ', "azimuth": ' + bgpObj.camAz + ', "polar": ' + bgpObj.camPol + ', "zoom": ' + (bgpObj.zoom||1) + ' },\n';
+          h += '  "position": [' + (bgpObj.posX||0) + ', ' + (bgpObj.posY||0) + ', ' + (bgpObj.posZ||0) + '],\n';
+          h += '  "rendering": { "brightness": ' + _r.brightness + ', "contrast": ' + _r.contrast + ', "saturation": ' + _r.saturation + ' },\n';
+          h += '  "grain": ' + (_grainEnabled ? '{ "radius": ' + _gr.grainRadius + ', "scatter": ' + _gr.grainScatter + ', "blending": ' + _gr.grainBlending + ' }' : 'false') + '\n';
+          h += '}</pre>\n';
+          h += '</details>\n';
+
+          // GLSL
+          h += '<details><summary style="cursor:pointer;font-size:13px;color:var(--accent);margin:8px 0">Vertex Shader (GLSL)</summary>\n';
+          h += '<pre>' + vtxSrc.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>\n';
+          h += '</details>\n';
+          h += '<details><summary style="cursor:pointer;font-size:13px;color:var(--accent);margin:8px 0">Fragment Shader (GLSL)</summary>\n';
+          h += '<pre>' + fragSrc.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>\n';
+          h += '</details>\n\n';
+        }
+
+        // ── Guidelines ──
+        h += '<div class="ds-hr"></div>\n';
+        h += '<h2>Guidelines</h2>\n';
+        h += '<div class="ds-rules">\n';
+        h += '  <div class="ds-do"><h3>Do</h3><ul>\n';
+        for (var di = 0; di < spec.dos.length; di++) h += '    <li>' + spec.dos[di] + '</li>\n';
+        h += '  </ul></div>\n';
+        h += '  <div class="ds-dont"><h3>Don\'t</h3><ul>\n';
+        for (var di = 0; di < spec.donts.length; di++) h += '    <li>' + spec.donts[di] + '</li>\n';
+        h += '  </ul></div>\n';
+        h += '</div>\n\n';
+
+        // ── Template — rendered, not code ──
+        if (templateSummary) {
+          h += '<div class="ds-hr"></div>\n';
+          h += '<h2>Template — ' + templateSlug + '</h2>\n';
+
+          // Extract parts
+          var tmplStyleMatch = templateSummary.match(/<style[\s\S]*?<\/style>/);
+          var tmplFonts = templateSummary.match(/<link[^>]*fonts\.googleapis[^>]*>/g);
+          var tmplSkeletonHtml = templateSummary.replace(/<style[\s\S]*?<\/style>/, '').replace(/<link[^>]*>/g, '').trim();
+
+          // Inject template fonts
+          if (tmplFonts) {
+            for (var fi = 0; fi < tmplFonts.length; fi++) h += tmplFonts[fi] + '\n';
           }
+
+          // Inject template CSS scoped under .ds-slide-frame
+          if (tmplStyleMatch) {
+            var tmplCssRaw = tmplStyleMatch[0].replace(/<\/?style[^>]*>/g, '');
+            // Override --tp-* with user's chosen palette
+            tmplCssRaw = tmplCssRaw.replace(/--tp-primary:\s*[^;]+;/g, '--tp-primary: ' + p.primary + ';');
+            tmplCssRaw = tmplCssRaw.replace(/--tp-secondary:\s*[^;]+;/g, '--tp-secondary: ' + p.secondary + ';');
+            tmplCssRaw = tmplCssRaw.replace(/--tp-tertiary:\s*[^;]+;/g, '--tp-tertiary: ' + p.tertiary + ';');
+            tmplCssRaw = tmplCssRaw.replace(/--tp-accent:\s*[^;]+;/g, '--tp-accent: ' + p.accent + ';');
+            // Scope: :root → .ds-slide-frame, * → .ds-slide-frame *, selectors → .ds-slide-frame selector
+            var scopedCss = tmplCssRaw
+              .replace(/:root\s*\{/g, '.ds-slide-frame {')
+              .replace(/^\s*\*\s*,/gm, '.ds-slide-frame *,')
+              .replace(/^\s*\*\s*\{/gm, '.ds-slide-frame * {')
+              .replace(/\*::before/g, '.ds-slide-frame *::before')
+              .replace(/\*::after/g, '.ds-slide-frame *::after')
+              .replace(/^(\s*)(\.[\w-])/gm, '$1.ds-slide-frame $2')
+              .replace(/^(\s*)(section|h1|h2|h3|p|ul|li|a|span|svg|div)(\s*[{,.])/gm, '$1.ds-slide-frame $2$3')
+              .replace(/\.ds-slide-frame \.ds-slide-frame/g, '.ds-slide-frame');
+            scopedCss += '\n.ds-slide-frame .slide, .ds-slide-frame section { display:flex !important; opacity:1 !important; position:relative !important; width:1920px !important; height:1080px !important; }';
+            scopedCss += '\n.ds-slide-frame .slide.dark { background:' + p.secondary + ' !important; color:' + p.primary + ' !important; }';
+            scopedCss += '\n.ds-slide-frame .slide.orange { background:' + p.accent + ' !important; }';
+            scopedCss += '\n.ds-slide-frame .slide.light { background:' + p.primary + ' !important; color:' + p.secondary + ' !important; }';
+            h += '<style id="template-css">\n' + scopedCss + '\n</style>\n\n';
+          }
+
+          // Render skeletons in scaled gallery
+          var slideBlocks = tmplSkeletonHtml.split(/(?=<!-- )/);
+          h += '<div class="ds-gallery">\n';
+          for (var si = 0; si < slideBlocks.length; si++) {
+            var block = slideBlocks[si].trim();
+            if (!block) continue;
+            var nameMatch = block.match(/<!-- ([\w-]+) -->/);
+            if (!nameMatch) continue;
+            var slideName = nameMatch[1];
+            var skeletonHtml = block.replace(/<!-- [\w-]+ -->\s*/, '');
+            if (!skeletonHtml.trim()) continue;
+            // Compute scale to fit 1920px into container
+            h += '  <div class="ds-slide-wrap">\n';
+            h += '    <div class="ds-slide-frame" style="zoom:' + (320/1920).toFixed(4) + '">\n';
+            h += '      ' + skeletonHtml + '\n';
+            h += '    </div>\n';
+            h += '    <div class="ds-slide-name">' + slideName + '</div>\n';
+            h += '  </div>\n';
+          }
+          h += '</div>\n\n';
+        }
+
+        h += '</div>\n\n';
+
+        // ── Shader renderer (the only script — powers the visible canvas) ──
+        if (bgpObj) {
+          h += '<script type="module">\n';
+          h += 'import*as THREE from"three";\n';
+          h += 'import{EffectComposer}from"three/addons/postprocessing/EffectComposer.js";\n';
+          h += 'import{RenderPass}from"three/addons/postprocessing/RenderPass.js";\n';
+          h += 'import{HalftonePass}from"three/addons/postprocessing/HalftonePass.js";\n';
+          h += 'const c=document.getElementById("design-bg"),r=new THREE.WebGLRenderer({canvas:c,antialias:!0,alpha:!0});\n';
+          h += 'r.setPixelRatio(Math.min(devicePixelRatio,2));\n';
+          h += 'const s=new THREE.Scene,cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,.1,100);\n';
+          var isSphere = bgpObj.type === "sphere";
+          var dist = isSphere ? 14 : bgpObj.camDist;
+          h += 'cam.position.set(' + (dist*Math.sin(bgpObj.camPol*Math.PI/180)*Math.sin(bgpObj.camAz*Math.PI/180)).toFixed(3) + ',' + (dist*Math.cos(bgpObj.camPol*Math.PI/180)).toFixed(3) + ',' + (dist*Math.sin(bgpObj.camPol*Math.PI/180)*Math.cos(bgpObj.camAz*Math.PI/180)).toFixed(3) + ');\n';
+          h += 'cam.lookAt(0,0,0);cam.zoom=' + (isSphere ? (bgpObj.zoom||1) : 1) + ';cam.updateProjectionMatrix();\n';
+          h += 's.add(new THREE.AmbientLight(0xffffff,.6));const dl=new THREE.DirectionalLight(0xffffff,.8);dl.position.set(5,5,5);s.add(dl);\n';
+          h += 'const u={uTime:{value:0},uSpeed:{value:' + bgpObj.speed + '},uDensity:{value:' + bgpObj.density + '},uStrength:{value:' + bgpObj.strength + '},';
+          h += 'uColor1:{value:new THREE.Color("' + bgColors[0] + '")},uColor2:{value:new THREE.Color("' + bgColors[1] + '")},uColor3:{value:new THREE.Color("' + bgColors[2] + '")},';
+          var _r = bgpObj._render || {brightness:1,contrast:1,saturation:1};
+          h += 'uBrightness:{value:' + _r.brightness + '},uContrast:{value:' + _r.contrast + '},uSaturation:{value:' + _r.saturation + '}};\n';
+          h += 'const vtx=document.querySelectorAll("details summary")[1]?.parentElement.querySelector("pre")?.textContent||"";\n';
+          h += 'const frg=document.querySelectorAll("details summary")[2]?.parentElement.querySelector("pre")?.textContent||"";\n';
+          h += 'const mat=new THREE.ShaderMaterial({vertexShader:vtx,fragmentShader:frg,uniforms:u,side:THREE.DoubleSide});\n';
+          h += 'const geo=' + (isSphere ? 'new THREE.SphereGeometry(1,256,256)' : 'new THREE.PlaneGeometry(10,10,128,128)') + ';\n';
+          h += 'const m=new THREE.Mesh(geo,mat);m.rotation.set(' + (bgpObj.rotX*Math.PI/180).toFixed(3) + ',' + (bgpObj.rotY*Math.PI/180).toFixed(3) + ',' + (bgpObj.rotZ*Math.PI/180).toFixed(3) + ');';
+          h += 'm.position.set(' + (bgpObj.posX||0) + ',' + (bgpObj.posY||0) + ',' + (bgpObj.posZ||0) + ');s.add(m);\n';
+          h += 'const comp=new EffectComposer(r);comp.addPass(new RenderPass(s,cam));\n';
+          if (_grainEnabled) {
+            var _gr = bgpObj._render || {grainRadius:2,grainScatter:1,grainBlending:1};
+            h += 'comp.addPass(new HalftonePass(innerWidth,innerHeight,{shape:1,radius:' + _gr.grainRadius + ',rotateR:Math.PI/12,rotateG:Math.PI/6,rotateB:Math.PI/4,scatter:' + _gr.grainScatter + ',blending:' + _gr.grainBlending + ',blendingMode:1,greyscale:!1}));\n';
+          }
+          h += 'function renderAt(t){r.setSize(innerWidth,innerHeight,!1);comp.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();u.uTime.value=t;comp.render()}\n';
+          h += 'addEventListener("hf-seek",e=>renderAt(e.detail.time));renderAt(0);\n';
+          h += '<\/script>\n';
         }
 
         h += '</body>\n</html>';
@@ -3517,13 +3673,35 @@ void main(){
         var shaderStyle = iDoc.getElementById('tp-shader-bg');
         if (!shaderStyle) { shaderStyle = iDoc.createElement('style'); shaderStyle.id = 'tp-shader-bg'; iDoc.head.appendChild(shaderStyle); }
         if (hasShader) {
-          shaderStyle.textContent = ':root { --tp-secondary: transparent !important; } html, body, *, *::before, *::after { --tp-secondary: transparent !important; }';
+          shaderStyle.textContent = 'html, body { background: transparent !important; }';
           iDoc.documentElement.style.setProperty('background', 'transparent', 'important');
           iDoc.body.style.setProperty('background', 'transparent', 'important');
+          // Clear background on slide containers and stage elements
+          var bgEls = iDoc.querySelectorAll('.slide, section, .slides-container, .stage, .deck, deck-stage, .presentation');
+          bgEls.forEach(function(el) {
+            var cs = iWin.getComputedStyle(el);
+            var bg = cs.backgroundColor;
+            if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+              // Parse RGB to check luminance — only clear dark backgrounds
+              var m = bg.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+              if (m) {
+                var lum = (parseInt(m[1]) * 299 + parseInt(m[2]) * 587 + parseInt(m[3]) * 114) / 1000;
+                if (lum < 80) {
+                  el.style.setProperty('background', 'transparent', 'important');
+                  el.style.setProperty('background-color', 'transparent', 'important');
+                }
+              }
+            }
+          });
         } else {
           shaderStyle.textContent = '';
           iDoc.documentElement.style.removeProperty('background');
           iDoc.body.style.removeProperty('background');
+          var bgEls = iDoc.querySelectorAll('.slide, section, .slides-container, .stage, .deck, deck-stage, .presentation');
+          bgEls.forEach(function(el) {
+            el.style.removeProperty('background');
+            el.style.removeProperty('background-color');
+          });
         }
       });
 
