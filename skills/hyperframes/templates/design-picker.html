@@ -2653,13 +2653,12 @@
         h = h.replace(/__FONT_LINK_EXTRA__/g, "");
         h = h.replace(/__DATE__/g, new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }));
 
-        // Inject universal palette override — forces core tokens onto all alias patterns
+        // Inject core token override only — no alias forcing (templates map aliases differently)
         var overrideCSS = '<style id="picker-override">:root{' +
-          '--primary:' + p.primary + '!important;--secondary:' + p.secondary + '!important;--tertiary:' + (p.tertiary||"#888") + '!important;--accent:' + p.accent + '!important;' +
-          '--ink:' + p.secondary + ';--paper:' + p.primary + ';--canvas:' + p.secondary + ';--cream:' + p.primary + ';' +
-          '--ink-dim:color-mix(in srgb,' + p.primary + ' 55%,' + p.secondary + ');' +
-          '--ink-fade:color-mix(in srgb,' + p.primary + ' 28%,' + p.secondary + ');' +
-          '--hairline:color-mix(in srgb,' + p.primary + ' 12%,transparent);' +
+          '--primary:' + p.primary + '!important;' +
+          '--secondary:' + p.secondary + '!important;' +
+          '--tertiary:' + (p.tertiary||"#888") + '!important;' +
+          '--accent:' + p.accent + '!important;' +
           '}</style>';
         h = h.replace('</head>', overrideCSS + '</head>');
 
