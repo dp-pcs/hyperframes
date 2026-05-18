@@ -1,7 +1,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import type { ArtifactRef, ExplainerVideoJobRecord } from "./types.js";
+import type { ArtifactRef, ExplainerVideoJobRecord, UserRecord } from "./types.js";
 
 const region = process.env.AWS_REGION || "us-east-1";
 const tableName = process.env.DYNAMODB_TABLE_NAME || "amplifier-dev-users";
@@ -134,3 +134,33 @@ export async function mergeExplainerVideoJob(
 
   return next;
 }
+
+async function getUserWithClient(
+  client: { send: (cmd: any) => Promise<{ Item?: Record<string, unknown> }> },
+  userId: string,
+): Promise<UserRecord> {
+  const response = await client.send(
+    new GetCommand({
+      TableName: tableName,
+      Key: { userId },
+    }),
+  );
+  if (!response.Item) {
+    throw new Error(`User record not found: ${userId}`);
+  }
+  const item = response.Item as Record<string, unknown>;
+  return {
+    userId,
+    aiBaseUrl: (item.aiBaseUrl as string | null | undefined) ?? null,
+    aiApiKey: (item.aiApiKey as string | null | undefined) ?? null,
+    aiModel: (item.aiModel as string | null | undefined) ?? null,
+    elevenLabsApiKey: (item.elevenLabsApiKey as string | null | undefined) ?? null,
+    elevenLabsModelId: (item.elevenLabsModelId as string | null | undefined) ?? null,
+  };
+}
+
+export async function getUser(userId: string): Promise<UserRecord> {
+  return getUserWithClient(dynamo, userId);
+}
+
+export const __testHooks = { getUserWithClient };
