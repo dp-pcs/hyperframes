@@ -2,20 +2,32 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join as joinPath } from "node:path";
 import { createHash } from "node:crypto";
 import { DeleteMessageCommand, ReceiveMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { createRenderJob, executeRenderJob } from "@hyperframes/producer";
 import {
   getExplainerVideoJob,
+  getUser,
   mergeExplainerVideoJob,
   uploadBufferArtifact,
   uploadFileArtifact,
   uploadJsonArtifact,
   readJsonArtifact,
 } from "./amplifier.js";
+import { authorComposition } from "./llm-client.js";
+import {
+  loadSkillBundle,
+  lintCompositionHtml,
+  postRenderSanityCheck,
+  runCompositionLoop,
+} from "./composition.js";
+import type { SkillBundle } from "./composition.js";
 import { synthesizeSpeechWithTimestamps } from "./elevenlabs.js";
 import type {
   AmplifierQueueMessage,
+  ArtifactRef,
   ExplainerScript,
   ExplainerSourceArtifact,
   ExplainerVideoBrief,
@@ -1232,6 +1244,51 @@ function buildHtmlTemplate(args: {
 </html>`;
 }
 
+const __amp_filename = fileURLToPath(import.meta.url);
+const __amp_dirname = dirname(__amp_filename);
+const SKILLS_ROOT =
+  process.env.AMPLIFIER_WORKER_SKILLS_ROOT?.trim() || joinPath(__amp_dirname, "..", "skills");
+
+let __cachedSkillBundle: SkillBundle | null = null;
+function getSkillBundleOnce(): SkillBundle {
+  if (!__cachedSkillBundle) {
+    __cachedSkillBundle = loadSkillBundle(SKILLS_ROOT);
+  }
+  return __cachedSkillBundle;
+}
+
+const COMPOSITION_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["indexHtml", "narration", "notes"],
+  properties: {
+    indexHtml: { type: "string" },
+    narration: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sceneId", "startSeconds", "narrationText"],
+        properties: {
+          sceneId: { type: "string" },
+          startSeconds: { type: "number" },
+          narrationText: { type: "string" },
+        },
+      },
+    },
+    notes: { type: ["string", "null"] },
+  },
+} as const;
+
+const COMPOSITION_MAX_ATTEMPTS = Number.parseInt(
+  process.env.AMPLIFIER_COMPOSITION_MAX_ATTEMPTS || "5",
+  10,
+);
+const COMPOSITION_LLM_TIMEOUT_MS = Number.parseInt(
+  process.env.AMPLIFIER_COMPOSITION_LLM_TIMEOUT_MS || "240000",
+  10,
+);
+
 async function processRenderJob(message: AmplifierQueueMessage) {
   let job = await getExplainerVideoJob(message.jobId);
   const source = await readJsonArtifact<ExplainerSourceArtifact>(
@@ -1247,11 +1304,89 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     message: "Worker claimed the job and is loading the render inputs.",
   });
 
-  let scriptArtifact = job.artifacts.script ?? null;
+  const user = await getUser(message.ownerUserId);
+  if (!user.aiBaseUrl || !user.aiApiKey || !user.aiModel) {
+    throw new Error("User AI configuration missing — cannot author composition.");
+  }
+
+  const skillBundle = getSkillBundleOnce();
+  let currentAttemptCounter = 0;
+
+  const loopResult = await runCompositionLoop({
+    brief: job.videoBrief,
+    plan: job.plan,
+    source,
+    skillBundle,
+    maxAttempts: COMPOSITION_MAX_ATTEMPTS,
+    llmTimeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
+    llm: async (conversation) => {
+      currentAttemptCounter += 1;
+      await mergeExplainerVideoJob(message.jobId, {
+        status: "planning",
+        stage: `composing_attempt_${currentAttemptCounter}`,
+        progress: Math.min(0.45, 0.18 + currentAttemptCounter * 0.06),
+        message: `Authoring composition (attempt ${currentAttemptCounter}/${COMPOSITION_MAX_ATTEMPTS}).`,
+      });
+      return authorComposition({
+        conversation,
+        schema: COMPOSITION_JSON_SCHEMA as object,
+        schemaName: "amplifier_explainer_composition",
+        ai: {
+          baseUrl: user.aiBaseUrl!,
+          apiKey: user.aiApiKey!,
+          model: user.aiModel!,
+        },
+        timeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
+      });
+    },
+    lint: lintCompositionHtml,
+  });
+
+  let usingFallback = false;
+  let scriptArtifact: ArtifactRef | null = null;
   let script: ExplainerScript;
-  if (scriptArtifact?.key) {
-    script = await readJsonArtifact<ExplainerScript>(message.assetsBucket, scriptArtifact.key);
+  let authoredIndexHtml: string | null = null;
+
+  if (loopResult.ok) {
+    authoredIndexHtml = loopResult.indexHtml;
+    // Persist the accepted composition as the script artifact (text/html).
+    scriptArtifact = await uploadBufferArtifact(
+      message.assetsBucket,
+      `${message.baseKey}/composition.html`,
+      Buffer.from(loopResult.indexHtml, "utf-8"),
+      "text/html",
+    );
+    // Build a minimal ExplainerScript so existing voiceover/captions code keeps working.
+    script = {
+      version: "2026-05-15",
+      targetDurationSeconds: job.plan.targetDurationSeconds,
+      fullNarration: loopResult.narration.map((n) => n.narrationText).join(" "),
+      scenes: [],
+      segments: loopResult.narration.map((n) => ({
+        id: n.sceneId,
+        title: n.sceneId,
+        narration: n.narrationText,
+        durationSeconds: 0,
+      })),
+    } as unknown as ExplainerScript;
   } else {
+    usingFallback = true;
+    // Archive each failed attempt's error to S3 for post-mortem.
+    for (const err of loopResult.errors) {
+      const detail = err.detail ? `\n\n${err.detail}` : "";
+      await uploadBufferArtifact(
+        message.assetsBucket,
+        `${message.baseKey}/attempts/attempt-${err.attempt}-error.txt`,
+        Buffer.from(`${err.kind}\n\n${err.message}${detail}`, "utf-8"),
+        "text/plain",
+      );
+    }
+    await mergeExplainerVideoJob(message.jobId, {
+      status: "planning",
+      stage: "fallback_template_render",
+      progress: 0.5,
+      message: `LLM authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — using template renderer.`,
+    });
     script = buildExplainerScript({
       brief: job.videoBrief,
       plan: job.plan,
@@ -1267,12 +1402,14 @@ async function processRenderJob(message: AmplifierQueueMessage) {
   job = await mergeExplainerVideoJob(message.jobId, {
     status: "storyboarding",
     stage: "script_ready",
-    progress: 0.32,
+    progress: 0.5,
     artifacts: {
       ...job.artifacts,
       script: scriptArtifact,
     },
-    message: "Narration script and scene cards are ready.",
+    message: usingFallback
+      ? "Template script ready (fallback). Continuing with voiceover and render."
+      : "LLM-authored composition accepted. Continuing with voiceover and render.",
   });
 
   let transcriptWords: TimedWord[] = [];
@@ -1351,18 +1488,22 @@ async function processRenderJob(message: AmplifierQueueMessage) {
           transcriptWords[transcriptWords.length - 1]?.end || 0,
         )
       : script.targetDurationSeconds;
-    writeFileSync(
-      join(projectDir, "index.html"),
-      buildHtmlTemplate({
-        brief: job.videoBrief,
-        plan: job.plan,
-        script,
-        transcript: transcriptWords,
-        durationSeconds,
-        narrationSrc,
-      }),
-      "utf-8",
-    );
+    if (!usingFallback && authoredIndexHtml) {
+      writeFileSync(join(projectDir, "index.html"), authoredIndexHtml, "utf-8");
+    } else {
+      writeFileSync(
+        join(projectDir, "index.html"),
+        buildHtmlTemplate({
+          brief: job.videoBrief,
+          plan: job.plan,
+          script,
+          transcript: transcriptWords,
+          durationSeconds,
+          narrationSrc,
+        }),
+        "utf-8",
+      );
+    }
 
     const outputPath = join(workDir, "output.mp4");
     const renderJob = createRenderJob({
@@ -1374,6 +1515,11 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     });
 
     await executeRenderJob(renderJob, projectDir, outputPath);
+
+    const sanity = await postRenderSanityCheck(outputPath, job.plan.targetDurationSeconds);
+    if (!sanity.ok) {
+      throw new Error(`Post-render sanity check failed: ${sanity.reason}`);
+    }
 
     job = await mergeExplainerVideoJob(message.jobId, {
       status: "uploading",
@@ -1394,7 +1540,9 @@ async function processRenderJob(message: AmplifierQueueMessage) {
       stage: "complete",
       progress: 1,
       workerStatus: "completed",
-      message: "Explainer video rendered successfully.",
+      message: usingFallback
+        ? `LLM authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — fell back to the template renderer.`
+        : "Explainer video rendered successfully.",
       artifacts: {
         ...job.artifacts,
         script: scriptArtifact,
