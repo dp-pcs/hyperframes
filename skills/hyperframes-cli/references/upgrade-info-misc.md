@@ -2,31 +2,50 @@
 
 Catch-all reference for commands that don't fit the main dev loop.
 
-## info, upgrade
+## info
 
 ```bash
-npx hyperframes info         # version and environment details
-npx hyperframes upgrade      # check for updates
+npx hyperframes info                   # project metadata
+npx hyperframes info ./my-video        # specific project
+npx hyperframes info --json
 ```
 
-`info` prints the installed HyperFrames version, Node version, OS, and resolved Chrome/FFmpeg paths — useful for bug reports.
+Prints **project** metadata: name, resolution, duration, element counts by type, track count, and total project size. Project-level — not environment. For environment health use `doctor`.
+
+## upgrade
+
+```bash
+npx hyperframes upgrade                # check + interactive prompt
+npx hyperframes upgrade --check        # check and exit, no prompt (agent-friendly)
+npx hyperframes upgrade --check --json # machine-readable: current / latest / updateAvailable
+npx hyperframes upgrade --yes          # print upgrade commands without prompting
+```
+
+Compares the installed CLI version against npm latest.
 
 ## compositions, docs
 
 ```bash
-npx hyperframes compositions          # list compositions in project
-npx hyperframes docs                  # open documentation
+npx hyperframes compositions           # list compositions in project
+npx hyperframes compositions --json
+npx hyperframes docs                   # list available topics
+npx hyperframes docs rendering         # print one topic inline in the terminal
 ```
 
-`compositions` enumerates every `data-composition-id` found in the project, including those inside sub-composition files.
+`compositions` lists every `data-composition-id` in the project (including sub-comps) with duration, resolution, and element count.
+
+`docs` prints inline documentation **in the terminal** — it does not open a browser. Topics: `data-attributes`, `examples`, `rendering`, `gsap`, `troubleshooting`, `compositions`. Run without a topic to see the list.
 
 ## benchmark
 
 ```bash
-npx hyperframes benchmark .           # benchmark render performance
+npx hyperframes benchmark              # run the preset matrix in current project
+npx hyperframes benchmark ./my-video   # specific project
+npx hyperframes benchmark --runs 5     # repeat each config N times (default 3)
+npx hyperframes benchmark --json
 ```
 
-Times a render of the current project and reports frames-per-second per stage (compile, capture, encode). Use it to measure the effect of `--workers`, `--gpu`, or `--quality` on your machine.
+Renders the project with 5 preset configurations — `30fps draft 2w`, `30fps standard 2w`, `30fps high 2w`, `30fps standard 4w`, `60fps standard 4w` — and prints a comparison of render speed and output file size. Use it to find the fastest acceptable preset for your machine. Not a single-render-with-stage-breakdown.
 
 ## telemetry
 

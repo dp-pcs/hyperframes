@@ -29,33 +29,46 @@ npx hyperframes play ./my-video       # specific project
 npx hyperframes play --port 8080      # custom port
 ```
 
-`play` serves the composition through the embeddable `<hyperframes-player>` web component instead of the full Studio UI. Use it when sharing a preview link or when Studio is heavier than needed (no editor, no panels). Requires `bun run build` to have produced the runtime + player bundles.
+`play` serves the composition through the embeddable `<hyperframes-player>` web component instead of the full Studio UI. Use it when sharing a preview link or when Studio is heavier than needed (no editor, no panels).
 
 ## render
 
 ```bash
-npx hyperframes render                                # standard MP4
-npx hyperframes render --output final.mp4             # named output
+npx hyperframes render                                # standard MP4 from cwd
+npx hyperframes render ./my-video --output ./out.mp4  # render from outside the project dir
+npx hyperframes render --output final.mp4             # named output (no timestamp)
+npx hyperframes render -c compositions/intro.html -o intro.mp4  # render a specific sub-composition file
 npx hyperframes render --quality draft                # fast iteration
 npx hyperframes render --fps 60 --quality high        # final delivery
 npx hyperframes render --format webm                  # transparent WebM
 npx hyperframes render --docker                       # byte-identical
 ```
 
-| Flag                 | Options               | Default                      | Notes                                                              |
-| -------------------- | --------------------- | ---------------------------- | ------------------------------------------------------------------ |
-| `--output`           | path                  | `renders/name_timestamp.mp4` | Output path                                                        |
-| `--fps`              | 24, 30, 60            | 30                           | 60fps doubles render time                                          |
-| `--quality`          | draft, standard, high | standard                     | draft for iterating                                                |
-| `--format`           | mp4, webm             | mp4                          | WebM supports transparency                                         |
-| `--workers`          | 1-8 or auto           | auto                         | Each spawns Chrome                                                 |
-| `--docker`           | flag                  | off                          | Reproducible output                                                |
-| `--gpu`              | flag                  | off                          | GPU-accelerated encoding                                           |
-| `--strict`           | flag                  | off                          | Fail on lint errors                                                |
-| `--strict-all`       | flag                  | off                          | Fail on errors AND warnings                                        |
-| `--variables`        | JSON object           | —                            | Override variable values declared in `data-composition-variables`  |
-| `--variables-file`   | path                  | —                            | JSON file with variable values (alternative to `--variables`)      |
-| `--strict-variables` | flag                  | off                          | Fail render on undeclared keys or type mismatches in `--variables` |
+> Default `--output` is `renders/<project-name>_<YYYY-MM-DD>_<HH-MM-SS>.<ext>` — timestamped per render so successive runs don't clobber each other. Pass `--output` to get a stable name.
+
+| Flag                                 | Options                                                                                            | Default                        | Notes                                                                                                                        |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `dir` (positional)                   | path                                                                                               | cwd                            | Project directory. Omit to use current working directory.                                                                    |
+| `--composition`, `-c`                | path to composition file                                                                           | `index.html`                   | Render a specific composition file (e.g. `compositions/intro.html`) instead of the project's `index.html`.                   |
+| `--output`, `-o`                     | path                                                                                               | `renders/<project>_<ts>.<ext>` | Output path. Default is timestamped (`<project-name>_YYYY-MM-DD_HH-MM-SS.<ext>`).                                            |
+| `--fps`                              | 24, 30, 60                                                                                         | 30                             | 60fps doubles render time                                                                                                    |
+| `--quality`                          | draft, standard, high                                                                              | standard                       | draft for iterating                                                                                                          |
+| `--format`                           | mp4, webm, mov, png-sequence                                                                       | mp4                            | WebM/MOV render with transparency; png-sequence writes RGBA frames to a directory (AE/Nuke/Fusion ingest)                    |
+| `--resolution`                       | landscape, portrait, landscape-4k, portrait-4k, square, square-4k (+ aliases `1080p`, `4k`, `uhd`) | —                              | Supersample via Chrome `deviceScaleFactor`. Aspect ratio must match composition; scale must be an integer. Not with `--hdr`. |
+| `--crf`                              | 0-51                                                                                               | —                              | Encoder CRF (lower = higher quality). Mutually exclusive with `--video-bitrate`.                                             |
+| `--video-bitrate`                    | e.g. `10M`, `5000k`                                                                                | —                              | Target bitrate. Mutually exclusive with `--crf`.                                                                             |
+| `--hdr`                              | flag                                                                                               | off                            | Force HDR output even with SDR sources. MP4 only.                                                                            |
+| `--sdr`                              | flag                                                                                               | off                            | Force SDR even with HDR sources.                                                                                             |
+| `--workers`                          | number or `auto`                                                                                   | auto                           | Each worker spawns Chrome (~256 MB)                                                                                          |
+| `--docker`                           | flag                                                                                               | off                            | Reproducible output across hosts                                                                                             |
+| `--gpu`                              | flag                                                                                               | off                            | GPU-accelerated FFmpeg encoding (NVENC / VideoToolbox / VAAPI / QSV)                                                         |
+| `--browser-gpu` / `--no-browser-gpu` | flag                                                                                               | auto (local), off (docker)     | Host GPU for Chrome/WebGL capture                                                                                            |
+| `--quiet`                            | flag                                                                                               | off                            | Suppress verbose output                                                                                                      |
+| `--strict`                           | flag                                                                                               | off                            | Fail on lint errors                                                                                                          |
+| `--strict-all`                       | flag                                                                                               | off                            | Fail on lint errors AND warnings                                                                                             |
+| `--variables`                        | JSON object                                                                                        | —                              | Override values declared in `data-composition-variables`                                                                     |
+| `--variables-file`                   | path                                                                                               | —                              | JSON file with variable values (alternative to `--variables`)                                                                |
+| `--strict-variables`                 | flag                                                                                               | off                            | Fail render on undeclared keys or type mismatches in `--variables`                                                           |
 
 **Quality guidance:** `draft` while iterating, `standard` for review, `high` for final delivery.
 

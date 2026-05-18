@@ -28,14 +28,15 @@ Lints `index.html` and all files in `compositions/`. Reports errors (must fix), 
 npx hyperframes validate              # current directory
 npx hyperframes validate ./my-project # specific project
 npx hyperframes validate --json       # agent-readable findings
-npx hyperframes validate --timeout 5000
+npx hyperframes validate --timeout 5000  # ms to wait for scripts (default 3000)
+npx hyperframes validate --no-contrast   # skip WCAG contrast audit while iterating
 ```
 
 Static lint is fast but blind to runtime failures. `validate` loads the composition in headless Chrome, plays through it, and reports:
 
 - JavaScript console errors and unhandled exceptions
-- Failed network requests (with media-file aborts filtered out)
-- WCAG AA contrast violations on visible text (foreground/background sampled at key frames)
+- Failed network requests (media-file `ERR_ABORTED` filtered out)
+- WCAG AA contrast violations on visible text — sampled at 5 timestamps across the timeline. Disable with `--no-contrast`.
 
 Run `validate` before `inspect` when an animation has scripts, fetched data, or theming. Combine with `render --strict` in CI.
 
@@ -44,9 +45,11 @@ Run `validate` before `inspect` when an animation has scripts, fetched data, or 
 ```bash
 npx hyperframes inspect                 # inspect rendered layout over the timeline
 npx hyperframes inspect ./my-project    # specific project
-npx hyperframes inspect --json          # agent-readable findings
-npx hyperframes inspect --samples 15    # denser timeline sweep
+npx hyperframes inspect --json          # agent-readable findings (schemaVersion, samples, issues, bboxes)
+npx hyperframes inspect --samples 15    # denser timeline sweep (default 9)
 npx hyperframes inspect --at 1.5,4,7.25 # explicit hero-frame timestamps
+npx hyperframes inspect --tolerance 4   # allowed overflow in px before reporting (default 2)
+npx hyperframes inspect --strict        # exit non-zero on warnings too (default: only errors)
 ```
 
 Use this after `lint` and `validate`, especially for compositions with speech bubbles, cards, captions, or tight typography. It reports:
