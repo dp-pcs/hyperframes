@@ -264,17 +264,13 @@ Two numbers Step 5 needs to wire `data-start` and `data-duration` correctly:
 
 Example: `Transition in at: 4.2s · GSAP duration: 5.5s` → Step 5 sets `data-start="4.2" data-duration="5.5"`.
 
-### Animation Sequence
+### Animation Sequence — must span the ENTIRE beat
 
-Millisecond-level choreography for everything in this beat. The sub-agent executes this — it doesn't invent it. Every entrance, hold, camera move, layer event, and exit with a timestamp.
+A beat is a SCENE with internal life, not a single entrance followed by a static hold. Things should be happening throughout the entire duration — new elements appearing, existing elements transforming, camera drifting, details revealing, sub-moments unfolding.
 
-If you know exact GSAP values — write them. If you don't, describe the feel and behavior specifically enough that the sub-agent can derive the right values: "snappy overshoot bounce settling into place" tells the sub-agent to use back.out; "slow heavy drift" tells it to use power1.inOut with a longer duration. Vague adjectives are useless — describe what the motion physically does and how it feels.
+If your animation sequence only has events in the first 2 seconds and the beat lasts longer, the rest is dead air. Plan moments across the full duration. Nothing should sit unchanged for more than ~2 seconds — if an element is on screen, give it continuous motion (drift, breathe, pulse, parallax).
 
-FORMAT EXAMPLE of structure (write the real choreography for THIS beat):
-
-- `0.0s`: [what appears or starts, and how it feels/behaves]
-- `0.Xs`: [next event — either exact values or precise behavioral description]
-- `[beat-end - 0.4s]`: [exit / transition fires]
+Describe the feel precisely: "snappy overshoot bounce settling into place" → back.out; "slow heavy drift" → power1.inOut. Vague adjectives are useless.
 
 ---
 

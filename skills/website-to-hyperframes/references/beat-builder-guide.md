@@ -115,6 +115,10 @@ Tell the main agent:
 
 ---
 
+## Continuous motion — the most important rule
+
+A beat is a SCENE, not a single entrance animation. Your GSAP timeline should have events spread across the ENTIRE beat duration — not just entrance tweens in the first 1-2 seconds followed by nothing. If an element is on screen, it should be doing something: drifting, breathing, parallaxing, revealing new details, transforming. Nothing sits unchanged for more than ~2 seconds. After elements enter, add continuous hold motion: Ken Burns drift on images, subtle y/scale breathing on text, parallax layers moving at different speeds, secondary elements appearing mid-beat.
+
 ## Rules
 
 - SCRIPT PLACEMENT: scripts inside `<template>`, never after `</template>`. Scripts outside see no DOM.
