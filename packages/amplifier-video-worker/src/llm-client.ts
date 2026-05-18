@@ -18,6 +18,14 @@ export type AuthorCompositionArgs<_T> = {
   fetchImpl?: typeof fetch;
 };
 
+function stripJsonFences(raw: string): string {
+  return raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+}
+
 function shouldUseResponsesApi(ai: AiConfig): boolean {
   const normalizedModel = ai.model.replace(/^@[^/]+\//, "");
   return (
@@ -86,7 +94,14 @@ async function callResponses<T>(args: AuthorCompositionArgs<T>): Promise<T> {
     if (!text || !text.trim()) {
       throw new Error("OpenAI Responses API returned an empty response");
     }
-    return JSON.parse(text) as T;
+    const cleaned = stripJsonFences(text);
+    try {
+      return JSON.parse(cleaned) as T;
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse JSON from LLM output: ${parseError instanceof Error ? parseError.message : String(parseError)}. Output (first 200 chars): ${cleaned.slice(0, 200)}`,
+      );
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -124,7 +139,14 @@ async function callChatCompletions<T>(args: AuthorCompositionArgs<T>): Promise<T
     if (!text) {
       throw new Error("Chat Completions returned an empty response");
     }
-    return JSON.parse(text) as T;
+    const cleaned = stripJsonFences(text);
+    try {
+      return JSON.parse(cleaned) as T;
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse JSON from LLM output: ${parseError instanceof Error ? parseError.message : String(parseError)}. Output (first 200 chars): ${cleaned.slice(0, 200)}`,
+      );
+    }
   } finally {
     clearTimeout(timer);
   }

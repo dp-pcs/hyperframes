@@ -99,4 +99,58 @@ describe("authorComposition", () => {
       }),
     ).rejects.toThrow(/empty/i);
   });
+
+  test("strips markdown fences from Responses output before parsing", async () => {
+    const fakeFetch = async () =>
+      new Response(
+        JSON.stringify({
+          output_text:
+            '```json\n{"indexHtml": "<!doctype html>", "narration": [], "notes": null}\n```',
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await authorComposition({
+      conversation: [{ role: "user", content: "x" }],
+      schema: dummySchema,
+      schemaName: "test_schema",
+      ai: { baseUrl: "https://api.openai.com/v1", apiKey: "sk-x", model: "gpt-5" },
+      fetchImpl: fakeFetch as any,
+      timeoutMs: 1000,
+    });
+
+    expect((result as any).indexHtml).toContain("<!doctype html>");
+  });
+
+  test("strips markdown fences from Chat Completions output before parsing", async () => {
+    const fakeFetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content:
+                  '```\n{"indexHtml": "<!doctype html>", "narration": [], "notes": null}\n```',
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await authorComposition({
+      conversation: [{ role: "user", content: "x" }],
+      schema: dummySchema,
+      schemaName: "test_schema",
+      ai: {
+        baseUrl: "https://api.fireworks.ai/inference/v1",
+        apiKey: "fw-x",
+        model: "qwen3-coder",
+      },
+      fetchImpl: fakeFetch as any,
+      timeoutMs: 1000,
+    });
+
+    expect((result as any).indexHtml).toContain("<!doctype html>");
+  });
 });
