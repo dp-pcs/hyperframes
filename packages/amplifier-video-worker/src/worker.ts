@@ -1,9 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, join as joinPath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dirname, join as joinPath } from "node:path";
 import { createHash } from "node:crypto";
 import { DeleteMessageCommand, ReceiveMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { createRenderJob, executeRenderJob } from "@hyperframes/producer";
@@ -1304,121 +1303,133 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     message: "Worker claimed the job and is loading the render inputs.",
   });
 
-  const user = await getUser(message.ownerUserId);
-  if (!user.aiBaseUrl || !user.aiApiKey || !user.aiModel) {
-    throw new Error("User AI configuration missing — cannot author composition.");
-  }
+  let workDir: string | null = null;
 
-  const skillBundle = getSkillBundleOnce();
-  let currentAttemptCounter = 0;
-
-  const loopResult = await runCompositionLoop({
-    brief: job.videoBrief,
-    plan: job.plan,
-    source,
-    skillBundle,
-    maxAttempts: COMPOSITION_MAX_ATTEMPTS,
-    llmTimeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
-    llm: async (conversation) => {
-      currentAttemptCounter += 1;
-      await mergeExplainerVideoJob(message.jobId, {
-        status: "planning",
-        stage: `composing_attempt_${currentAttemptCounter}`,
-        progress: Math.min(0.45, 0.18 + currentAttemptCounter * 0.06),
-        message: `Authoring composition (attempt ${currentAttemptCounter}/${COMPOSITION_MAX_ATTEMPTS}).`,
-      });
-      return authorComposition({
-        conversation,
-        schema: COMPOSITION_JSON_SCHEMA as object,
-        schemaName: "amplifier_explainer_composition",
-        ai: {
-          baseUrl: user.aiBaseUrl!,
-          apiKey: user.aiApiKey!,
-          model: user.aiModel!,
-        },
-        timeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
-      });
-    },
-    lint: lintCompositionHtml,
-  });
-
-  let usingFallback = false;
-  let scriptArtifact: ArtifactRef | null = null;
-  let script: ExplainerScript;
-  let authoredIndexHtml: string | null = null;
-
-  if (loopResult.ok) {
-    authoredIndexHtml = loopResult.indexHtml;
-    // Persist the accepted composition as the script artifact (text/html).
-    scriptArtifact = await uploadBufferArtifact(
-      message.assetsBucket,
-      `${message.baseKey}/composition.html`,
-      Buffer.from(loopResult.indexHtml, "utf-8"),
-      "text/html",
-    );
-    // Build a minimal ExplainerScript so existing voiceover/captions code keeps working.
-    script = {
-      version: "2026-05-15",
-      targetDurationSeconds: job.plan.targetDurationSeconds,
-      fullNarration: loopResult.narration.map((n) => n.narrationText).join(" "),
-      scenes: [],
-      segments: loopResult.narration.map((n) => ({
-        id: n.sceneId,
-        title: n.sceneId,
-        narration: n.narrationText,
-        durationSeconds: 0,
-      })),
-    } as unknown as ExplainerScript;
-  } else {
-    usingFallback = true;
-    // Archive each failed attempt's error to S3 for post-mortem.
-    for (const err of loopResult.errors) {
-      const detail = err.detail ? `\n\n${err.detail}` : "";
-      await uploadBufferArtifact(
-        message.assetsBucket,
-        `${message.baseKey}/attempts/attempt-${err.attempt}-error.txt`,
-        Buffer.from(`${err.kind}\n\n${err.message}${detail}`, "utf-8"),
-        "text/plain",
-      );
+  try {
+    const user = await getUser(message.ownerUserId);
+    if (!user.aiBaseUrl || !user.aiApiKey || !user.aiModel) {
+      throw new Error("User AI configuration missing — cannot author composition.");
     }
-    await mergeExplainerVideoJob(message.jobId, {
-      status: "planning",
-      stage: "fallback_template_render",
-      progress: 0.5,
-      message: `LLM authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — using template renderer.`,
-    });
-    script = buildExplainerScript({
+
+    const skillBundle = getSkillBundleOnce();
+    let currentAttemptCounter = 0;
+
+    const loopResult = await runCompositionLoop({
       brief: job.videoBrief,
       plan: job.plan,
       source,
+      skillBundle,
+      maxAttempts: COMPOSITION_MAX_ATTEMPTS,
+      llmTimeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
+      llm: async (conversation) => {
+        currentAttemptCounter += 1;
+        await mergeExplainerVideoJob(message.jobId, {
+          status: "planning",
+          stage: `composing_attempt_${currentAttemptCounter}`,
+          progress: Math.min(0.45, 0.18 + currentAttemptCounter * 0.06),
+          message: `Authoring composition (attempt ${currentAttemptCounter}/${COMPOSITION_MAX_ATTEMPTS}).`,
+        });
+        return authorComposition({
+          conversation,
+          schema: COMPOSITION_JSON_SCHEMA as object,
+          schemaName: "amplifier_explainer_composition",
+          ai: {
+            baseUrl: user.aiBaseUrl!,
+            apiKey: user.aiApiKey!,
+            model: user.aiModel!,
+          },
+          timeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
+        });
+      },
+      lint: lintCompositionHtml,
     });
-    scriptArtifact = await uploadJsonArtifact(
-      message.assetsBucket,
-      `${message.baseKey}/script.json`,
-      script,
-    );
-  }
 
-  job = await mergeExplainerVideoJob(message.jobId, {
-    status: "storyboarding",
-    stage: "script_ready",
-    progress: 0.5,
-    artifacts: {
-      ...job.artifacts,
-      script: scriptArtifact,
-    },
-    message: usingFallback
-      ? "Template script ready (fallback). Continuing with voiceover and render."
-      : "LLM-authored composition accepted. Continuing with voiceover and render.",
-  });
+    let usingFallback = false;
+    let scriptArtifact: ArtifactRef | null = null;
+    let script: ExplainerScript;
+    let authoredIndexHtml: string | null = null;
 
-  let transcriptWords: TimedWord[] = [];
-  let voiceoverArtifact = job.artifacts.voiceover ?? null;
-  const workDir = mkdtempSync(join(tmpdir(), "amplifier-video-worker-"));
-  const projectDir = join(workDir, "project");
-  mkdirSync(projectDir, { recursive: true });
+    if (loopResult.ok) {
+      authoredIndexHtml = loopResult.indexHtml;
+      // Persist the accepted composition as the script artifact (text/html).
+      scriptArtifact = await uploadBufferArtifact(
+        message.assetsBucket,
+        `${message.baseKey}/composition.html`,
+        Buffer.from(loopResult.indexHtml, "utf-8"),
+        "text/html",
+      );
+      // Build a minimal ExplainerScript so existing voiceover/captions code keeps working.
+      // Derive per-segment durations from narration startSeconds so buildSyntheticWordTimings
+      // produces non-colliding word timings on the captions-only path.
+      const narration = loopResult.narration;
+      const llmSegments = narration.map((n, idx) => {
+        const next = narration[idx + 1];
+        const duration = next
+          ? Math.max(0.5, next.startSeconds - n.startSeconds)
+          : Math.max(0.5, job.plan.targetDurationSeconds - n.startSeconds);
+        return {
+          id: n.sceneId,
+          title: n.sceneId,
+          narration: n.narrationText,
+          durationSeconds: duration,
+        };
+      });
+      script = {
+        version: "2026-05-15",
+        targetDurationSeconds: job.plan.targetDurationSeconds,
+        fullNarration: narration.map((n) => n.narrationText).join(" "),
+        scenes: [],
+        segments: llmSegments,
+      } as unknown as ExplainerScript;
+    } else {
+      usingFallback = true;
+      // Archive each failed attempt's error to S3 for post-mortem.
+      for (const err of loopResult.errors) {
+        const detail = err.detail ? `\n\n${err.detail}` : "";
+        await uploadBufferArtifact(
+          message.assetsBucket,
+          `${message.baseKey}/attempts/attempt-${err.attempt}-error.txt`,
+          Buffer.from(`${err.kind}\n\n${err.message}${detail}`, "utf-8"),
+          "text/plain",
+        );
+      }
+      await mergeExplainerVideoJob(message.jobId, {
+        status: "planning",
+        stage: "fallback_template_render",
+        progress: 0.5,
+        message: `LLM authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — using template renderer.`,
+      });
+      script = buildExplainerScript({
+        brief: job.videoBrief,
+        plan: job.plan,
+        source,
+      });
+      scriptArtifact = await uploadJsonArtifact(
+        message.assetsBucket,
+        `${message.baseKey}/script.json`,
+        script,
+      );
+    }
 
-  try {
+    job = await mergeExplainerVideoJob(message.jobId, {
+      status: "storyboarding",
+      stage: "script_ready",
+      progress: 0.5,
+      artifacts: {
+        ...job.artifacts,
+        script: scriptArtifact,
+      },
+      message: usingFallback
+        ? "Template script ready (fallback). Continuing with voiceover and render."
+        : "LLM-authored composition accepted. Continuing with voiceover and render.",
+    });
+
+    let transcriptWords: TimedWord[] = [];
+    let voiceoverArtifact = job.artifacts.voiceover ?? null;
+    workDir = mkdtempSync(join(tmpdir(), "amplifier-video-worker-"));
+    const projectDir = join(workDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+
     let narrationSrc: string | null = null;
     if (job.plan.voice.enabled) {
       const voiceStyle = job.plan.voice.style || "documentary";
@@ -1564,7 +1575,9 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     });
     throw error;
   } finally {
-    rmSync(workDir, { recursive: true, force: true });
+    if (workDir) {
+      rmSync(workDir, { recursive: true, force: true });
+    }
   }
 }
 
