@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <base href="__BASE_HREF__" />
     <title>Design your visual direction</title>
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/CustomEase.min.js"></script>
@@ -1147,6 +1148,20 @@
         transition: opacity 0.5s ease;
       }
       #phase-mood .tp-transition-overlay.active { opacity: 1; pointer-events: all; }
+      #phase-mood .tp-card.provided {
+        border: 2px solid #4ade80;
+        position: relative;
+      }
+      #phase-mood .tp-card.provided .cinfo::before {
+        content: "YOUR DESIGN";
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: #0e0e0e;
+        background: #4ade80;
+        padding: 2px 8px;
+        margin-right: 10px;
+      }
       #phase-mood .tp-card.selected-exit {
         position: relative;
         z-index: 201;
@@ -1389,9 +1404,9 @@
         { name: "Rounded", value: "12px" },
       ];
       var DENSITIES = [
-        { name: "Tight", padding: "8-12px", gap: "8-12px", desc: "Compact" },
-        { name: "Normal", padding: "16-24px", gap: "16-20px", desc: "Balanced" },
-        { name: "Generous", padding: "32-48px", gap: "28-40px", desc: "Spacious" },
+        { name: "Tight", padding: "10px", gap: "10px", desc: "Compact", label: "8–12px" },
+        { name: "Normal", padding: "20px", gap: "16px", desc: "Balanced", label: "16–24px" },
+        { name: "Generous", padding: "40px", gap: "32px", desc: "Spacious", label: "32–48px" },
       ];
       var DEPTHS = [
         { name: "Flat", desc: "No shadows" },
@@ -2452,7 +2467,6 @@
       }
 
       function sel(key, idx, container, cls) {
-        console.log("[PICKER] sel:", key, "=", idx);
         container.querySelectorAll(cls || ".opt").forEach(function (c) {
           c.classList.remove("selected");
         });
@@ -2480,6 +2494,56 @@
         document.getElementById("md-overlay").classList.remove("visible");
       }
 
+      function updateSlideIframes() {
+        var iframes = document.querySelectorAll("#sc-scene-grid iframe, #sc-specimen-grid iframe");
+        if (!iframes.length) return;
+        var p = picks.palette !== null ? PALETTES[picks.palette] : PALETTES[0];
+        var cr = picks.corners !== null ? CORNERS[picks.corners] : CORNERS[1];
+        var dnIdx = picks.density !== null ? picks.density : 1;
+        var dp = picks.depth !== null ? DEPTHS[picks.depth] : DEPTHS[0];
+        var t = picks.type !== null ? TYPEPAIRS[picks.type] : TYPEPAIRS[0];
+        var padV = DENSITIES[dnIdx].padding || "20px";
+        var gapV = DENSITIES[dnIdx].gap || "16px";
+        var shadowV = dp.name === "Flat" ? "none" : dp.name === "Layered" ? "0 8px 24px rgba(0,0,0,0.12)" : "0 2px 8px rgba(0,0,0,0.06)";
+
+        // Rewrite the original :root block in the template's own <style> tag
+        var newRoot = ":root{" +
+          "--bg:" + p.secondary + ";--fg:" + p.primary + ";--mt:" + (p.tertiary||"#888") + ";--ac:" + p.accent + ";" +
+          "--tp-primary:" + p.primary + ";--tp-secondary:" + p.secondary + ";--tp-tertiary:" + (p.tertiary||"#888") + ";--tp-accent:" + p.accent + ";" +
+          "--hair:color-mix(in srgb," + p.primary + " 12%,transparent);--surf:color-mix(in srgb," + p.secondary + " 94%," + p.primary + ");--dim:color-mix(in srgb," + p.primary + " 55%," + p.secondary + ");" +
+          "--cr:" + cr.value + ";--pad:" + padV + ";--gap:" + gapV + ";--shadow:" + shadowV + ";" +
+          "}";
+
+        iframes.forEach(function(ifr) {
+          if (!ifr.contentDocument || !ifr.contentDocument.head) return;
+          var doc = ifr.contentDocument;
+          // Find and rewrite the first <style> tag that contains :root
+          var styles = doc.head.querySelectorAll("style");
+          for (var si = 0; si < styles.length; si++) {
+            var txt = styles[si].textContent;
+            if (txt.indexOf(":root") !== -1) {
+              styles[si].textContent = txt.replace(/:root\s*\{[^}]+\}/, newRoot);
+              break;
+            }
+          }
+          // Force body colors directly
+          if (doc.body) {
+            doc.body.style.background = p.secondary;
+            doc.body.style.color = p.primary;
+          }
+          doc.querySelectorAll(".dark,.s6").forEach(function(el) {
+            el.style.background = p.primary;
+            el.style.color = p.secondary;
+          });
+          // Font override
+          if (picks.type !== null && picks.type > 0) {
+            var fl = doc.getElementById("tp-font-link");
+            if (!fl) { fl = doc.createElement("link"); fl.id = "tp-font-link"; fl.rel = "stylesheet"; doc.head.appendChild(fl); }
+            fl.href = "https://fonts.googleapis.com/css2?family=" + t.headline.family.replace(/ /g,"+") + ":wght@" + t.headline.weight + "&family=" + t.body.family.replace(/ /g,"+") + ":wght@" + t.body.weight + "&display=swap";
+          }
+        });
+      }
+
       function renderDesignIframe() {
         var slug = window._currentTemplateSlug;
         if (!slug) return;
@@ -2487,7 +2551,6 @@
         if (!iframe) return;
 
         var p = picks.palette !== null ? PALETTES[picks.palette] : PALETTES[0];
-        console.log("[PICKER] palette:", picks.palette, "→", p.name, p.primary, p.secondary, p.tertiary, p.accent);
         var t = picks.type !== null ? TYPEPAIRS[picks.type] : TYPEPAIRS[0];
         var e = picks.easing !== null ? EASINGS[picks.easing] : EASINGS[0];
         var cr = picks.corners !== null ? CORNERS[picks.corners] : CORNERS[1];
@@ -2569,6 +2632,10 @@
           "studio":["Anton",400,"Inter",400],
           "vellum":["Cormorant Garamond",500,"Cormorant Garamond",400]
         };
+        if (typeof DESIGN_MD !== "undefined" && DESIGN_MD) {
+          NATIVE_PALETTES["user-design"] = [DESIGN_MD.primary, DESIGN_MD.secondary, DESIGN_MD.tertiary, DESIGN_MD.accent];
+          NATIVE_FONTS["user-design"] = [DESIGN_MD.font, 500, DESIGN_MD.font, 400];
+        }
         if (PALETTES[0]._native !== slug && NATIVE_PALETTES[slug]) {
           var np = NATIVE_PALETTES[slug];
           PALETTES[0].primary = np[0];
@@ -2631,7 +2698,7 @@
         h = h.replace(/__ELEVATION__/g, dp.name);
         h = h.replace(/__DENSITY__/g, dn.name + " — " + dn.desc);
         h = h.replace(/__BORDER__/g, "4px solid");
-        h = h.replace(/__SHADOW__/g, "8 8 0");
+        h = h.replace(/__SHADOW__/g, dp.name === "Flat" ? "none" : dp.name === "Layered" ? "0 8px 24px rgba(0,0,0,0.12)" : "0 2px 8px rgba(0,0,0,0.06)");
         h = h.replace(/__EASING_NAME__/g, e.name.toLowerCase());
         h = h.replace(/__EASING_VALUE__/g, e.value);
         h = h.replace(/__EASING_DESC__/g, e.desc);
@@ -2669,7 +2736,7 @@
           h = h.replace(/__SHADER_VERTEX__/g, vtxSrc.replace(/&/g,'&amp;').replace(/</g,'&lt;'));
           h = h.replace(/__SHADER_FRAGMENT__/g, fragSrc.replace(/&/g,'&amp;').replace(/</g,'&lt;'));
 
-          var bgColors = [p.secondary, p.accent, p.tertiary || "#888"];
+          var bgColors = getBgColors();
           var _r = bg._render || { brightness:1, contrast:1, saturation:1 };
           var isSphere = bg.type === "sphere";
           var dist = isSphere ? 14 : bg.camDist;
@@ -2689,7 +2756,7 @@
           ss += 's.add(new THREE.AmbientLight(0xffffff,.6));const dl=new THREE.DirectionalLight(0xffffff,.8);dl.position.set(5,5,5);s.add(dl);\n';
           ss += 'const cs=n=>{const v=getComputedStyle(document.documentElement).getPropertyValue(n).trim();return new THREE.Color(v||"#111")};\n';
           ss += 'const u={uTime:{value:0},uSpeed:{value:' + bg.speed + '},uDensity:{value:' + bg.density + '},uStrength:{value:' + bg.strength + '},';
-          ss += 'uColor1:{value:cs("--secondary")},uColor2:{value:cs("--accent")},uColor3:{value:cs("--tertiary")},';
+          ss += 'uColor1:{value:new THREE.Color("' + bgColors[0] + '")},uColor2:{value:new THREE.Color("' + bgColors[1] + '")},uColor3:{value:new THREE.Color("' + (bgColors[2]||"#888") + '")},';
           ss += 'uBrightness:{value:' + _r.brightness + '},uContrast:{value:' + _r.contrast + '},uSaturation:{value:' + _r.saturation + '}};\n';
           ss += 'const vtx=document.getElementById("vtx-src").textContent,frg=document.getElementById("frg-src").textContent;\n';
           ss += 'const mat=new THREE.ShaderMaterial({vertexShader:vtx,fragmentShader:frg,uniforms:u,side:THREE.DoubleSide});\n';
@@ -2739,7 +2806,8 @@
             tmplCss = tmplCss.replace(/--tp-secondary:\s*[^;]+;/g, "--tp-secondary: var(--secondary);");
             tmplCss = tmplCss.replace(/--tp-tertiary:\s*[^;]+;/g, "--tp-tertiary: var(--tertiary);");
             tmplCss = tmplCss.replace(/--tp-accent:\s*[^;]+;/g, "--tp-accent: var(--accent);");
-            var scoped = tmplCss.replace(/:root\s*\{/g, ".ds-slide-frame {").replace(/^\s*\*\s*,/gm, ".ds-slide-frame *,").replace(/^\s*\*\s*\{/gm, ".ds-slide-frame * {").replace(/\*::before/g, ".ds-slide-frame *::before").replace(/\*::after/g, ".ds-slide-frame *::after").replace(/^(\s*)(\.[\w-])/gm, "$1.ds-slide-frame $2").replace(/^(\s*)(section|h1|h2|h3|p|ul|li|a|span|svg|div)(\s*[{,.])/gm, "$1.ds-slide-frame $2$3").replace(/\.ds-slide-frame \.ds-slide-frame/g, ".ds-slide-frame");
+            var scoped = tmplCss.replace(/:root\s*\{/g, ".ds-slide-frame {").replace(/^\s*\*\s*,/gm, ".ds-slide-frame *,").replace(/^\s*\*\s*\{/gm, ".ds-slide-frame * {").replace(/\*::before/g, ".ds-slide-frame *::before").replace(/\*::after/g, ".ds-slide-frame *::after").replace(/^(\s*)(\.[a-zA-Z_][\w-]*)/gm, "$1.ds-slide-frame $2").replace(/^(\s*)(section|h1|h2|h3|p|ul|li|a|span|svg|div)(\s*[{,.])/gm, "$1.ds-slide-frame $2$3").replace(/\.ds-slide-frame \.ds-slide-frame/g, ".ds-slide-frame");
+            scoped += "\n.ds-slide-frame{--cr:" + cr.value + ";--pad:" + (dn.padding||"20px") + ";--gap:" + (dn.gap||"16px") + ";--shadow:" + (dp.name === "Flat" ? "none" : dp.name === "Layered" ? "0 8px 24px rgba(0,0,0,0.12)" : "0 2px 8px rgba(0,0,0,0.06)") + "}";
             scoped += "\n.ds-slide-frame .slide,.ds-slide-frame section{display:flex!important;flex-direction:column!important;opacity:1!important;position:relative!important;width:1920px!important;height:1080px!important}";
             scoped += "\n.ds-slide-frame .slide.dark{background:" + p.secondary + "!important;color:" + p.primary + "!important}";
             scoped += "\n.ds-slide-frame .slide.orange{background:" + p.accent + "!important}";
@@ -2819,6 +2887,7 @@
           if (empty) empty.style.display = "none";
           sc.style.display = "none";
           renderDesignIframe();
+          updateSlideIframes();
           return;
         }
 
@@ -2911,15 +2980,27 @@
               "  --tp-primary: " + p.primary + " !important;\n" +
               "  --tp-secondary: " + p.secondary + " !important;\n" +
               "  --tp-tertiary: " + p.tertiary + " !important;\n" +
-              "  --tp-accent: " + p.accent + " !important;\n";
+              "  --tp-accent: " + p.accent + " !important;\n" +
+              "  --bg: " + p.secondary + " !important;\n" +
+              "  --fg: " + p.primary + " !important;\n" +
+              "  --mt: " + (p.tertiary || "#888") + " !important;\n" +
+              "  --ac: " + p.accent + " !important;\n" +
+              "  --hair: color-mix(in srgb," + p.primary + " 12%,transparent) !important;\n" +
+              "  --surf: color-mix(in srgb," + p.secondary + " 94%," + p.primary + ") !important;\n" +
+              "  --dim: color-mix(in srgb," + p.primary + " 55%," + p.secondary + ") !important;\n";
+            overrideCss += "html,body { background: " + p.secondary + " !important; color: " + p.primary + " !important; }\n";
           }
 
-          // Surface tokens
+          // Surface tokens — use both --tp-* (for themed templates) and --cr/--pad/--gap/--shadow (for user-design)
           overrideCss +=
-            "  --tp-radius: " + cr.value + ";\n" +
-            "  --tp-padding: " + pad + ";\n" +
-            "  --tp-gap: " + gap + ";\n" +
-            "  --tp-shadow: " + shadow + ";\n" +
+            "  --tp-radius: " + cr.value + " !important;\n" +
+            "  --tp-padding: " + pad + " !important;\n" +
+            "  --tp-gap: " + gap + " !important;\n" +
+            "  --tp-shadow: " + shadow + " !important;\n" +
+            "  --cr: " + cr.value + " !important;\n" +
+            "  --pad: " + pad + " !important;\n" +
+            "  --gap: " + gap + " !important;\n" +
+            "  --shadow: " + shadow + " !important;\n" +
             "}\n";
 
           // Typography: override fonts via JS (CSS can't catch all custom classes)
@@ -3194,7 +3275,7 @@
           h = h.replace(/__ELEVATION__/g, dp.name);
           h = h.replace(/__DENSITY__/g, dn.name + ' — ' + dn.desc);
           h = h.replace(/__BORDER__/g, '4px solid');
-          h = h.replace(/__SHADOW__/g, '8 8 0');
+          h = h.replace(/__SHADOW__/g, dp.name === 'Flat' ? 'none' : dp.name === 'Layered' ? '0 8px 24px rgba(0,0,0,0.12)' : '0 2px 8px rgba(0,0,0,0.06)');
 
           // Motion
           if (easeObj) {
@@ -3258,7 +3339,7 @@
             ss += 's.add(new THREE.AmbientLight(0xffffff,.6));const dl=new THREE.DirectionalLight(0xffffff,.8);dl.position.set(5,5,5);s.add(dl);\n';
             ss += 'const cs=n=>{const v=getComputedStyle(document.documentElement).getPropertyValue(n).trim();return new THREE.Color(v||"#111")};\n';
             ss += 'const u={uTime:{value:0},uSpeed:{value:' + bgpObj.speed + '},uDensity:{value:' + bgpObj.density + '},uStrength:{value:' + bgpObj.strength + '},';
-            ss += 'uColor1:{value:cs("--secondary")},uColor2:{value:cs("--accent")},uColor3:{value:cs("--tertiary")},';
+            ss += 'uColor1:{value:new THREE.Color("' + bgColors[0] + '")},uColor2:{value:new THREE.Color("' + bgColors[1] + '")},uColor3:{value:new THREE.Color("' + (bgColors[2]||"#888") + '")},';
             ss += 'uBrightness:{value:' + _r.brightness + '},uContrast:{value:' + _r.contrast + '},uSaturation:{value:' + _r.saturation + '}};\n';
             ss += 'const vtx=document.getElementById("vtx-src").textContent,frg=document.getElementById("frg-src").textContent;\n';
             ss += 'const mat=new THREE.ShaderMaterial({vertexShader:vtx,fragmentShader:frg,uniforms:u,side:THREE.DoubleSide});\n';
@@ -3324,7 +3405,7 @@
                 .replace(/^\s*\*\s*\{/gm, '.ds-slide-frame * {')
                 .replace(/\*::before/g, '.ds-slide-frame *::before')
                 .replace(/\*::after/g, '.ds-slide-frame *::after')
-                .replace(/^(\s*)(\.[\w-])/gm, '$1.ds-slide-frame $2')
+                .replace(/^(\s*)(\.[a-zA-Z_][\w-]*)/gm, '$1.ds-slide-frame $2')
                 .replace(/^(\s*)(section|h1|h2|h3|p|ul|li|a|span|svg|div)(\s*[{,.])/gm, '$1.ds-slide-frame $2$3')
                 .replace(/\.ds-slide-frame \.ds-slide-frame/g, '.ds-slide-frame');
               scopedCss += '\n.ds-slide-frame .slide, .ds-slide-frame section { display:flex !important; opacity:1 !important; position:relative !important; width:1920px !important; height:1080px !important; }';
@@ -3570,7 +3651,7 @@
               .replace(/^\s*\*\s*\{/gm, '.ds-slide-frame * {')
               .replace(/\*::before/g, '.ds-slide-frame *::before')
               .replace(/\*::after/g, '.ds-slide-frame *::after')
-              .replace(/^(\s*)(\.[\w-])/gm, '$1.ds-slide-frame $2')
+              .replace(/^(\s*)(\.[a-zA-Z_][\w-]*)/gm, '$1.ds-slide-frame $2')
               .replace(/^(\s*)(section|h1|h2|h3|p|ul|li|a|span|svg|div)(\s*[{,.])/gm, '$1.ds-slide-frame $2$3')
               .replace(/\.ds-slide-frame \.ds-slide-frame/g, '.ds-slide-frame');
             scopedCss += '\n.ds-slide-frame .slide, .ds-slide-frame section { display:flex !important; opacity:1 !important; position:relative !important; width:1920px !important; height:1080px !important; }';
@@ -3695,6 +3776,7 @@
           var ifr = document.getElementById("tp-ifr-" + t.slug);
           if (!ifr || !ifr.contentDocument) return;
           var doc = ifr.contentDocument;
+          if (!doc.head) return;
           var style = doc.getElementById("tp-pal-override");
           if (!style) { style = doc.createElement("style"); style.id = "tp-pal-override"; doc.head.appendChild(style); }
           if (tpActivePal === 0) {
@@ -3865,7 +3947,7 @@
         grid.innerHTML = "";
         ALL_TEMPLATES.forEach(function(t) {
           var card = document.createElement("div");
-          card.className = "tp-card";
+          card.className = "tp-card" + (t._provided ? " provided" : "");
           card.id = "tp-card-" + t.slug;
           card.innerHTML =
             '<div class="cprev"><iframe id="tp-ifr-' + t.slug + '" src="templates/' + t.slug + '/template.html" sandbox="allow-same-origin" loading="lazy" style="width:1920px;height:1080px;border:none;transform-origin:top left;pointer-events:none;"></iframe></div>' +
@@ -3920,7 +4002,7 @@
         if (pick.palette) {
           var bestIdx = 0, bestDist = Infinity;
           PALETTES.forEach(function(p, i) {
-            if (i === 0) return;
+            if (i === 0 || !p.secondary || !p.primary || !p.accent) return;
             var d = Math.abs(parseInt(p.secondary.slice(1,3),16) - parseInt(pick.palette.bg.slice(1,3),16))
                   + Math.abs(parseInt(p.primary.slice(1,3),16) - parseInt(pick.palette.fg.slice(1,3),16))
                   + Math.abs(parseInt(p.accent.slice(1,3),16) - parseInt(pick.palette.accent.slice(1,3),16));
@@ -3977,6 +4059,7 @@
                     var cell = document.createElement("div");
                     cell.className = "specimen-cell" + (slideIdx === 0 ? " active" : "");
                     cell.dataset.slideIdx = slideIdx;
+                    cell.setAttribute("data-slide-idx", slideIdx);
                     var specIfr = document.createElement("iframe");
                     specIfr.src = "templates/" + pick.slug + "/template.html";
                     specIfr.sandbox = "allow-same-origin";
@@ -4056,6 +4139,18 @@
       if (typeof ALL_TEMPLATES !== "undefined" && ALL_TEMPLATES.length) {
         tpBuildPalChips();
         tpBuildGrid();
+        // Auto-advance to Phase 2 when design.md provides a user-design template
+        if (typeof DESIGN_MD !== "undefined" && DESIGN_MD) {
+          // Find matching palette or use first non-default
+          var dmPalIdx = 1;
+          for (var di = 1; di < PALETTES.length; di++) {
+            if (PALETTES[di].accent === DESIGN_MD.accent) { dmPalIdx = di; break; }
+          }
+          tpActivePal = dmPalIdx;
+          tpBuildPalChips();
+          tpApplyAllPalettes();
+          setTimeout(function() { tpSelectTemplate("user-design"); }, 600);
+        }
       }
     </script>
 

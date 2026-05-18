@@ -36,11 +36,20 @@ Most prompts already answer 2-3 of these — a typical brief is 2-3 questions, n
 
 1. **`DESIGN.html` exists** → Read it using the guide at [references/design-html.md](references/design-html.md). This is the source of truth for brand colors, fonts, slide layouts, shader backgrounds, and constraints. Use exact values — don't invent colors or substitute fonts. Proceed to Step 2.
 
-2. **No `DESIGN.html`, but `design.md` or `DESIGN.md` exists** → Prompt the user:
+2. **No `DESIGN.html`, but `design.md` or `DESIGN.md` exists** → Generate a bespoke DESIGN.html:
 
-   > "I found a design.md but no DESIGN.html. Would you like me to generate a visual design system showcase from it? This creates a rendered HTML document with palette swatches, typography specimens, surface tokens, motion config, guidelines, and a template slide gallery — all styled to match your design system's character."
-   - **If yes** → Read [references/design-showcase.md](references/design-showcase.md) for the full generation process: extracting palette/type/motion from the spec, placing the system on character axes, building the showcase page section by section, and the agent contract (token IDs, template CSS, slide skeletons). Save the result as `DESIGN.html` in the project root. Then read it back using [references/design-html.md](references/design-html.md) and proceed to Step 2.
-   - **If no** → Extract palette, font, and constraint values directly from the markdown file. Proceed to Step 2.
+   Read [references/design-showcase.md](references/design-showcase.md) for the full generation process. This is NOT a template fill — the agent must craft a page that embodies the brand's visual personality. An HP design.md produces angular chevrons and sharp 4px buttons. A Meta design.md produces pill-shaped elements and photography-first 32px-radius cards. Same sections, completely different visual treatment.
+
+   The generation process:
+   1. Extract palette, typography, motion, surface tokens from the design.md
+   2. Place the system on character axes (rounded vs sharp, flat vs elevated, photo-first vs type-first, warm vs clinical)
+   3. Write each section (cover, palette, type, surface, motion, background, guidelines, templates) styled to the brand's character
+   4. The cover/hero section must have a signature decorative gesture derived from the brand (not generic)
+   5. Save as `DESIGN.html` in the project root
+
+   Then offer the picker for fine-tuning: read [references/design-picker.md](references/design-picker.md) to serve the visual picker with the generated DESIGN.html pre-loaded. The user can adjust palette, typography, corners, density, depth, and shader background. The picker loads the DESIGN.html in its iframe preview.
+
+   If the user declines both generation and picker → extract palette, font, and constraint values directly from the markdown. Proceed to Step 2.
 
 3. **Neither exists** → Offer the user a choice:
    1. **User named a style or mood?** → Read [visual-styles.md](./visual-styles.md) for the 8 named presets. Pick the closest match.
