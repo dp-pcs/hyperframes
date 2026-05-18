@@ -34,7 +34,7 @@ Most prompts already answer 2-3 of these — a typical brief is 2-3 questions, n
 
 **Check in this order:**
 
-1. **`DESIGN.html` exists** → Read it using the guide at [references/design-html.md](references/design-html.md). This is the source of truth for brand colors, fonts, slide layouts, shader backgrounds, and constraints. Use exact values — don't invent colors or substitute fonts. Proceed to Step 2.
+1. **`DESIGN.html` exists** → Read it using the guide at [references/design-html.md](references/design-html.md). If the DESIGN.html contains a template gallery (`<style id="template-css">`, `<template id="tmpl-source">`), also read [references/design-html-templates.md](references/design-html-templates.md) to extract the slide templates separately from the page chrome. **Build compositions from the template CSS, not the page chrome.** Proceed to Step 2.
 
 2. **No `DESIGN.html`, but `design.md` or `DESIGN.md` exists** → Generate a bespoke DESIGN.html:
 

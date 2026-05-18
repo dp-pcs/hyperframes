@@ -135,10 +135,11 @@ Apply the appropriate class to each `<section class="slide ...">` element.
 ## Composition workflow
 
 1. Read DESIGN.html
-2. Set `:root` with palette values from `<style id="ds-tokens">`
-3. Load the Google Fonts from the `<link>` tag
-4. Pick slide types from the template gallery for your composition's scenes
-5. Replace `{{placeholder}}` tokens with real content
-6. Apply the easing from the motion section to your GSAP timeline
-7. Copy the shader background script if using animated backgrounds
-8. Follow the guidelines section constraints throughout
+2. **Extract template CSS separately from page chrome** — read [design-html-templates.md](design-html-templates.md) for the full extraction process. The page has TWO design systems: the showcase chrome and the slide templates. Build from the templates, not the chrome.
+3. Set `:root` with palette values from `<style id="ds-tokens">`
+4. Load the fonts from the **template CSS** (not the page `<link>` tags — they may differ)
+5. Pick slide types from the template gallery for your composition's scenes
+6. Replace `{{placeholder}}` tokens with real content
+7. Apply the easing from the motion section to your GSAP timeline
+8. Copy the shader background script if using animated backgrounds
+9. Follow the guidelines section constraints throughout
