@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { lintHyperframeHtml } from "@hyperframes/core";
 import type { LintFinding } from "./types.js";
+import type {
+  ExplainerSourceArtifact,
+  ExplainerVideoBrief,
+  ExplainerVideoRenderPlan,
+} from "./types.js";
+import type { ConversationMessage } from "./llm-client.js";
 
 export type ValidationResult = { ok: true } | { ok: false; missing: string[] };
 
@@ -146,4 +152,137 @@ export async function postRenderSanityCheck(
     };
   }
   return { ok: true };
+}
+
+// ── Prompt assembly ───────────────────────────────────────────────────────────
+
+export interface SkillBundle {
+  hyperframesSkill: string;
+  houseStyle: string;
+  patterns: string;
+  visualStyles: string;
+  dataInMotion: string;
+  gsapSkill: string;
+  amplifierConstraints: string;
+}
+
+export interface RetryFeedback {
+  previousIndexHtml: string;
+  errorText: string;
+}
+
+export interface BuildAuthoringMessagesArgs {
+  brief: ExplainerVideoBrief;
+  plan: ExplainerVideoRenderPlan;
+  source: ExplainerSourceArtifact;
+  skillBundle: SkillBundle;
+  retryFeedback: RetryFeedback | null;
+}
+
+function buildSystemContent(bundle: SkillBundle): string {
+  return [
+    "# Hyperframes Authoring Skill",
+    bundle.hyperframesSkill,
+    "# House Style",
+    bundle.houseStyle,
+    "# Composition Patterns",
+    bundle.patterns,
+    "# Visual Styles",
+    bundle.visualStyles,
+    "# Data in Motion",
+    bundle.dataInMotion,
+    "# GSAP Reference",
+    bundle.gsapSkill,
+    "# Amplifier constraints (non-negotiable)",
+    bundle.amplifierConstraints,
+  ].join("\n\n---\n\n");
+}
+
+const BOILERPLATE_PATTERNS: RegExp[] = [
+  /^thanks for reading/i,
+  /^discussion about this post/i,
+  /^install:/i,
+  /^start your substack/i,
+  /privacy ∙ terms/i,
+  /this site requires javascript/i,
+  /^get the app$/i,
+  /^substack is the home/i,
+];
+
+function sanitizeParagraphs(source: ExplainerSourceArtifact): string {
+  const seeds = [...source.article.paragraphs, ...source.article.text.split(/\n+/)];
+  const seen = new Set<string>();
+  return seeds
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length > 40)
+    .filter((line) => !BOILERPLATE_PATTERNS.some((pattern) => pattern.test(line)))
+    .filter((line) => {
+      const key = line.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join("\n\n");
+}
+
+function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
+  const { brief, plan, source } = args;
+  const article = brief.article;
+  const cleaned = sanitizeParagraphs(source);
+
+  const lines: Array<string | false | null | undefined> = [
+    "Author a complete Hyperframes composition for the article below.",
+    "",
+    `Target duration: ${plan.targetDurationSeconds}s`,
+    `Aspect ratio: ${plan.aspectRatio} (1920×1080)`,
+    `Voice: ${plan.voice.enabled ? `enabled, style ${plan.voice.style ?? "documentary"}` : "disabled"}`,
+    `Captions: ${plan.captions.enabled ? "enabled" : "disabled"}`,
+    `Goal: ${brief.interview.goal}`,
+    `Audience: ${brief.interview.audience}`,
+    `Narrative style: ${brief.interview.narrativeStyle}`,
+    `Text mode: ${brief.interview.textMode}`,
+    `Visual mode: ${brief.interview.visualMode}`,
+    `CTA: ${plan.cta.label}${plan.cta.url ? ` (${plan.cta.url})` : ""}`,
+    "",
+    `Article title: ${article.title}`,
+    article.subtitle && `Article subtitle: ${article.subtitle}`,
+    article.description && `Article description: ${article.description}`,
+    article.publication?.name && `Publication: ${article.publication.name}`,
+    article.primaryAuthor?.name && `Author: ${article.primaryAuthor.name}`,
+    article.primaryAuthor?.bio && `Author bio: ${article.primaryAuthor.bio}`,
+    article.coverImage && `Cover image URL: ${article.coverImage}`,
+    article.url && `Article URL: ${article.url}`,
+    article.bookletLink?.shortUrl && `Booklet URL: ${article.bookletLink.shortUrl}`,
+    "",
+    "Article body (use as the source of truth — do not invent claims):",
+    cleaned || "(article body was empty after sanitization — work from title/subtitle/description)",
+    "",
+    "Return JSON via the structured-output schema. The indexHtml field is the complete <!doctype html> document. The narration array carries per-scene narration text (omit/empty when voice is disabled).",
+  ];
+
+  return lines.filter((entry): entry is string => Boolean(entry)).join("\n");
+}
+
+function buildRetryUserContent(feedback: RetryFeedback): string {
+  return [
+    "Your previous composition failed validation. Here are the errors:",
+    "",
+    feedback.errorText.slice(0, 4000),
+    "",
+    "Return a new, complete indexHtml that fixes these issues. Keep what was working; change only what needs to change. Do not return a diff.",
+  ].join("\n");
+}
+
+export function buildAuthoringMessages(args: BuildAuthoringMessagesArgs): ConversationMessage[] {
+  const messages: ConversationMessage[] = [
+    { role: "system", content: buildSystemContent(args.skillBundle) },
+    { role: "user", content: buildInitialUserContent(args) },
+  ];
+
+  if (args.retryFeedback) {
+    messages.push({ role: "assistant", content: args.retryFeedback.previousIndexHtml });
+    messages.push({ role: "user", content: buildRetryUserContent(args.retryFeedback) });
+  }
+
+  return messages;
 }
