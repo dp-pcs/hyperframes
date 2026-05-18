@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { statSync, readFileSync } from "node:fs";
 import { join as joinPath } from "node:path";
 import { lintHyperframeHtml } from "@hyperframes/core";
-import type { LintFinding } from "./types.js";
 import type {
+  LintFinding,
   ExplainerSourceArtifact,
   ExplainerVideoBrief,
   ExplainerVideoRenderPlan,
+  CompositionAuthoringResult,
+  CompositionAttemptError,
 } from "./types.js";
 import type { ConversationMessage } from "./llm-client.js";
 
@@ -238,11 +240,11 @@ function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
     `Aspect ratio: ${plan.aspectRatio} (1920×1080)`,
     `Voice: ${plan.voice.enabled ? `enabled, style ${plan.voice.style ?? "documentary"}` : "disabled"}`,
     `Captions: ${plan.captions.enabled ? "enabled" : "disabled"}`,
-    `Goal: ${brief.interview.goal}`,
-    `Audience: ${brief.interview.audience}`,
-    `Narrative style: ${brief.interview.narrativeStyle}`,
-    `Text mode: ${brief.interview.textMode}`,
-    `Visual mode: ${brief.interview.visualMode}`,
+    brief.interview?.goal && `Goal: ${brief.interview.goal}`,
+    brief.interview?.audience && `Audience: ${brief.interview.audience}`,
+    brief.interview?.narrativeStyle && `Narrative style: ${brief.interview.narrativeStyle}`,
+    brief.interview?.textMode && `Text mode: ${brief.interview.textMode}`,
+    brief.interview?.visualMode && `Visual mode: ${brief.interview.visualMode}`,
     `CTA: ${plan.cta.label}${plan.cta.url ? ` (${plan.cta.url})` : ""}`,
     "",
     `Article title: ${article.title}`,
@@ -309,4 +311,87 @@ export function loadSkillBundle(skillsRoot: string): SkillBundle {
     gsapSkill: readRequired(joinPath(skillsRoot, "gsap", "SKILL.md")),
     amplifierConstraints: readRequired(joinPath(skillsRoot, "amplifier-constraints.md")),
   };
+}
+
+// ── Composition loop ──────────────────────────────────────────────────────────
+
+export type LlmFn = (conversation: ConversationMessage[]) => Promise<{
+  indexHtml: string;
+  narration: Array<{ sceneId: string; startSeconds: number; narrationText: string }>;
+  notes: string | null;
+}>;
+
+export type LintFn = (html: string) => Promise<LintResult>;
+
+export interface RunCompositionLoopArgs {
+  brief: ExplainerVideoBrief;
+  plan: ExplainerVideoRenderPlan;
+  source: ExplainerSourceArtifact;
+  skillBundle: SkillBundle;
+  maxAttempts: number;
+  llmTimeoutMs: number;
+  llm: LlmFn;
+  lint: LintFn;
+}
+
+export async function runCompositionLoop(
+  args: RunCompositionLoopArgs,
+): Promise<CompositionAuthoringResult> {
+  const errors: CompositionAttemptError[] = [];
+  let retryFeedback: RetryFeedback | null = null;
+
+  for (let attempt = 1; attempt <= args.maxAttempts; attempt++) {
+    const conversation = buildAuthoringMessages({
+      brief: args.brief,
+      plan: args.plan,
+      source: args.source,
+      skillBundle: args.skillBundle,
+      retryFeedback,
+    });
+
+    let llmResponse: Awaited<ReturnType<LlmFn>>;
+    try {
+      llmResponse = await args.llm(conversation);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push({ attempt, kind: "llm_error", message });
+      const previousHtml: string = retryFeedback != null ? retryFeedback.previousIndexHtml : "";
+      retryFeedback = {
+        previousIndexHtml: previousHtml,
+        errorText: `LLM call failed: ${message}`,
+      };
+      continue;
+    }
+
+    const validation = validateCompositionHtml(llmResponse.indexHtml);
+    if (!validation.ok) {
+      const detail = `Missing required markers: ${validation.missing.join(", ")}`;
+      errors.push({ attempt, kind: "html_invalid", message: detail });
+      retryFeedback = { previousIndexHtml: llmResponse.indexHtml, errorText: detail };
+      continue;
+    }
+
+    const lintResult = await args.lint(llmResponse.indexHtml);
+    if (lintResult.errors.length > 0) {
+      const detail = formatLintForFeedback(lintResult);
+      errors.push({
+        attempt,
+        kind: "lint_failed",
+        message: `${lintResult.errors.length} lint errors`,
+        detail,
+      });
+      retryFeedback = { previousIndexHtml: llmResponse.indexHtml, errorText: detail };
+      continue;
+    }
+
+    return {
+      ok: true,
+      indexHtml: llmResponse.indexHtml,
+      narration: llmResponse.narration,
+      notes: llmResponse.notes,
+      attempts: attempt,
+    };
+  }
+
+  return { ok: false, attempts: args.maxAttempts, errors };
 }
