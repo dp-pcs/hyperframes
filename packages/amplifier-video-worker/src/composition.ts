@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { lintHyperframeHtml } from "@hyperframes/core";
 import type { LintFinding } from "./types.js";
 
@@ -75,4 +77,73 @@ export function formatLintForFeedback(result: LintResult, limit = 4000): string 
     lines.push(`WARN ${f.ruleId}${linePart}: ${f.message}`);
   }
   return lines.join("\n").slice(0, limit);
+}
+
+// ── Post-render sanity check ──────────────────────────────────────────────────
+
+export type SanityResult = { ok: true } | { ok: false; reason: string };
+
+export type SanityCheckDeps = {
+  probeDuration: (filePath: string) => Promise<number>;
+};
+
+export function probeDurationWithFfprobe(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffprobe", [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ]);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffprobe failed (${code}): ${stderr.slice(0, 500)}`));
+        return;
+      }
+      const duration = Number.parseFloat(stdout.trim());
+      if (!Number.isFinite(duration)) {
+        reject(new Error(`ffprobe returned non-numeric duration: ${stdout}`));
+        return;
+      }
+      resolve(duration);
+    });
+  });
+}
+
+const MIN_SANITY_BYTES = 50_000;
+
+export async function postRenderSanityCheck(
+  filePath: string,
+  targetDurationSeconds: number,
+  deps: SanityCheckDeps = { probeDuration: probeDurationWithFfprobe },
+): Promise<SanityResult> {
+  const stat = statSync(filePath);
+  if (stat.size < MIN_SANITY_BYTES) {
+    return {
+      ok: false,
+      reason: `Rendered MP4 size ${stat.size} bytes is below the ${MIN_SANITY_BYTES}-byte sanity threshold. The composition probably rendered blank.`,
+    };
+  }
+
+  const actualDuration = await deps.probeDuration(filePath);
+  const lower = targetDurationSeconds * 0.5;
+  const upper = targetDurationSeconds * 1.5;
+  if (actualDuration < lower || actualDuration > upper) {
+    return {
+      ok: false,
+      reason: `Rendered MP4 duration ${actualDuration.toFixed(2)}s is more than 50% off the target ${targetDurationSeconds}s. The timeline's data-duration likely does not match the GSAP master timeline length.`,
+    };
+  }
+  return { ok: true };
 }
