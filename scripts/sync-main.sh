@@ -101,6 +101,76 @@ if [ -n "$(git diff --stat HEAD^1 HEAD -- "$SKILLS_DIR")" ]; then
   exit 1
 fi
 
+# 9. Summary of what main brought in
+#
+# HEAD is the merge commit:
+#   HEAD^1 = pre-merge caleb tip
+#   HEAD^2 = origin/main tip that was merged in
+# We diff from the merge base to HEAD^2 to describe what main contributed,
+# and exclude skills/ since this script intentionally drops main's skills changes.
+log "Summary of changes brought in from $REMOTE/$REMOTE_BRANCH:"
+merge_base="$(git merge-base HEAD^1 HEAD^2)"
+
+echo
+log "  Commits ($incoming_count), grouped by type:"
+git log --pretty=format:'%h %s' "$merge_base..HEAD^2" \
+  | awk '
+      {
+        subject = $0
+        sub(/^[^ ]+ /, "", subject)
+        type = "other"
+        colon_pos = index(subject, ":")
+        if (colon_pos > 1) {
+          prefix = substr(subject, 1, colon_pos - 1)
+          sub(/\(.*\)/, "", prefix)
+          sub(/!$/, "", prefix)
+          if (prefix ~ /^[a-zA-Z]+$/) {
+            type = tolower(prefix)
+          }
+        }
+        commits[type] = commits[type] "      " $0 "\n"
+        counts[type] += 1
+      }
+      END {
+        order = "feat fix perf refactor docs test build ci chore style revert other"
+        n = split(order, types, " ")
+        for (i = 1; i <= n; i++) {
+          t = types[i]
+          if (t in counts) {
+            printf "    %s (%d):\n", t, counts[t]
+            printf "%s", commits[t]
+            delete counts[t]
+          }
+        }
+        for (t in counts) {
+          printf "    %s (%d):\n", t, counts[t]
+          printf "%s", commits[t]
+        }
+      }
+  '
+
+echo
+log "  Files changed by area (excluding $SKILLS_DIR/):"
+area_lines="$(git diff --name-only "$merge_base" HEAD^2 -- . ":!$SKILLS_DIR" \
+  | awk -F/ '{ if (NF >= 2) print $1"/"$2; else print $1 }' \
+  | sort | uniq -c | sort -rn \
+  | awk '{printf "    %5d  %s\n", $1, $2}')"
+if [ -n "$area_lines" ]; then
+  printf '%s\n' "$area_lines"
+else
+  printf '    (no files outside %s/ changed)\n' "$SKILLS_DIR"
+fi
+
+echo
+log "  Diffstat (excluding $SKILLS_DIR/):"
+shortstat="$(git diff --shortstat "$merge_base" HEAD^2 -- . ":!$SKILLS_DIR" | sed 's/^[[:space:]]*//')"
+if [ -n "$shortstat" ]; then
+  printf '    %s\n' "$shortstat"
+else
+  printf '    (no line changes outside %s/)\n' "$SKILLS_DIR"
+fi
+
+echo
 log "Done."
 log "  - $BRANCH_REQUIRED now contains $REMOTE/$REMOTE_BRANCH (merge commit: $(git rev-parse --short HEAD))"
 log "  - $SKILLS_DIR/ unchanged"
