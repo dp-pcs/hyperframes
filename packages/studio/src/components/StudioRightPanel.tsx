@@ -2,9 +2,11 @@ import { PropertyPanel } from "./editor/PropertyPanel";
 import { MotionPanel } from "./editor/MotionPanel";
 import { LayersPanel } from "./editor/LayersPanel";
 import { CaptionPropertyPanel } from "../captions/components/CaptionPropertyPanel";
+import { BlockParamsPanel } from "./editor/BlockParamsPanel";
 import { RenderQueue } from "./renders/RenderQueue";
 import type { RenderJob } from "./renders/useRenderQueue";
 import type { StudioGsapMotion } from "./editor/studioMotion";
+import type { BlockParam } from "@hyperframes/core/registry";
 import {
   STUDIO_INSPECTOR_PANELS_ENABLED,
   STUDIO_MOTION_PANEL_ENABLED,
@@ -12,8 +14,7 @@ import {
 
 /** Motion data without targeting metadata. */
 type StudioMotionData = Omit<StudioGsapMotion, "kind" | "target" | "updatedAt">;
-import { useCallback } from "react";
-import { resolveDomEditSelection, type DomEditLayerItem } from "./editor/domEditing";
+
 import { useStudioContext } from "../contexts/StudioContext";
 import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useFileManagerContext } from "../contexts/FileManagerContext";
@@ -23,12 +24,21 @@ export interface StudioRightPanelProps {
   selectedStudioMotion: StudioMotionData | null;
   designPanelActive: boolean;
   motionPanelActive: boolean;
+  activeBlockParams?: {
+    blockName: string;
+    blockTitle: string;
+    params: BlockParam[];
+    compositionPath: string;
+  } | null;
+  onCloseBlockParams?: () => void;
 }
 
 export function StudioRightPanel({
   selectedStudioMotion,
   designPanelActive,
   motionPanelActive,
+  activeBlockParams,
+  onCloseBlockParams,
 }: StudioRightPanelProps) {
   const {
     rightWidth,
@@ -56,6 +66,7 @@ export function StudioRightPanel({
     clearDomSelection,
     handleDomStyleCommit,
     handleDomAttributeCommit,
+    handleDomHtmlAttributeCommit,
     handleDomPathOffsetCommit,
     handleDomBoxSizeCommit,
     handleDomRotationCommit,
@@ -66,23 +77,10 @@ export function StudioRightPanel({
     handleAskAgent,
     handleDomMotionCommit,
     handleDomMotionClear,
-    applyDomSelection,
   } = useDomEditContext();
 
-  const { assets, fontAssets, handleImportFiles, handleImportFonts } = useFileManagerContext();
-
-  const isMasterView = !activeCompPath || activeCompPath === "index.html";
-  const handleSelectLayer = useCallback(
-    (layer: DomEditLayerItem) => {
-      const selection = resolveDomEditSelection(layer.element, {
-        activeCompositionPath: activeCompPath,
-        isMasterView,
-        preferClipAncestor: false,
-      });
-      if (selection) applyDomSelection(selection);
-    },
-    [activeCompPath, isMasterView, applyDomSelection],
-  );
+  const { assets, fontAssets, projectDir, handleImportFiles, handleImportFonts } =
+    useFileManagerContext();
 
   const renderJobs = renderQueue.jobs as RenderJob[];
 
@@ -158,11 +156,20 @@ export function StudioRightPanel({
               </button>
             </div>
             <div className="min-h-0 flex-1">
-              {rightPanelTab === "layers" ? (
+              {rightPanelTab === "block-params" && activeBlockParams ? (
+                <BlockParamsPanel
+                  blockName={activeBlockParams.blockName}
+                  blockTitle={activeBlockParams.blockTitle}
+                  params={activeBlockParams.params}
+                  compositionPath={activeBlockParams.compositionPath}
+                  onClose={onCloseBlockParams ?? (() => {})}
+                />
+              ) : rightPanelTab === "layers" ? (
                 <LayersPanel />
               ) : designPanelActive ? (
                 <PropertyPanel
                   projectId={projectId}
+                  projectDir={projectDir}
                   assets={assets}
                   element={domEditGroupSelections.length > 1 ? null : domEditSelection}
                   multiSelectCount={domEditGroupSelections.length}
@@ -170,6 +177,7 @@ export function StudioRightPanel({
                   onClearSelection={clearDomSelection}
                   onSetStyle={handleDomStyleCommit}
                   onSetAttribute={handleDomAttributeCommit}
+                  onSetHtmlAttribute={handleDomHtmlAttributeCommit}
                   onSetManualOffset={handleDomPathOffsetCommit}
                   onSetManualSize={handleDomBoxSizeCommit}
                   onSetManualRotation={handleDomRotationCommit}
@@ -181,8 +189,6 @@ export function StudioRightPanel({
                   onImportAssets={handleImportFiles}
                   fontAssets={fontAssets}
                   onImportFonts={handleImportFonts}
-                  activeCompositionPath={activeCompPath}
-                  onSelectLayer={handleSelectLayer}
                 />
               ) : motionPanelActive ? (
                 <MotionPanel

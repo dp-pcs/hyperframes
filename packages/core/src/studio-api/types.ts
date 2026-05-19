@@ -1,4 +1,5 @@
 import type { CanvasResolution } from "../core.types.js";
+import type { RegistryItem } from "../registry/types.js";
 
 /** Resolved info about a single project. */
 export interface ResolvedProject {
@@ -107,4 +108,13 @@ export interface StudioApiAdapter {
 
   /** Optional: resolve session ID to project (multi-project mode). */
   resolveSession?: (sessionId: string) => Promise<{ projectId: string; title: string } | null>;
+
+  /** Optional: list all registry items (blocks + components) for the catalog. */
+  listRegistryCatalog?(): Promise<RegistryItem[]>;
+
+  /** Optional: install a registry item into a project directory. */
+  installRegistryBlock?(opts: {
+    project: ResolvedProject;
+    blockName: string;
+  }): Promise<{ written: string[]; block: RegistryItem }>;
 }

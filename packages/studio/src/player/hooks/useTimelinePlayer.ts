@@ -59,7 +59,7 @@ export function useTimelinePlayer() {
   const iframeShortcutCleanupRef = useRef<(() => void) | null>(null);
   const lastTimelineMessageRef = useRef<number>(0);
   const staticSeekAdapterRef = useRef<{
-    player: RuntimePlaybackAdapter;
+    player: RuntimePlaybackAdapter | PlaybackAdapter;
     duration: number;
     adapter: PlaybackAdapter;
   } | null>(null);
@@ -118,13 +118,19 @@ export function useTimelinePlayer() {
 
       const playerAdapter =
         win.__player && typeof win.__player.play === "function" ? win.__player : null;
-      if (getAdapterDuration(playerAdapter) > 0) {
+      const docDuration = readTimelineDurationFromDocument(iframe.contentDocument);
+      const adapterDur = getAdapterDuration(playerAdapter);
+
+      if (adapterDur > 0 && docDuration <= adapterDur) {
         return playerAdapter;
       }
 
+      let timelineAdapter: PlaybackAdapter | null = null;
       if (win.__timeline) {
         const adapter = wrapTimeline(win.__timeline);
-        if (getAdapterDuration(adapter) > 0) return adapter;
+        const dur = getAdapterDuration(adapter);
+        if (dur > 0 && docDuration <= dur) return adapter;
+        if (dur > 0) timelineAdapter ??= adapter;
       }
 
       if (win.__timelines) {
@@ -139,39 +145,46 @@ export function useTimelinePlayer() {
             ?.getAttribute("data-composition-id");
           const key = rootId && rootId in win.__timelines ? rootId : keys[keys.length - 1];
           const adapter = wrapTimeline(win.__timelines[key]);
-          if (getAdapterDuration(adapter) > 0) return adapter;
+          const dur = getAdapterDuration(adapter);
+          if (dur > 0 && docDuration <= dur) return adapter;
+          if (dur > 0) timelineAdapter ??= adapter;
         }
       }
 
-      const fallbackDuration = Math.max(
+      // The document timeline extends past every native adapter's duration.
+      // Wrap the best available adapter with the effective duration so the
+      // seek slider, seek clamping, and duration display cover the full range.
+      const bestAdapter = playerAdapter ?? timelineAdapter;
+      const effectiveDuration = Math.max(
         usePlayerStore.getState().duration,
-        readTimelineDurationFromDocument(iframe.contentDocument),
+        docDuration,
+        adapterDur,
       );
       if (
-        playerAdapter &&
-        fallbackDuration > 0 &&
-        (typeof playerAdapter.renderSeek === "function" || typeof playerAdapter.seek === "function")
+        bestAdapter &&
+        effectiveDuration > 0 &&
+        ("renderSeek" in bestAdapter || typeof bestAdapter.seek === "function")
       ) {
         const cached = staticSeekAdapterRef.current;
-        if (cached?.player === playerAdapter && cached.duration === fallbackDuration) {
+        if (cached?.player === bestAdapter && cached.duration === effectiveDuration) {
           return cached.adapter;
         }
         cached?.adapter.pause();
         const adapter = createStaticSeekPlaybackAdapter(
-          playerAdapter,
-          fallbackDuration,
+          bestAdapter,
+          effectiveDuration,
           getDefaultStaticSeekPlaybackClock(win),
           () => usePlayerStore.getState().playbackRate,
         );
         staticSeekAdapterRef.current = {
-          player: playerAdapter,
-          duration: fallbackDuration,
+          player: bestAdapter,
+          duration: effectiveDuration,
           adapter,
         };
         return adapter;
       }
 
-      return playerAdapter;
+      return bestAdapter;
     } catch (err) {
       console.warn("[useTimelinePlayer] Could not get playback adapter (cross-origin)", err);
       return null;

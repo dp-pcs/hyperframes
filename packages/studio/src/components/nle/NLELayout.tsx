@@ -42,6 +42,10 @@ interface NLELayoutProps {
     assetPath: string,
     placement: Pick<TimelineElement, "start" | "track">,
   ) => Promise<void> | void;
+  onBlockDrop?: (
+    blockName: string,
+    placement: Pick<TimelineElement, "start" | "track">,
+  ) => Promise<void> | void;
   /** Persist timeline move actions back into source HTML */
   onMoveElement?: (
     element: TimelineElement,
@@ -85,6 +89,7 @@ export const NLELayout = memo(function NLELayout({
   onFileDrop,
   onDeleteElement,
   onAssetDrop,
+  onBlockDrop,
   onMoveElement,
   onResizeElement,
   onBlockedEditAttempt,
@@ -371,6 +376,7 @@ export const NLELayout = memo(function NLELayout({
                 onFileDrop={onFileDrop}
                 onDeleteElement={onDeleteElement}
                 onAssetDrop={onAssetDrop}
+                onBlockDrop={onBlockDrop}
                 onMoveElement={onMoveElement}
                 onResizeElement={onResizeElement}
                 onBlockedEditAttempt={onBlockedEditAttempt}

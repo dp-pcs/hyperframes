@@ -8,9 +8,11 @@ import {
 } from "react";
 import { CompositionsTab } from "./CompositionsTab";
 import { AssetsTab } from "./AssetsTab";
+import { BlocksTab } from "./BlocksTab";
 import { FileTree } from "../editor/FileTree";
+import { STUDIO_BLOCKS_PANEL_ENABLED } from "../editor/manualEditingAvailability";
 
-export type SidebarTab = "compositions" | "assets" | "code";
+export type SidebarTab = "compositions" | "assets" | "code" | "blocks";
 
 export interface LeftSidebarHandle {
   selectTab: (tab: SidebarTab) => void;
@@ -22,6 +24,7 @@ function getPersistedTab(): SidebarTab {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored === "assets") return "assets";
   if (stored === "code") return "code";
+  if (stored === "blocks") return "blocks";
   return "compositions";
 }
 
@@ -48,6 +51,7 @@ interface LeftSidebarProps {
   onLint?: () => void;
   linting?: boolean;
   onToggleCollapse?: () => void;
+  onAddBlock?: (blockName: string) => void;
   takeoverContent?: ReactNode;
 }
 
@@ -76,6 +80,7 @@ export const LeftSidebar = memo(
       onLint,
       linting,
       onToggleCollapse,
+      onAddBlock,
       takeoverContent,
     },
     ref,
@@ -103,7 +108,11 @@ export const LeftSidebar = memo(
               <div className="flex items-center gap-2">
                 <div
                   className="grid min-w-0 flex-1 gap-0.5 rounded-[18px] bg-neutral-900 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-                  style={{ gridTemplateColumns: "1fr 1fr 1fr" }}
+                  style={{
+                    gridTemplateColumns: STUDIO_BLOCKS_PANEL_ENABLED
+                      ? "1fr 1fr 1fr 1fr"
+                      : "1fr 1fr 1fr",
+                  }}
                 >
                   <button
                     type="button"
@@ -138,6 +147,19 @@ export const LeftSidebar = memo(
                   >
                     Assets
                   </button>
+                  {STUDIO_BLOCKS_PANEL_ENABLED && (
+                    <button
+                      type="button"
+                      onClick={() => selectTab("blocks")}
+                      className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
+                        tab === "blocks"
+                          ? "bg-neutral-800 text-white"
+                          : "text-neutral-500 hover:text-neutral-200"
+                      }`}
+                    >
+                      Blocks
+                    </button>
+                  )}
                 </div>
                 {onToggleCollapse && (
                   <button
@@ -212,6 +234,10 @@ export const LeftSidebar = memo(
                   )}
                 </div>
               </div>
+            )}
+
+            {STUDIO_BLOCKS_PANEL_ENABLED && tab === "blocks" && onAddBlock && (
+              <BlocksTab onAddBlock={onAddBlock} />
             )}
 
             {/* Lint button pinned at the bottom */}

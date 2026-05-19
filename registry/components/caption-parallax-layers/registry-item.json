@@ -12,5 +12,8 @@
       "type": "hyperframes:snippet"
     }
   ],
-  "preview": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-parallax-layers/preview.mp4?v=1779051692"
+  "preview": {
+    "video": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-parallax-layers/preview.mp4?v=1779051692",
+    "poster": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-parallax-layers.png"
+  }
 }

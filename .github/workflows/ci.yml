@@ -82,6 +82,29 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run lint
 
+  # `fallow audit` runs dead-code + complexity + duplication analysis scoped to
+  # the changed files. The default `--gate new-only` means existing legacy
+  # findings don't fail the build — only NEW issues introduced by the PR do.
+  # This stops bleeding while letting incremental cleanup land separately.
+  fallow:
+    name: Fallow audit
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history so `--base origin/main` can diff against the merge
+          # base on stacked PRs, not just the shallow tip.
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # Pinned version — bumps land via a deliberate PR. Keep in sync with
+      # the version that produced the current `.fallowrc.jsonc` config.
+      - run: npx -y fallow@2.75.0 audit --base origin/main --fail-on-issues
+
   format:
     name: Format
     runs-on: ubuntu-latest

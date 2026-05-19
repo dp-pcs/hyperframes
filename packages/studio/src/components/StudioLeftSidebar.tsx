@@ -11,13 +11,16 @@ import { getPersistedRenderSettings } from "./renders/renderSettings";
 export interface StudioLeftSidebarProps {
   leftSidebarRef: RefObject<LeftSidebarHandle | null>;
   onSelectComposition: (comp: string) => void;
+  onAddBlock: (blockName: string) => void;
   onLint: () => void;
   linting: boolean;
 }
 
+// fallow-ignore-next-line complexity
 export function StudioLeftSidebar({
   leftSidebarRef,
   onSelectComposition,
+  onAddBlock,
   onLint,
   linting,
 }: StudioLeftSidebarProps) {
@@ -124,6 +127,7 @@ export function StudioLeftSidebar({
         onLint={onLint}
         linting={linting}
         onToggleCollapse={toggleLeftSidebar}
+        onAddBlock={onAddBlock}
       />
       <div
         className="group w-2 flex-shrink-0 cursor-col-resize flex items-center justify-center"

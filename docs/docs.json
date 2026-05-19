@@ -71,6 +71,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/pipeline",
               "guides/html-in-canvas",
               "guides/website-to-video",
               "guides/claude-design",
@@ -186,6 +187,17 @@
               "catalog/blocks/nyc-paris-flight",
               "catalog/blocks/ui-3d-reveal",
               "catalog/blocks/vpn-youtube-spot"
+            ]
+          },
+          {
+            "group": "Maps",
+            "pages": [
+              "catalog/blocks/us-map",
+              "catalog/blocks/us-map-bubble",
+              "catalog/blocks/us-map-hex",
+              "catalog/blocks/us-map-flow",
+              "catalog/blocks/world-map",
+              "catalog/blocks/spain-map"
             ]
           },
           {

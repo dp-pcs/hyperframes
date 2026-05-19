@@ -10,6 +10,8 @@ import { usePanelLayout } from "./hooks/usePanelLayout";
 import { useFileManager } from "./hooks/useFileManager";
 import { useManifestPersistence } from "./hooks/useManifestPersistence";
 import { useTimelineEditing } from "./hooks/useTimelineEditing";
+import { addBlockToProject } from "./utils/blockInstaller";
+import type { BlockParam } from "@hyperframes/core/registry";
 import { useDomEditSession } from "./hooks/useDomEditSession";
 import { useAppHotkeys } from "./hooks/useAppHotkeys";
 import { useClipboard } from "./hooks/useClipboard";
@@ -59,6 +61,12 @@ export function StudioApp() {
   const [compositionLoading, setCompositionLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [, setPreviewDocumentVersion] = useState(0);
+  const [activeBlockParams, setActiveBlockParams] = useState<{
+    blockName: string;
+    blockTitle: string;
+    params: BlockParam[];
+    compositionPath: string;
+  } | null>(null);
 
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const activeCompPathRef = useRef(activeCompPath);
@@ -160,6 +168,79 @@ export function StudioApp() {
     reloadPreview,
     uploadProjectFiles: fileManager.uploadProjectFiles,
   });
+
+  const handleAddBlock = useCallback(
+    (blockName: string) => {
+      if (!projectId) return;
+      void (async () => {
+        const result = await addBlockToProject({
+          projectId,
+          blockName,
+          activeCompPath,
+          timelineElements,
+          readProjectFile: fileManager.readProjectFile,
+          writeProjectFile: fileManager.writeProjectFile,
+          recordEdit: editHistory.recordEdit,
+          refreshFileTree: fileManager.refreshFileTree,
+          reloadPreview,
+          showToast,
+        });
+        const params = result?.block.type === "hyperframes:block" ? result.block.params : undefined;
+        if (params?.length) {
+          setActiveBlockParams({
+            blockName: result!.block.name,
+            blockTitle: result!.block.title,
+            params,
+            compositionPath: result!.compositionPath,
+          });
+          panelLayout.setRightCollapsed(false);
+          panelLayout.setRightPanelTab("block-params");
+        }
+      })();
+    },
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+      panelLayout,
+    ],
+  );
+
+  const handleTimelineBlockDrop = useCallback(
+    (blockName: string, placement: { start: number; track: number }) => {
+      if (!projectId) return;
+      void addBlockToProject({
+        projectId,
+        blockName,
+        activeCompPath,
+        placement,
+        timelineElements,
+        readProjectFile: fileManager.readProjectFile,
+        writeProjectFile: fileManager.writeProjectFile,
+        recordEdit: editHistory.recordEdit,
+        refreshFileTree: fileManager.refreshFileTree,
+        reloadPreview,
+        showToast,
+      });
+    },
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+    ],
+  );
 
   const clearDomSelectionRef = useRef<() => void>(() => {});
   const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
@@ -427,6 +508,7 @@ export function StudioApp() {
                 <StudioLeftSidebar
                   leftSidebarRef={leftSidebarRef}
                   onSelectComposition={handleSelectComposition}
+                  onAddBlock={handleAddBlock}
                   onLint={handleLint}
                   linting={linting}
                 />
@@ -435,6 +517,7 @@ export function StudioApp() {
                   renderClipContent={renderClipContent}
                   handleTimelineElementDelete={timelineEditing.handleTimelineElementDelete}
                   handleTimelineAssetDrop={timelineEditing.handleTimelineAssetDrop}
+                  handleTimelineBlockDrop={handleTimelineBlockDrop}
                   handleTimelineFileDrop={timelineEditing.handleTimelineFileDrop}
                   handleTimelineElementMove={timelineEditing.handleTimelineElementMove}
                   handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
@@ -449,6 +532,11 @@ export function StudioApp() {
                     selectedStudioMotion={selectedStudioMotion}
                     designPanelActive={designPanelActive}
                     motionPanelActive={motionPanelActive}
+                    activeBlockParams={activeBlockParams}
+                    onCloseBlockParams={() => {
+                      setActiveBlockParams(null);
+                      panelLayout.setRightPanelTab("design");
+                    }}
                   />
                 )}
               </div>

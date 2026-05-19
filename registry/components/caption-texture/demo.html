@@ -3,13 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080" />
-    <title>Texture Lava</title>
+    <title>Texture</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <style>
-      /* Inlined texture-mask-text component styles */
       .hf-texture-text {
         color: #fff;
         -webkit-mask-size: var(--mask-size, cover);
@@ -19,10 +18,6 @@
         -webkit-mask-mode: luminance;
         mask-mode: luminance;
         filter: contrast(var(--mask-contrast, 1));
-      }
-      .hf-texture-lava {
-        -webkit-mask-image: url("compositions/components/lava.png");
-        mask-image: url("compositions/components/lava.png");
       }
 
       *,
@@ -67,7 +62,6 @@
         pointer-events: none;
       }
 
-      /* Lava-specific overrides for texture mask */
       .lv-texture-override {
         -webkit-mask-size: 200% 200%;
         mask-size: 200% 200%;
@@ -101,13 +95,14 @@
   </head>
   <body>
     <div
-      id="texture-lava"
-      data-composition-id="caption-texture-lava"
+      id="caption-texture"
+      data-composition-id="caption-texture"
       data-start="0"
       data-duration="8"
       data-fps="30"
       data-width="1920"
       data-height="1080"
+      data-composition-variables='{"texture":{"type":"string","default":"lava"}}'
     >
       <video
         id="lv-video"
@@ -125,6 +120,13 @@
     <script>
       (function () {
         window.__timelines = window.__timelines || {};
+
+        var vars =
+          window.__hyperframes && window.__hyperframes.getVariables
+            ? window.__hyperframes.getVariables()
+            : {};
+        var TEXTURE = vars.texture || "lava";
+        var TEXTURE_URL = "compositions/components/" + TEXTURE + ".png";
 
         var _fitCanvas = document.createElement("canvas");
         var _fitCtx = _fitCanvas.getContext("2d");
@@ -170,7 +172,7 @@
           { text: "cinema.", start: 7.3, end: 7.7 },
         ];
 
-        var KEYWORDS = new Set([8, 12, 15, 24, 27]); // HyperFrames, HTML, professional, code, cinema.
+        var KEYWORDS = new Set([8, 12, 15, 24, 27]);
 
         var container = document.getElementById("lv-container");
         var tl = gsap.timeline({ paused: true });
@@ -185,10 +187,12 @@
           gsap.set(shadow, { yPercent: -50 });
 
           var wordEl = document.createElement("div");
-          wordEl.className = "hf-texture-text hf-texture-lava lv-texture-override lv-word";
+          wordEl.className = "hf-texture-text lv-texture-override lv-word";
           wordEl.id = "lv-word-" + wi;
           wordEl.textContent = txt;
           wordEl.style.fontSize = fontSize + "px";
+          wordEl.style.webkitMaskImage = "url('" + TEXTURE_URL + "')";
+          wordEl.style.maskImage = "url('" + TEXTURE_URL + "')";
           if (KEYWORDS.has(wi)) wordEl.style.color = "#FFAA44";
 
           shadow.appendChild(wordEl);
@@ -215,7 +219,7 @@
         });
 
         tl.seek(0);
-        window.__timelines["caption-texture-lava"] = tl;
+        window.__timelines["caption-texture"] = tl;
       })();
     </script>
   </body>

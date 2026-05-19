@@ -376,6 +376,27 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         await page?.close().catch(() => {});
       }
     },
+
+    async listRegistryCatalog() {
+      const { listRegistryItems, loadAllItems } = await import("../registry/resolver.js");
+      const entries = await listRegistryItems();
+      const blockAndComponentEntries = entries.filter(
+        (e) => e.type === "hyperframes:block" || e.type === "hyperframes:component",
+      );
+      return loadAllItems(blockAndComponentEntries);
+    },
+
+    async installRegistryBlock(opts) {
+      const { resolveItem } = await import("../registry/resolver.js");
+      const { installItem } = await import("../registry/installer.js");
+      const item = await resolveItem(opts.blockName);
+      const { written } = await installItem(item, { destDir: opts.project.dir });
+      const relativePaths = written.map((abs) => {
+        const rel = abs.startsWith(opts.project.dir) ? abs.slice(opts.project.dir.length + 1) : abs;
+        return rel;
+      });
+      return { written: relativePaths, block: item };
+    },
   };
 
   // ── Build the Hono app ─────────────────────────────────────────────────
