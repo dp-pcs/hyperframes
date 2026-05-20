@@ -36,6 +36,10 @@ Run `npx hyperframes catalog --tag captions` to confirm versions, then `npx hype
 | `caption-texture`            | Large uppercase headline captions with material textures (lava, metal…) |
 | `caption-weight-shift`       | Calm editorial; line-to-line font-weight crossfade                      |
 
+All registry caption components ship with **transparent backgrounds** — they're pure overlays. If the underlying video is bright or busy and needs a contrast layer, add a semi-transparent dark `<div>` in the host composition *beneath* the caption sub-composition; never inside the component itself.
+
+Browse with live previews: [hyperframes.heygen.com/catalog](https://hyperframes.heygen.com/catalog).
+
 ## Author-From-Scratch Workflow
 
 1. **Locate the transcript.** Check project root for `transcript.json` / `.srt` / `.vtt`. If absent, generate via `hyperframes-media` — never rely on the CLI default model; pass `--model` per Hard Rule 1.
