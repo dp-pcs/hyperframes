@@ -84,7 +84,7 @@ export function initSandboxRuntimeModular(): void {
     _timeline: RuntimeTimelineLike | null;
     play: () => void;
     pause: () => void;
-    seek: (timeSeconds: number) => void;
+    seek: (timeSeconds: number, options?: { keepPlaying?: boolean }) => void;
     getTime: () => number;
     getDuration: () => number;
     isPlaying: () => boolean;
@@ -255,9 +255,9 @@ export function initSandboxRuntimeModular(): void {
       if (authoredEnd != null && !node.hasAttribute(AUTHORED_END_ATTR)) {
         node.setAttribute(AUTHORED_END_ATTR, authoredEnd);
       }
-      // Non-root compositions derive visible duration from timeline.
-      // Strip both data-duration AND data-end so the visibility system
-      // falls back to the GSAP timeline duration (parity with preview).
+      // Strip public timing attrs on non-root compositions after preserving
+      // authored values privately. Runtime timing can still distinguish
+      // authored host windows from live child timeline durations.
       node.removeAttribute("data-duration");
       node.removeAttribute("data-end");
     }
@@ -964,6 +964,11 @@ export function initSandboxRuntimeModular(): void {
     return true;
   };
 
+  (window as Window & { __hfForceTimelineRebind?: () => void }).__hfForceTimelineRebind = () => {
+    childrenBound = false;
+    bindRootTimelineIfAvailable();
+  };
+
   const emitRootStageLayoutDiagnostics = () => {
     const rootNode = resolveRootCompositionElement();
     if (!(rootNode instanceof HTMLElement)) {
@@ -1335,9 +1340,20 @@ export function initSandboxRuntimeModular(): void {
           }
         }
 
-        // Composition hosts must respect both the authored parent clip window
-        // and the child composition's own live timeline duration.
-        if (duration != null && duration > 0 && liveDuration != null) {
+        const usesExternalCompositionSlot =
+          rawNode.hasAttribute("data-composition-src") ||
+          rawNode.hasAttribute("data-composition-file");
+
+        // Generic child compositions retain legacy behavior and respect both
+        // the authored parent clip window and the live child timeline duration.
+        // External composition hosts render into an authored slot, so a shorter
+        // child timeline should hold its final state through that slot.
+        if (
+          duration != null &&
+          duration > 0 &&
+          liveDuration != null &&
+          !usesExternalCompositionSlot
+        ) {
           duration = Math.min(duration, liveDuration);
         } else if ((duration == null || duration <= 0) && liveDuration != null) {
           duration = liveDuration;
@@ -1708,9 +1724,40 @@ export function initSandboxRuntimeModular(): void {
     }
   };
 
-  const seekTimelineAndAdapters = (t: number) => {
+  // Unpause all non-root timelines registered in window.__timelines (siblings
+  // in the registry, not GSAP child tweens). Matches the naming convention in
+  // player.ts:32 (forEachSiblingTimeline) and player.ts:89 (activateSiblingTimelines).
+  //
+  // Unlike the player's seek path which re-pauses siblings after seeking,
+  // render-seek is one-frame-at-a-time with no transport tick between frames,
+  // so the residual unpaused state is harmless — the next call re-activates
+  // idempotently.
+  const activateSiblingTimelines = (masterTimeline: RuntimeTimelineLike) => {
+    const timelines = (window.__timelines ?? {}) as Record<string, RuntimeTimelineLike | undefined>;
+    for (const tl of Object.values(timelines)) {
+      if (!tl || tl === masterTimeline) continue;
+      try {
+        tl.play();
+      } catch (err) {
+        swallow("runtime.init.activateSiblings", err);
+      }
+    }
+  };
+
+  const seekTimelineAndAdapters = (t: number, opts?: { activateChildren?: boolean }) => {
     const tl = state.capturedTimeline;
     if (tl) {
+      // When rendering frame-by-frame (activateChildren=true), ensure all
+      // sibling timelines are unpaused before seeking the root. GSAP
+      // does not propagate totalTime() to children that are internally
+      // paused, which leaves sub-compositions at their initial CSS state
+      // (typically opacity:0). This mirrors the activateSiblingTimelines
+      // call in player.ts renderSeek and is critical for sub-compositions
+      // whose data-start is at or near 0 — they are added to the root
+      // while it is paused and may never receive an explicit play().
+      if (opts?.activateChildren) {
+        activateSiblingTimelines(tl);
+      }
       try {
         if (typeof tl.totalTime === "function") {
           tl.totalTime(t, false);
@@ -1985,7 +2032,7 @@ export function initSandboxRuntimeModular(): void {
     state.currentTime = clock.now();
     state.isPlaying = false;
     state.mediaForceSyncNextTick = true;
-    seekTimelineAndAdapters(state.currentTime);
+    seekTimelineAndAdapters(state.currentTime, { activateChildren: true });
     syncMediaForCurrentState();
     postState(true);
   };

@@ -1,4 +1,5 @@
 import type { CanvasResolution } from "../core.types.js";
+import type { RegistryItem } from "../registry/types.js";
 
 /** Resolved info about a single project. */
 export interface ResolvedProject {
@@ -88,6 +89,8 @@ export interface StudioApiAdapter {
      * the producer for the integer-scale + aspect + HDR constraints.
      */
     outputResolution?: CanvasResolution;
+    /** Entry file relative to projectDir (e.g. "compositions/intro.html"). Defaults to index.html. */
+    composition?: string;
   }): RenderJobState;
 
   /** Optional: generate a JPEG thumbnail via Puppeteer or similar. */
@@ -105,4 +108,13 @@ export interface StudioApiAdapter {
 
   /** Optional: resolve session ID to project (multi-project mode). */
   resolveSession?: (sessionId: string) => Promise<{ projectId: string; title: string } | null>;
+
+  /** Optional: list all registry items (blocks + components) for the catalog. */
+  listRegistryCatalog?(): Promise<RegistryItem[]>;
+
+  /** Optional: install a registry item into a project directory. */
+  installRegistryBlock?(opts: {
+    project: ResolvedProject;
+    blockName: string;
+  }): Promise<{ written: string[]; block: RegistryItem }>;
 }

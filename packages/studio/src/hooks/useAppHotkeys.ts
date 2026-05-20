@@ -45,6 +45,9 @@ interface UseAppHotkeysParams {
   syncHistoryPreviewAfterApply: (paths: string[] | undefined) => Promise<void>;
   waitForPendingDomEditSaves: () => Promise<void>;
   leftSidebarRef: React.RefObject<LeftSidebarHandle | null>;
+  handleCopy: () => boolean;
+  handlePaste: () => Promise<void>;
+  handleCut: () => Promise<boolean>;
 }
 
 // ── Hook ──
@@ -54,7 +57,6 @@ export function useAppHotkeys({
   handleTimelineElementDelete,
   handleDomEditElementDelete,
   domEditSelectionRef,
-  clearDomSelectionRef,
   editHistory,
   readOptionalProjectFile,
   readProjectFile,
@@ -64,6 +66,9 @@ export function useAppHotkeys({
   syncHistoryPreviewAfterApply,
   waitForPendingDomEditSaves,
   leftSidebarRef,
+  handleCopy,
+  handlePaste,
+  handleCut,
 }: UseAppHotkeysParams) {
   const previewHotkeyWindowRef = useRef<Window | null>(null);
   const handleAppKeyDownRef = useRef<((event: KeyboardEvent) => void) | undefined>(undefined);
@@ -110,12 +115,10 @@ export function useAppHotkeys({
       return;
     }
     if (result.ok && result.label) {
-      clearDomSelectionRef.current();
       await syncHistoryPreviewAfterApply(result.paths);
       showToast(`Undid ${result.label}`, "info");
     }
   }, [
-    clearDomSelectionRef,
     editHistory,
     readHistoryProjectFile,
     showToast,
@@ -135,12 +138,10 @@ export function useAppHotkeys({
       return;
     }
     if (result.ok && result.label) {
-      clearDomSelectionRef.current();
       await syncHistoryPreviewAfterApply(result.paths);
       showToast(`Redid ${result.label}`, "info");
     }
   }, [
-    clearDomSelectionRef,
     editHistory,
     readHistoryProjectFile,
     showToast,
@@ -161,6 +162,12 @@ export function useAppHotkeys({
   handleUndoRef.current = handleUndo;
   const handleRedoRef = useRef(handleRedo);
   handleRedoRef.current = handleRedo;
+  const handleCopyRef = useRef(handleCopy);
+  handleCopyRef.current = handleCopy;
+  const handlePasteRef = useRef(handlePaste);
+  handlePasteRef.current = handlePaste;
+  const handleCutRef = useRef(handleCut);
+  handleCutRef.current = handleCut;
 
   // ── Consolidated keydown handler ──
 
@@ -195,6 +202,48 @@ export function useAppHotkeys({
       if (event.key === "2") {
         event.preventDefault();
         leftSidebarRef.current?.selectTab("assets");
+        return;
+      }
+
+      // Cmd/Ctrl+C — copy (only preventDefault if we actually have something to copy)
+      const copyPasteKey = event.key.toLowerCase();
+      if (
+        copyPasteKey === "c" &&
+        !event.shiftKey &&
+        !event.altKey &&
+        !isEditableTarget(event.target)
+      ) {
+        if (handleCopyRef.current()) {
+          event.preventDefault();
+        }
+        return;
+      }
+
+      // Cmd/Ctrl+V — paste
+      if (
+        copyPasteKey === "v" &&
+        !event.shiftKey &&
+        !event.altKey &&
+        !isEditableTarget(event.target)
+      ) {
+        event.preventDefault();
+        void handlePasteRef.current();
+        return;
+      }
+
+      // Cmd/Ctrl+X — cut (only preventDefault if there's a selected element to cut)
+      if (
+        copyPasteKey === "x" &&
+        !event.shiftKey &&
+        !event.altKey &&
+        !isEditableTarget(event.target)
+      ) {
+        const hasSelection =
+          !!usePlayerStore.getState().selectedElementId || !!domEditSelectionRef.current;
+        if (hasSelection) {
+          event.preventDefault();
+          void handleCutRef.current();
+        }
         return;
       }
     }

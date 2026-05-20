@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useCallback, type RefObject } from "react";
 import { SourceEditor } from "./editor/SourceEditor";
 import { LeftSidebar, type LeftSidebarHandle } from "./sidebar/LeftSidebar";
 import { MediaPreview } from "./MediaPreview";
@@ -6,17 +6,21 @@ import { isMediaFile } from "../utils/mediaTypes";
 import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useStudioContext } from "../contexts/StudioContext";
 import { useFileManagerContext } from "../contexts/FileManagerContext";
+import { getPersistedRenderSettings } from "./renders/renderSettings";
 
 export interface StudioLeftSidebarProps {
   leftSidebarRef: RefObject<LeftSidebarHandle | null>;
   onSelectComposition: (comp: string) => void;
+  onAddBlock: (blockName: string) => void;
   onLint: () => void;
   linting: boolean;
 }
 
+// fallow-ignore-next-line complexity
 export function StudioLeftSidebar({
   leftSidebarRef,
   onSelectComposition,
+  onAddBlock,
   onLint,
   linting,
 }: StudioLeftSidebarProps) {
@@ -28,12 +32,13 @@ export function StudioLeftSidebar({
     handlePanelResizeMove,
     handlePanelResizeEnd,
   } = usePanelLayoutContext();
-  const { projectId } = useStudioContext();
+  const { projectId, renderQueue, waitForPendingDomEditSaves } = useStudioContext();
   const {
     compositions,
     assets,
     editingFile,
     fileTree,
+    revealSourceOffset,
     handleFileSelect,
     handleCreateFile,
     handleCreateFolder,
@@ -44,6 +49,15 @@ export function StudioLeftSidebar({
     handleImportFiles,
     handleContentChange,
   } = useFileManagerContext();
+
+  const handleRenderComposition = useCallback(
+    async (comp: string) => {
+      await waitForPendingDomEditSaves();
+      const { format, quality, fps } = getPersistedRenderSettings();
+      await renderQueue.startRender({ composition: comp, format, quality, fps });
+    },
+    [renderQueue, waitForPendingDomEditSaves],
+  );
 
   if (leftCollapsed) {
     return (
@@ -103,13 +117,17 @@ export function StudioLeftSidebar({
                 content={editingFile.content ?? ""}
                 filePath={editingFile.path}
                 onChange={handleContentChange}
+                revealOffset={revealSourceOffset}
               />
             )
           ) : undefined
         }
+        onRenderComposition={handleRenderComposition}
+        isRendering={renderQueue.isRendering}
         onLint={onLint}
         linting={linting}
         onToggleCollapse={toggleLeftSidebar}
+        onAddBlock={onAddBlock}
       />
       <div
         className="group w-2 flex-shrink-0 cursor-col-resize flex items-center justify-center"

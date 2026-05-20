@@ -31,6 +31,13 @@ import {
   STUDIO_ROTATION_TRANSFORM_ORIGIN,
 } from "./manualEditsTypes";
 import { roundRotationAngle } from "./manualEditsParsing";
+import {
+  STUDIO_MOTION_ATTR,
+  STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR,
+  STUDIO_MOTION_ORIGINAL_OPACITY_ATTR,
+  STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR,
+} from "./studioMotionTypes";
+import { applyStudioMotionFromDom } from "./studioMotion";
 
 /* ── Gesture tracking ─────────────────────────────────────────────── */
 let studioManualEditGestureId = 0;
@@ -457,13 +464,6 @@ export function applyStudioRotationDraft(element: HTMLElement, rotation: { angle
   );
 }
 
-// Clear functions live in manualEditsSnapshot.ts (they depend on restoreInline* helpers).
-export {
-  clearStudioPathOffset,
-  clearStudioRotation,
-  clearStudioBoxSize,
-} from "./manualEditsSnapshot";
-
 /* ── HTML patch builders ──────────────────────────────────────────── */
 import type { PatchOperation } from "../../utils/sourcePatcher";
 
@@ -755,6 +755,52 @@ export function buildClearRotationPatches(element: HTMLElement): PatchOperation[
   return ops;
 }
 
+/* ── Motion HTML patch builders ──────────────────────────────────── */
+
+export function buildMotionPatches(element: HTMLElement): PatchOperation[] {
+  const motionJson = element.getAttribute(STUDIO_MOTION_ATTR);
+  if (!motionJson) return [];
+  const ops: PatchOperation[] = [
+    { type: "attribute", property: STUDIO_MOTION_ATTR, value: motionJson },
+  ];
+  const origTransform = element.getAttribute(STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR);
+  if (origTransform !== null) {
+    ops.push({
+      type: "attribute",
+      property: STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR,
+      value: origTransform,
+    });
+  }
+  const origOpacity = element.getAttribute(STUDIO_MOTION_ORIGINAL_OPACITY_ATTR);
+  if (origOpacity !== null) {
+    ops.push({
+      type: "attribute",
+      property: STUDIO_MOTION_ORIGINAL_OPACITY_ATTR,
+      value: origOpacity,
+    });
+  }
+  const origVisibility = element.getAttribute(STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR);
+  if (origVisibility !== null) {
+    ops.push({
+      type: "attribute",
+      property: STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR,
+      value: origVisibility,
+    });
+  }
+  return ops;
+}
+
+export function buildClearMotionPatches(_element: HTMLElement): PatchOperation[] {
+  return [
+    { type: "attribute", property: STUDIO_MOTION_ATTR, value: null },
+    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR, value: null },
+    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_OPACITY_ATTR, value: null },
+    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR, value: null },
+  ];
+}
+
+/* ── Seek reapply (position + motion) ────────────────────────────── */
+
 export function reapplyPositionEditsAfterSeek(doc: Document): void {
   const htmlElement = doc.defaultView?.HTMLElement;
   if (!htmlElement) return;
@@ -793,4 +839,7 @@ export function reapplyPositionEditsAfterSeek(doc: Document): void {
       applyStudioRotation(el, { angle });
     }
   }
+
+  // Reapply DOM-backed motion timeline after seek
+  applyStudioMotionFromDom(doc);
 }

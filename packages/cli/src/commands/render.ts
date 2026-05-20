@@ -1,6 +1,11 @@
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import {
+  reportVariableIssues,
+  resolveVariablesArg,
+  validateVariablesAgainstProject,
+} from "../utils/variables.js";
 
 export const examples: Example[] = [
   ["Render to MP4", "hyperframes render --output output.mp4"],
@@ -44,17 +49,12 @@ import { bytesToMb } from "../telemetry/system.js";
 import { VERSION } from "../version.js";
 import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs } from "../utils/dockerRunArgs.js";
-import { ensureDOMParser } from "../utils/dom.js";
 import type { RenderJob } from "@hyperframes/producer";
 import {
-  extractCompositionMetadata,
-  validateVariables,
-  formatVariableValidationIssue,
   normalizeResolutionFlag,
   parseFps,
   fpsToNumber,
   fpsToFfmpegArg,
-  type VariableValidationIssue,
   type CanvasResolution,
   type Fps,
   type FpsParseResult,
@@ -222,6 +222,15 @@ export default defineCommand({
       description:
         "Output resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. The composition is unchanged — Chrome renders at higher DPR (deviceScaleFactor) so the captured screenshot lands at the requested dimensions. Aspect ratio must match the composition; the scale must be an integer multiple. Not yet supported with --hdr.",
     },
+    "page-side-compositing": {
+      type: "boolean",
+      description:
+        "Run shader transitions on a page-side WebGL canvas inside Chrome " +
+        "instead of the Node-side layered blend. ~6× faster for SDR " +
+        "shader-transition renders. HDR/alpha/video content auto-disables. " +
+        "Use --no-page-side-compositing to force the layered path.",
+      default: true,
+    },
   },
   async run({ args }) {
     // ── Resolve project ────────────────────────────────────────────────────
@@ -291,6 +300,11 @@ export default defineCommand({
         process.exit(1);
       }
       workers = parsed;
+    }
+
+    // ── Wire opt-in: page-side compositing ───────────────────────────────
+    if (args["page-side-compositing"] === false) {
+      process.env.HF_PAGE_SIDE_COMPOSITING = "false";
     }
 
     // ── Validate max-concurrent-renders ─────────────────────────────────
@@ -499,27 +513,7 @@ export default defineCommand({
     const strictVariables = args["strict-variables"] ?? false;
     if (variables && Object.keys(variables).length > 0) {
       const issues = validateVariablesAgainstProject(project.indexPath, variables);
-      if (issues.length > 0) {
-        if (!quiet) {
-          console.log("");
-          console.log(
-            c.warn(
-              `Variable ${issues.length === 1 ? "issue" : "issues"} (${issues.length}) — values may not render as expected:`,
-            ),
-          );
-          for (const issue of issues) {
-            console.log("  " + c.dim(formatVariableValidationIssue(issue)));
-          }
-          console.log("");
-        }
-        if (strictVariables) {
-          console.log(
-            c.error("  Aborting render due to variable issues (--strict-variables mode)."),
-          );
-          console.log("");
-          process.exit(1);
-        }
-      }
+      reportVariableIssues(issues, { strict: strictVariables, quiet });
     }
 
     // ── Render ────────────────────────────────────────────────────────────
@@ -538,6 +532,7 @@ export default defineCommand({
         variables,
         entryFile,
         outputResolution,
+        pageSideCompositing: args["page-side-compositing"] !== false,
         exitAfterComplete: true,
       });
     } else {
@@ -584,144 +579,7 @@ interface RenderOptions {
   exitAfterComplete?: boolean;
   /** Output resolution preset; see `resolveDeviceScaleFactor` for constraints. */
   outputResolution?: CanvasResolution;
-}
-
-export type VariablesParseError =
-  | { kind: "conflict" }
-  | { kind: "read-error"; path: string; cause: string }
-  | { kind: "parse-error"; source: "inline" | "file"; cause: string }
-  | { kind: "shape-error" };
-
-export type VariablesParseResult =
-  | { ok: true; value: Record<string, unknown> | undefined }
-  | { ok: false; error: VariablesParseError };
-
-/**
- * Pure parser for `--variables` / `--variables-file` flag pair. Splits out
- * from `resolveVariablesArg` so validation paths are unit-testable without
- * triggering `process.exit`. Reports failures via a structured `kind`
- * discriminant so the side-effecting wrapper owns all UI strings.
- */
-export function parseVariablesArg(
-  inline: string | undefined,
-  filePath: string | undefined,
-  readFile: (path: string) => string = (p) => readFileSync(resolve(p), "utf8"),
-): VariablesParseResult {
-  if (inline != null && filePath != null) {
-    return { ok: false, error: { kind: "conflict" } };
-  }
-  let raw: string | undefined;
-  let source: "inline" | "file" | undefined;
-  if (inline != null) {
-    raw = inline;
-    source = "inline";
-  } else if (filePath != null) {
-    try {
-      raw = readFile(filePath);
-      source = "file";
-    } catch (error: unknown) {
-      return {
-        ok: false,
-        error: {
-          kind: "read-error",
-          path: filePath,
-          cause: error instanceof Error ? error.message : String(error),
-        },
-      };
-    }
-  }
-  if (raw == null) return { ok: true, value: undefined };
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error: unknown) {
-    return {
-      ok: false,
-      error: {
-        kind: "parse-error",
-        source: source ?? "inline",
-        cause: error instanceof Error ? error.message : String(error),
-      },
-    };
-  }
-  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { ok: false, error: { kind: "shape-error" } };
-  }
-  return { ok: true, value: parsed as Record<string, unknown> };
-}
-
-function variablesErrorMessage(error: VariablesParseError): { title: string; message: string } {
-  switch (error.kind) {
-    case "conflict":
-      return {
-        title: "Conflicting variables flags",
-        message: "Use either --variables or --variables-file, not both.",
-      };
-    case "read-error":
-      return {
-        title: "Could not read --variables-file",
-        message: `${error.path}: ${error.cause}`,
-      };
-    case "parse-error":
-      return {
-        title:
-          error.source === "file"
-            ? "Invalid JSON in --variables-file"
-            : "Invalid JSON in --variables",
-        message: error.cause,
-      };
-    case "shape-error":
-      return {
-        title: "Invalid variables payload",
-        message: 'Variables must be a JSON object (e.g. {"title":"Hello"}).',
-      };
-  }
-}
-
-/**
- * Resolve `--variables` / `--variables-file` into a plain object, or
- * `undefined` when neither flag is set. Exits the process with a friendly
- * error box on any validation failure.
- */
-export function resolveVariablesArg(
-  inline: string | undefined,
-  filePath: string | undefined,
-): Record<string, unknown> | undefined {
-  const result = parseVariablesArg(inline, filePath);
-  if (!result.ok) {
-    const { title, message } = variablesErrorMessage(result.error);
-    errorBox(title, message);
-    process.exit(1);
-  }
-  return result.value;
-}
-
-/**
- * Validate `--variables` values against the project's top-level
- * `data-composition-variables` declarations. Returns an empty array when
- * the index has no declarations or when every key is declared with a
- * matching type. Errors reading the index are silently treated as "no
- * declarations" — the lint pass owns malformed-HTML diagnostics, render
- * shouldn't fail just because the schema is unreadable.
- */
-export function validateVariablesAgainstProject(
-  indexPath: string,
-  values: Record<string, unknown>,
-): VariableValidationIssue[] {
-  let html: string;
-  try {
-    html = readFileSync(indexPath, "utf8");
-  } catch {
-    return [];
-  }
-  // extractCompositionMetadata uses DOMParser, which Node doesn't ship.
-  // Same pattern as `compositions.ts` and other CLI commands that touch
-  // @hyperframes/core's HTML parsers.
-  ensureDOMParser();
-  const meta = extractCompositionMetadata(html);
-  if (meta.variables.length === 0) return [];
-  return validateVariables(values, meta.variables);
+  pageSideCompositing?: boolean;
 }
 
 /**
@@ -878,6 +736,7 @@ async function renderDocker(
       variables: options.variables,
       entryFile: options.entryFile,
       outputResolution: options.outputResolution,
+      pageSideCompositing: options.pageSideCompositing,
     },
   });
 

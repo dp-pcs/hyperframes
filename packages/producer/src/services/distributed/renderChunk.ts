@@ -37,11 +37,11 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
-import type { Page } from "puppeteer-core";
 import {
   assertSwiftShader,
   type BeforeCaptureHook,
   BROWSER_GPU_NOT_SOFTWARE,
+  calculateOptimalWorkers,
   type CaptureOptions,
   type CaptureSession,
   closeCaptureSession,
@@ -52,6 +52,7 @@ import {
   type ExtractedFrames,
   getEncoderPreset,
   initializeSession,
+  readWebGlVendorInfoFromCanvas,
   resolveConfig,
 } from "@hyperframes/engine";
 import { defaultLogger } from "../../logger.js";
@@ -67,6 +68,7 @@ import { applyRuntimeEnvSnapshot } from "../render/runtimeEnvSnapshot.js";
 import { buildVirtualTimeShim, createFileServer, type FileServerHandle } from "../fileServer.js";
 import {
   buildSyntheticRenderJob,
+  type DistributedFormat,
   PLAN_VIDEOS_META_RELATIVE_PATH,
   type PlanVideosJson,
   readFfmpegVersion,
@@ -198,7 +200,7 @@ interface PlanJson {
     fpsDen: number;
     width: number;
     height: number;
-    format: "mp4" | "mov" | "png-sequence" | "webm";
+    format: DistributedFormat;
   };
   chunkCount: number;
   totalFrames: number;
@@ -214,55 +216,11 @@ interface PlanJson {
  */
 export { applyRuntimeEnvSnapshot } from "../render/runtimeEnvSnapshot.js";
 
-/**
- * Read SwiftShader vendor/renderer via a 1×1 WebGL canvas + the
- * `WEBGL_debug_renderer_info` extension. Used as the `readInfo` override
- * for {@link assertSwiftShader} when the worker is running on
- * `chrome-headless-shell` — that build serves `chrome://gpu` as an empty
- * document so the default `chrome://gpu`-based info reader trips
- * `net::ERR_FAILED` even when the GL backend is in fact SwiftShader.
- *
- * The canvas-based probe runs against whatever page the caller hands in
- * (we use a fresh `about:blank` so it doesn't depend on the composition
- * URL being navigated yet). The renderer string returned matches the
- * format `assertSwiftShader` expects (substring match against
- * `"swiftshader"`).
- */
-export async function readWebGlVendorInfoFromCanvas(
-  page: Page,
-): Promise<{ vendor: string; renderer: string }> {
-  await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 30_000 });
-  return page.evaluate((): { vendor: string; renderer: string } => {
-    try {
-      const canvas = document.createElement("canvas");
-      const gl =
-        (canvas.getContext("webgl") as WebGLRenderingContext | null) ??
-        (canvas.getContext("experimental-webgl") as WebGLRenderingContext | null);
-      if (!gl) {
-        return { vendor: "", renderer: "" };
-      }
-      const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
-        UNMASKED_VENDOR_WEBGL: number;
-        UNMASKED_RENDERER_WEBGL: number;
-      } | null;
-      if (!ext) {
-        return {
-          vendor: String(gl.getParameter(gl.VENDOR) ?? ""),
-          renderer: String(gl.getParameter(gl.RENDERER) ?? ""),
-        };
-      }
-      // Older Chrome builds expose the unmasked strings under the literal
-      // numeric constants 0x9245 / 0x9246. The extension surface above is
-      // identical across builds — read through it.
-      return {
-        vendor: String(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) ?? ""),
-        renderer: String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? ""),
-      };
-    } catch {
-      return { vendor: "", renderer: "" };
-    }
-  });
-}
+// `readWebGlVendorInfoFromCanvas` lives in `@hyperframes/engine` (it's
+// used both here and by `parallelCoordinator.executeWorkerTask`). Re-exported
+// from this subpath so downstream consumers that already import it from
+// `@hyperframes/producer/distributed` keep working.
+export { readWebGlVendorInfoFromCanvas } from "@hyperframes/engine";
 
 /**
  * Compute a deterministic SHA-256 fingerprint for the chunk's output.
@@ -444,7 +402,7 @@ export async function renderChunk(
     const job = buildSyntheticRenderJob({
       fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
       quality: encoder.quality,
-      format: plan.dimensions.format as "mp4" | "mov" | "png-sequence",
+      format: plan.dimensions.format,
       crf: encoder.crf,
       bitrate: encoder.bitrate,
       hdrMode: "force-sdr",
@@ -504,34 +462,63 @@ export async function renderChunk(
       format: plan.dimensions.format === "mp4" ? "jpeg" : "png",
       quality: plan.dimensions.format === "mp4" ? 80 : undefined,
       deviceScaleFactor: encoder.deviceScaleFactor,
+      // Re-inject the controller's snapshotted variables so the chunk's
+      // first capture sees the same `window.__hfVariables` the in-process
+      // renderer would have seen. Optional — compositions that don't
+      // declare `data-composition-variables` leave this undefined and the
+      // engine skips the `evaluateOnNewDocument` injection.
+      variables: encoder.variables,
       // lock the BeginFrame warmup loop to a fixed iteration count so
       // `beginFrameTimeTicks` is host-independent. Only chunks ever set this.
       lockWarmupTicks: true,
     };
+
+    // Resolve worker count up-front so we can decide whether to bother
+    // pre-warming a probe session at all. The parallel branch
+    // (chunkWorkerCount > 1) closes the probe immediately and creates fresh
+    // per-worker sessions; `executeWorkerTask` runs `assertSwiftShader`
+    // on worker 0 only (gated on `cfg.browserGpuMode === "software"`), so
+    // the safety contract holds without the eager pre-probe and without
+    // every worker concurrently navigating to the GL probe page. See
+    // `heygen-com/hyperframes#955` for the worst-case wall regression that
+    // motivated gating the probe to worker 0.
+    //
+    // Capture-cost calibration based on shader transitions / renderModeHints
+    // is not threaded through to chunks yet; the in-process renderer's
+    // `resolveRenderWorkerCount` wraps this with that reduction, but
+    // `PlanJson` doesn't carry the compiled hints needed to call it
+    // directly. The existing adaptive-retry path reduces workers if
+    // compositor contention surfaces as CDP timeouts.
+    const chunkWorkerCount = calculateOptimalWorkers(framesInChunk, undefined, cfg);
 
     // ── Browser + warmup ──
     let session: CaptureSession | null = null;
     let outputKind: "file" | "frame-dir";
     let framesEncoded = 0;
     try {
-      session = await createCaptureSession(fileServer.url, framesDir, captureOptions, null, cfg);
-      // SwiftShader assertion runs BEFORE initializeSession (which navigates to
-      // the composition); on failure we tear down without ever touching the
-      // composition URL. We pass `readWebGlVendorInfoFromCanvas` rather than
-      // letting `assertSwiftShader` use its default `chrome://gpu` reader —
-      // `chrome-headless-shell` serves chrome:// pages as empty documents,
-      // which would trip a false-negative even when the GL backend is in fact
-      // SwiftShader. The canvas + WEBGL_debug_renderer_info probe works on
-      // any page (we navigate to about:blank inside the helper).
-      await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
-      await initializeSession(session);
+      if (chunkWorkerCount === 1) {
+        // Sequential branch reuses the probe session for the actual capture.
+        // SwiftShader assertion runs BEFORE initializeSession (which
+        // navigates to the composition); on failure we tear down without
+        // ever touching the composition URL. We pass
+        // `readWebGlVendorInfoFromCanvas` rather than letting
+        // `assertSwiftShader` use its default `chrome://gpu` reader —
+        // `chrome-headless-shell` serves chrome:// pages as empty documents,
+        // which would trip a false-negative even when the GL backend is in
+        // fact SwiftShader. The canvas + WEBGL_debug_renderer_info probe
+        // works on any page (we navigate to about:blank inside the helper).
+        session = await createCaptureSession(fileServer.url, framesDir, captureOptions, null, cfg);
+        await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
+        await initializeSession(session);
+        // `discardWarmupCapture` is intentionally NOT called: every frame
+        // seeks fresh DOM, so `lastFrameCache` is never read; priming it
+        // would deadlock Chrome's compositor by issuing a second beginFrame
+        // at a `frameTimeTicks` it had just advanced to.
+      }
+      // chunkWorkerCount > 1: skip the probe entirely. Each parallel worker
+      // creates its own session and runs `assertSwiftShader` before its
+      // first frame.
 
-      // `discardWarmupCapture` is intentionally NOT called: every frame
-      // seeks fresh DOM, so `lastFrameCache` is never read; priming it
-      // would deadlock Chrome's compositor by issuing a second beginFrame
-      // at a `frameTimeTicks` it had just advanced to.
-
-      // ── Capture the chunk's range via runCaptureStage ──
       await runCaptureStage({
         fileServer,
         workDir,
@@ -541,11 +528,7 @@ export async function renderChunk(
         cfg,
         forceScreenshot: encoder.forceScreenshot,
         log,
-        workerCount: 1,
-        // Pass the pre-warmed session through as `probeSession` so captureStage
-        // reuses it via `prepareCaptureSessionForReuse` instead of spinning up
-        // a fresh browser. The stage closes the session in its `finally`,
-        // so we MUST clear our own reference here to avoid a double-close.
+        workerCount: chunkWorkerCount,
         probeSession: session,
         needsAlpha: plan.dimensions.format !== "mp4",
         captureAttempts: [],
@@ -562,16 +545,16 @@ export async function renderChunk(
       // ── Encode the chunk ──
       const isPngSequence = plan.dimensions.format === "png-sequence";
       outputKind = isPngSequence ? "frame-dir" : "file";
-      // For mp4/mov we use the standard preset machinery; the locked encoder
-      // values come from `meta/encoder.json` and the `lockGopForChunkConcat`
-      // toggle is the only Phase-2 flag that flips on at this site.
-      // png-sequence has no encoder, but `runEncodeStage` still reads
-      // `preset.quality` for bookkeeping (it never reaches ffmpeg on the
-      // pngseq branch). Fall back to the mp4 preset shape — same trick
-      // `renderOrchestrator` plays.
+      // For mp4 / mov / webm we use the standard preset machinery; the
+      // locked encoder values come from `meta/encoder.json` and the
+      // `lockGopForChunkConcat` toggle is the only Phase-2 flag that flips
+      // on at this site. png-sequence has no encoder, but `runEncodeStage`
+      // still reads `preset.quality` for bookkeeping (it never reaches
+      // ffmpeg on the pngseq branch). Fall back to the mp4 preset shape —
+      // same trick `renderOrchestrator` plays.
       const presetFormat: "mp4" | "mov" | "webm" = isPngSequence
         ? "mp4"
-        : (plan.dimensions.format as "mp4" | "mov");
+        : (plan.dimensions.format as "mp4" | "mov" | "webm");
       const basePreset = getEncoderPreset(job.config.quality, presetFormat, undefined);
       const preset = resolvePresetForLockedEncoder(basePreset, encoder.encoder);
       const effectiveQuality = encoder.crf ?? preset.quality;

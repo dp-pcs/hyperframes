@@ -10,14 +10,13 @@ import type {
   StageZoomKeyframe,
   CompositionVariable,
 } from "../core.types";
-import { CANVAS_DIMENSIONS } from "../core.types";
 import {
   parseGsapScript,
   validateCompositionGsap,
   gsapAnimationsToKeyframes,
   getAnimationsForElement,
 } from "./gsapParser";
-import type { ValidationResult } from "./gsapParser";
+import type { ValidationResult } from "../core.types";
 
 const MEDIA_TYPES = new Set<string>(["video", "image", "audio"]);
 
@@ -902,5 +901,3 @@ function extractGsapScript(doc: Document): string | null {
   }
   return null;
 }
-
-export { CANVAS_DIMENSIONS };

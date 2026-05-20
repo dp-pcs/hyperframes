@@ -10,6 +10,7 @@ export interface StudioUiPreferences {
   playbackRate?: number;
   audioMuted?: boolean;
   previewZoom?: StoredPreviewZoomState;
+  recentBlocks?: string[];
 }
 
 const STUDIO_UI_PREFERENCES_KEY = "hf-studio-ui-preferences";
@@ -60,6 +61,11 @@ function readStorage(storage: Storage | null): StudioUiPreferences {
       ) {
         preferences.previewZoom = { zoomPercent, panX, panY };
       }
+    }
+    if (Array.isArray(parsed.recentBlocks)) {
+      preferences.recentBlocks = parsed.recentBlocks.filter(
+        (v: unknown): v is string => typeof v === "string",
+      );
     }
     return preferences;
   } catch {

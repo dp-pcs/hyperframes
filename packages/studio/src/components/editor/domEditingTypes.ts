@@ -42,6 +42,8 @@ export const CURATED_STYLE_PROPERTIES = [
   "backdrop-filter",
   "z-index",
   "transform",
+  "object-fit",
+  "object-position",
 ] as const;
 
 export interface DomEditCapabilities {
@@ -65,7 +67,7 @@ export interface DomEditTextField {
   attributes: Array<{ name: string; value: string }>;
   inlineStyles: Record<string, string>;
   computedStyles: Record<string, string>;
-  source: "self" | "child";
+  source: "self" | "child" | "text-node";
 }
 
 export interface DomEditSelection extends PatchTarget {
@@ -76,6 +78,7 @@ export interface DomEditSelection extends PatchTarget {
   compositionPath: string;
   compositionSrc?: string;
   isCompositionHost: boolean;
+  isInsideLockedComposition: boolean;
   boundingBox: { x: number; y: number; width: number; height: number };
   textContent: string | null;
   dataAttributes: Record<string, string>;

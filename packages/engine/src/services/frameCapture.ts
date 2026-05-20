@@ -349,6 +349,55 @@ async function pollPageExpression(
   return Boolean(await page.evaluate(expression));
 }
 
+async function pollSubCompositionTimelines(
+  page: Page,
+  timeoutMs: number,
+  intervalMs: number = 150,
+): Promise<void> {
+  const expression = `(function() {
+    var hosts = document.querySelectorAll("[data-composition-id]");
+    if (hosts.length === 0) return true;
+    var timelines = window.__timelines || {};
+    for (var i = 0; i < hosts.length; i++) {
+      var id = hosts[i].getAttribute("data-composition-id");
+      if (!id) continue;
+      if (!timelines[id]) return false;
+    }
+    return true;
+  })()`;
+  const ready = await pollPageExpression(page, expression, timeoutMs, intervalMs);
+  // Always force a timeline rebind once sub-composition timelines are
+  // confirmed present. The previous implementation only called rebind
+  // when the timeline count grew during the poll, which missed the case
+  // where all sub-comp scripts had already executed before the poll
+  // started — leaving child timelines un-nested in the root and causing
+  // the earliest sub-composition (data-start near 0) to render without
+  // its GSAP animations.
+  if (ready) {
+    await page.evaluate(`(function() {
+      if (typeof window.__hfForceTimelineRebind === "function") {
+        window.__hfForceTimelineRebind();
+      }
+    })()`);
+  }
+  if (!ready) {
+    const missing = await page.evaluate(`(function() {
+      var hosts = document.querySelectorAll("[data-composition-id]");
+      var timelines = window.__timelines || {};
+      var m = [];
+      for (var i = 0; i < hosts.length; i++) {
+        var id = hosts[i].getAttribute("data-composition-id");
+        if (id && !timelines[id]) m.push(id);
+      }
+      return m.join(", ");
+    })()`);
+    console.warn(
+      `[FrameCapture] Sub-composition timelines not registered after ${timeoutMs}ms: ${missing}. ` +
+        `Compositions that load data asynchronously (e.g. fetch) must register window.__timelines[id] after setup completes.`,
+    );
+  }
+}
+
 async function pollVideosReady(
   page: Page,
   skipIds: readonly string[],
@@ -360,7 +409,16 @@ async function pollVideosReady(
       await page.evaluate((skipIdList: readonly string[]) => {
         const skip = new Set(skipIdList);
         const vids = Array.from(document.querySelectorAll("video")).filter((v) => !skip.has(v.id));
-        return vids.length === 0 || vids.every((v) => (v as HTMLVideoElement).readyState >= 2);
+        return (
+          vids.length === 0 ||
+          vids.every((v) => {
+            const ve = v as HTMLVideoElement;
+            if (ve.readyState >= 2) return true;
+            if (ve.error) return true;
+            if (ve.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) return true;
+            return false;
+          })
+        );
       }, skipIds),
     );
   };
@@ -499,6 +557,8 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       );
     }
 
+    await pollSubCompositionTimelines(page, pageReadyTimeout);
+
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
 
     // Wait for all video elements to have decoded their CURRENT frame, not
@@ -519,8 +579,17 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       pageReadyTimeout,
     );
     if (!videosReady) {
-      throw new Error(
-        `[FrameCapture] video first frame not decoded after ${pageReadyTimeout}ms. Video elements must reach readyState >= 2 (HAVE_CURRENT_DATA) before capture starts.`,
+      const failedVideos = await page.evaluate((skipIdList: readonly string[]) => {
+        const skip = new Set(skipIdList);
+        return Array.from(document.querySelectorAll("video"))
+          .filter((v) => !skip.has(v.id))
+          .filter((v) => (v as HTMLVideoElement).readyState < 2 && !(v as HTMLVideoElement).error)
+          .map((v) => (v as HTMLVideoElement).src || v.getAttribute("src") || "(no src)")
+          .join(", ");
+      }, session.options.skipReadinessVideoIds ?? []);
+      console.warn(
+        `[FrameCapture] Some video elements did not decode within ${pageReadyTimeout}ms: ${failedVideos}. ` +
+          `Continuing render — affected videos will appear as blank/black frames.`,
       );
     }
 
@@ -615,14 +684,30 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     );
   }
 
+  await pollSubCompositionTimelines(page, pageReadyTimeout);
+
   await applyVideoMetadataHints(page, session.options.videoMetadataHints);
 
   // Same readyState contract as the screenshot path above (>= 2 / HAVE_CURRENT_DATA).
-  await pollVideosReady(
+  const bfVideosReady = await pollVideosReady(
     page,
     session.options.skipReadinessVideoIds ?? [],
     session.config?.playerReadyTimeout ?? DEFAULT_CONFIG.playerReadyTimeout,
   );
+  if (!bfVideosReady) {
+    const failedVideos = await page.evaluate((skipIdList: readonly string[]) => {
+      const skip = new Set(skipIdList);
+      return Array.from(document.querySelectorAll("video"))
+        .filter((v) => !skip.has(v.id))
+        .filter((v) => (v as HTMLVideoElement).readyState < 2 && !(v as HTMLVideoElement).error)
+        .map((v) => (v as HTMLVideoElement).src || v.getAttribute("src") || "(no src)")
+        .join(", ");
+    }, session.options.skipReadinessVideoIds ?? []);
+    console.warn(
+      `[FrameCapture] Some video elements did not decode within ${pageReadyTimeout}ms: ${failedVideos}. ` +
+        `Continuing render — affected videos will appear as blank/black frames.`,
+    );
+  }
 
   // Font check (no rAF dependency — uses fonts.ready API directly)
   await page.evaluate(`document.fonts?.ready`);
@@ -713,19 +798,50 @@ async function prepareFrameForCapture(
   const seekStart = Date.now();
   // Seek via the __hf protocol. The page's seek() implementation handles
   // all framework-specific logic (GSAP stepping, CSS animation sync, etc.)
-  await page.evaluate((t: number) => {
+  // Seek + check page-side composite pending flag in one round-trip.
+  const hasPendingComposite = await page.evaluate((t: number) => {
     if (window.__hf && typeof window.__hf.seek === "function") {
       window.__hf.seek(t);
     }
+    return !!(window as unknown as { __hf_page_composite_pending?: boolean })
+      .__hf_page_composite_pending;
   }, quantizedTime);
+
   const seekMs = Date.now() - seekStart;
 
-  // Before-capture hook (e.g. video frame injection)
+  // Before-capture hook (e.g. video frame injection) — runs before
+  // page-side compositor clones so cloneNode picks up injected <img>
+  // replacements for <video> elements.
   const beforeCaptureStart = Date.now();
   if (session.onBeforeCapture) {
     await session.onBeforeCapture(page, quantizedTime);
   }
   const beforeCaptureMs = Date.now() - beforeCaptureStart;
+
+  // Page-side compositing three-phase protocol:
+  //  1. prepare — clone scenes (now containing injected video <img>s)
+  //  2. micro-screenshot — force browser to paint cloned elements
+  //  3. resolve — drawElementImage reads paint records, shader composites
+  if (hasPendingComposite && session.captureMode !== "beginframe") {
+    await page.evaluate(async () => {
+      const w = window as unknown as { __hf_page_composite_prepare?: () => Promise<boolean> };
+      if (typeof w.__hf_page_composite_prepare === "function") {
+        await w.__hf_page_composite_prepare();
+      }
+    });
+    const cdp = await getCdpSession(page);
+    await cdp.send("Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 1,
+      clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 },
+    });
+    await page.evaluate(() => {
+      const w = window as unknown as { __hf_page_composite_resolve?: () => boolean };
+      if (typeof w.__hf_page_composite_resolve === "function") {
+        w.__hf_page_composite_resolve();
+      }
+    });
+  }
 
   return { quantizedTime, seekMs, beforeCaptureMs };
 }

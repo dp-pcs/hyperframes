@@ -11,6 +11,24 @@ function escapeStyleAttributeValue(value: string, quote: string): string {
   return quote === '"' ? value.replace(/"/g, "&quot;") : value.replace(/'/g, "&#39;");
 }
 
+/** Escape a string for safe use inside a double-quoted HTML attribute. */
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** Reverse escapeHtmlAttribute so callers get the original value. */
+function unescapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 function splitInlineStyleDeclarations(style: string): string[] {
   const declarations: string[] = [];
   let current = "";
@@ -69,7 +87,7 @@ function splitInlineStyleDeclarations(style: string): string[] {
 }
 
 export interface PatchOperation {
-  type: "inline-style" | "attribute" | "text-content";
+  type: "inline-style" | "attribute" | "text-content" | "html-attribute";
   property: string;
   value: string | null;
 }
@@ -185,9 +203,9 @@ function patchInlineStyleInTag(
   } else {
     // No existing style attribute
     if (value === null) return html; // nothing to remove
-    // Add one
-    const newTag =
-      tag.replace(/>$/, "") + ` style="${prop}: ${escapeStyleAttributeValue(value, '"')}"`;
+    const selfClosing = /\s*\/$/.test(tag);
+    const base = selfClosing ? tag.replace(/\s*\/$/, "") : tag;
+    const newTag = `${base} style="${prop}: ${escapeStyleAttributeValue(value, '"')}"${selfClosing ? " /" : ""}`;
     return html.replace(tag, newTag);
   }
 }
@@ -214,7 +232,7 @@ function replaceTagAtMatch(html: string, match: TagMatch, newTag: string): strin
   return `${html.slice(0, match.start)}${newTag}${html.slice(match.end)}`;
 }
 
-function findTagByTarget(html: string, target: PatchTarget): TagMatch | null {
+export function findTagByTarget(html: string, target: PatchTarget): TagMatch | null {
   if (target.id) {
     const idPattern = new RegExp(`(<[^>]*\\bid=(["'])${escapeRegex(target.id)}\\2[^>]*)>`, "i");
     const match = idPattern.exec(html);
@@ -281,7 +299,7 @@ export function readAttributeByTarget(
 
   const fullAttr = attr.startsWith("data-") ? attr : `data-${attr}`;
   const valueMatch = new RegExp(`\\b${fullAttr}=(["'])([^"']*)\\1`).exec(match.tag);
-  return valueMatch?.[2];
+  return valueMatch?.[2] != null ? unescapeHtmlAttribute(valueMatch[2]) : undefined;
 }
 
 export function readTagSnippetByTarget(html: string, target: PatchTarget): string | undefined {
@@ -310,12 +328,13 @@ function patchAttributeByTarget(
     return replaceTagAtMatch(html, match, newTag);
   }
 
+  const escaped = escapeHtmlAttribute(value);
   if (attrPattern.test(tag)) {
-    const newTag = tag.replace(attrPattern, `${fullAttr}="${value}"`);
+    const newTag = tag.replace(attrPattern, `${fullAttr}="${escaped}"`);
     return replaceTagAtMatch(html, match, newTag);
   }
 
-  const newTag = tag + ` ${fullAttr}="${value}"`;
+  const newTag = tag + ` ${fullAttr}="${escaped}"`;
   return replaceTagAtMatch(html, match, newTag);
 }
 
@@ -343,13 +362,14 @@ function patchAttribute(
     return html.replace(tag, newTag);
   }
 
+  const escaped = escapeHtmlAttribute(value);
   if (attrPattern.test(tag)) {
     // Update existing attribute
-    const newTag = tag.replace(attrPattern, `${fullAttr}="${value}"`);
+    const newTag = tag.replace(attrPattern, `${fullAttr}="${escaped}"`);
     return html.replace(tag, newTag);
   } else {
     // Add new attribute
-    const newTag = tag + ` ${fullAttr}="${value}"`;
+    const newTag = tag + ` ${fullAttr}="${escaped}"`;
     return html.replace(tag, newTag);
   }
 }
@@ -393,6 +413,91 @@ function findMatchingClosingTagIndex(html: string, tagName: string, contentStart
   return -1;
 }
 
+const HTML_BOOLEAN_ATTRIBUTES = new Set([
+  "loop",
+  "muted",
+  "autoplay",
+  "playsinline",
+  "controls",
+  "default",
+  "defer",
+  "disabled",
+  "hidden",
+  "nomodule",
+  "open",
+  "readonly",
+  "required",
+  "reversed",
+  "selected",
+]);
+
+function patchHtmlAttributeInTag(
+  html: string,
+  tag: string,
+  attr: string,
+  value: string | null,
+): string {
+  if (!tag) return html;
+
+  const isBoolean = HTML_BOOLEAN_ATTRIBUTES.has(attr);
+
+  if (isBoolean) {
+    const escapedAttr = escapeRegex(attr);
+    const hasBoolAttr = new RegExp(`(?:^|\\s)${escapedAttr}(?:\\s|=|$)`).test(tag);
+
+    if (value === null || value === "" || value === "false") {
+      if (!hasBoolAttr) return html;
+      const removePattern = new RegExp(`\\s+${escapedAttr}(?:=(["'])[^"']*\\1)?`);
+      const newTag = tag.replace(removePattern, "");
+      return html.replace(tag, newTag);
+    }
+    if (hasBoolAttr) return html;
+    const newTag = tag + ` ${attr}`;
+    return html.replace(tag, newTag);
+  }
+
+  const attrPattern = new RegExp(`\\b${escapeRegex(attr)}=(["'])([^"']*)\\1`);
+  if (value === null) {
+    if (!attrPattern.test(tag)) return html;
+    const removePattern = new RegExp(`\\s+${escapeRegex(attr)}=(["'])[^"']*\\1`);
+    const newTag = tag.replace(removePattern, "");
+    return html.replace(tag, newTag);
+  }
+
+  const escaped = escapeHtmlAttribute(value);
+  if (attrPattern.test(tag)) {
+    const newTag = tag.replace(attrPattern, `${attr}="${escaped}"`);
+    return html.replace(tag, newTag);
+  }
+
+  const newTag = tag + ` ${attr}="${escaped}"`;
+  return html.replace(tag, newTag);
+}
+
+function patchHtmlAttribute(
+  html: string,
+  elementId: string,
+  attr: string,
+  value: string | null,
+): string {
+  const idPattern = new RegExp(`(<[^>]*\\bid=(["'])${escapeRegex(elementId)}\\2[^>]*)>`, "i");
+  const match = idPattern.exec(html);
+  if (!match) return html;
+  return patchHtmlAttributeInTag(html, match[1], attr, value);
+}
+
+function patchHtmlAttributeByTarget(
+  html: string,
+  target: PatchTarget,
+  attr: string,
+  value: string | null,
+): string {
+  const match = findTagByTarget(html, target);
+  if (!match) return html;
+  const newTag = patchHtmlAttributeInTag(match.tag, match.tag, attr, value);
+  return replaceTagAtMatch(html, match, newTag);
+}
+
 function patchTextContentByTarget(html: string, target: PatchTarget, value: string): string {
   const match = findTagByTarget(html, target);
   if (!match) return html;
@@ -416,6 +521,8 @@ export function applyPatch(html: string, elementId: string, op: PatchOperation):
       return patchInlineStyle(html, elementId, op.property, op.value);
     case "attribute":
       return patchAttribute(html, elementId, op.property, op.value);
+    case "html-attribute":
+      return patchHtmlAttribute(html, elementId, op.property, op.value);
     case "text-content":
       return op.value !== null ? patchTextContent(html, elementId, op.value) : html;
     default:
@@ -436,6 +543,8 @@ export function applyPatchByTarget(html: string, target: PatchTarget, op: PatchO
       return patchInlineStyleByTarget(html, target, op.property, op.value);
     case "attribute":
       return patchAttributeByTarget(html, target, op.property, op.value);
+    case "html-attribute":
+      return patchHtmlAttributeByTarget(html, target, op.property, op.value);
     case "text-content":
       return op.value !== null ? patchTextContentByTarget(html, target, op.value) : html;
     default:

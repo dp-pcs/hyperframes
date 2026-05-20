@@ -1,16 +1,8 @@
 import { useCallback } from "react";
 import { liveTime, usePlayerStore } from "../player";
-import {
-  getPreviewLocalPointer,
-  buildRasterClickSelectionContext,
-  pauseStudioPreviewPlayback,
-} from "../utils/studioPreviewHelpers";
+import { pauseStudioPreviewPlayback } from "../utils/studioPreviewHelpers";
 import { STUDIO_PREVIEW_SELECTION_ENABLED } from "../components/editor/manualEditingAvailability";
-import {
-  isLargeRasterDomEditSelection,
-  type DomEditSelection,
-} from "../components/editor/domEditing";
-import type { AgentModalAnchorPoint } from "../utils/studioHelpers";
+import { type DomEditSelection } from "../components/editor/domEditing";
 
 // ── Types ──
 
@@ -32,11 +24,7 @@ export interface UsePreviewInteractionParams {
   ) => DomEditSelection | null;
   updateDomEditHoverSelection: (selection: DomEditSelection | null) => void;
 
-  // From useAskAgentModal
-  preloadAgentPromptSnippet: (selection: DomEditSelection) => Promise<void>;
-  setAgentPromptSelectionContext: (context: string | undefined) => void;
-  setAgentModalAnchorPoint: (point: AgentModalAnchorPoint | null) => void;
-  setAgentModalOpen: (open: boolean) => void;
+  onClickToSource?: (selection: DomEditSelection) => void;
 }
 
 // ── Hook ──
@@ -49,10 +37,7 @@ export function usePreviewInteraction({
   applyDomSelection,
   resolveDomSelectionFromPreviewPoint,
   updateDomEditHoverSelection,
-  preloadAgentPromptSnippet,
-  setAgentPromptSelectionContext,
-  setAgentModalAnchorPoint,
-  setAgentModalOpen,
+  onClickToSource,
 }: UsePreviewInteractionParams) {
   const handlePreviewCanvasMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>, options?: { preferClipAncestor?: boolean }) => {
@@ -66,33 +51,17 @@ export function usePreviewInteraction({
       }
       e.preventDefault();
       e.stopPropagation();
-      const localPointer = previewIframeRef.current
-        ? getPreviewLocalPointer(previewIframeRef.current, e.clientX, e.clientY)
-        : null;
       applyDomSelection(nextSelection, { additive: e.shiftKey });
-      if (
-        !e.shiftKey &&
-        localPointer &&
-        isLargeRasterDomEditSelection(nextSelection, localPointer.viewport)
-      ) {
-        setAgentPromptSelectionContext(
-          buildRasterClickSelectionContext(nextSelection, localPointer),
-        );
-        setAgentModalAnchorPoint({ x: e.clientX, y: e.clientY });
-        void preloadAgentPromptSnippet(nextSelection);
-        setAgentModalOpen(true);
+      if (!e.shiftKey && e.altKey && onClickToSource) {
+        onClickToSource(nextSelection);
       }
     },
     [
       applyDomSelection,
       captionEditMode,
       compositionLoading,
-      preloadAgentPromptSnippet,
+      onClickToSource,
       resolveDomSelectionFromPreviewPoint,
-      previewIframeRef,
-      setAgentModalAnchorPoint,
-      setAgentModalOpen,
-      setAgentPromptSelectionContext,
     ],
   );
 

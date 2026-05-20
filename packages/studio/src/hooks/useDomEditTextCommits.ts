@@ -14,6 +14,7 @@ import {
   buildDomEditStylePatchOperation,
   buildDomEditTextPatchOperation,
   findElementForSelection,
+  getDomEditTargetKey,
   isTextEditableSelection,
   serializeDomEditTextFields,
   buildDefaultDomEditTextField,
@@ -109,6 +110,78 @@ export function useDomEditTextCommits({
       persistDomEditOperations,
       refreshDomEditSelectionFromPreview,
       resolveImportedFontAsset,
+      previewIframeRef,
+    ],
+  );
+
+  const handleDomAttributeCommit = useCallback(
+    async (attr: string, value: string) => {
+      if (!domEditSelection) return;
+      const iframe = previewIframeRef.current;
+      const doc = iframe?.contentDocument;
+      if (doc) {
+        const el = findElementForSelection(doc, domEditSelection, activeCompPath);
+        if (el) el.setAttribute(`data-${attr}`, value);
+      }
+      const op: PatchOperation = { type: "attribute", property: attr, value };
+      try {
+        await persistDomEditOperations(domEditSelection, [op], {
+          label: `Edit ${attr.replace(/-/g, " ")}`,
+          coalesceKey: `attr:${attr}:${getDomEditTargetKey(domEditSelection)}`,
+          skipRefresh: false,
+        });
+      } catch (err) {
+        console.warn(
+          "[Studio] Attribute persist failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      refreshDomEditSelectionFromPreview(domEditSelection);
+    },
+    [
+      activeCompPath,
+      domEditSelection,
+      persistDomEditOperations,
+      refreshDomEditSelectionFromPreview,
+      previewIframeRef,
+    ],
+  );
+
+  const handleDomHtmlAttributeCommit = useCallback(
+    async (attr: string, value: string | null) => {
+      if (!domEditSelection) return;
+      const iframe = previewIframeRef.current;
+      const doc = iframe?.contentDocument;
+      if (doc) {
+        const el = findElementForSelection(doc, domEditSelection, activeCompPath);
+        if (el) {
+          if (value === null || value === "" || value === "false") {
+            el.removeAttribute(attr);
+          } else {
+            el.setAttribute(attr, value);
+          }
+        }
+      }
+      const op: PatchOperation = { type: "html-attribute", property: attr, value };
+      try {
+        await persistDomEditOperations(domEditSelection, [op], {
+          label: `Edit ${attr}`,
+          coalesceKey: `html-attr:${attr}:${getDomEditTargetKey(domEditSelection)}`,
+          skipRefresh: false,
+        });
+      } catch (err) {
+        console.warn(
+          "[Studio] HTML attribute persist failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      refreshDomEditSelectionFromPreview(domEditSelection);
+    },
+    [
+      activeCompPath,
+      domEditSelection,
+      persistDomEditOperations,
+      refreshDomEditSelectionFromPreview,
       previewIframeRef,
     ],
   );
@@ -321,6 +394,8 @@ export function useDomEditTextCommits({
 
   return {
     handleDomStyleCommit,
+    handleDomAttributeCommit,
+    handleDomHtmlAttributeCommit,
     handleDomTextCommit,
     commitDomTextFields,
     handleDomTextFieldStyleCommit,

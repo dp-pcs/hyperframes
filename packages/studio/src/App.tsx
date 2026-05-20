@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import type { LeftSidebarHandle } from "./components/sidebar/LeftSidebar";
+import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSidebar";
 import { useRenderQueue } from "./components/renders/useRenderQueue";
 import { usePlayerStore } from "./player";
 import { LintModal } from "./components/LintModal";
@@ -8,10 +8,13 @@ import { useCaptionSync } from "./captions/hooks/useCaptionSync";
 import { usePersistentEditHistory } from "./hooks/usePersistentEditHistory";
 import { usePanelLayout } from "./hooks/usePanelLayout";
 import { useFileManager } from "./hooks/useFileManager";
-import { useManifestPersistence } from "./hooks/useManifestPersistence";
+import { usePreviewPersistence } from "./hooks/usePreviewPersistence";
 import { useTimelineEditing } from "./hooks/useTimelineEditing";
+import { addBlockToProject } from "./utils/blockInstaller";
+import type { BlockParam } from "@hyperframes/core/registry";
 import { useDomEditSession } from "./hooks/useDomEditSession";
 import { useAppHotkeys } from "./hooks/useAppHotkeys";
+import { useClipboard } from "./hooks/useClipboard";
 import { readStudioUiPreferences, writeStudioUiPreferences } from "./utils/studioUiPreferences";
 import { useCaptionDetection } from "./hooks/useCaptionDetection";
 import { useRenderClipContent } from "./hooks/useRenderClipContent";
@@ -25,7 +28,7 @@ import {
   STUDIO_INSPECTOR_PANELS_ENABLED,
   STUDIO_MOTION_PANEL_ENABLED,
 } from "./components/editor/manualEditingAvailability";
-import { getStudioMotionForSelection } from "./components/editor/studioMotion";
+import { readStudioMotionFromElement } from "./components/editor/studioMotion";
 import type { DomEditSelection } from "./components/editor/domEditing";
 import { AskAgentModal } from "./components/AskAgentModal";
 import { StudioGlobalDragOverlay } from "./components/StudioGlobalDragOverlay";
@@ -58,6 +61,12 @@ export function StudioApp() {
   const [compositionLoading, setCompositionLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [, setPreviewDocumentVersion] = useState(0);
+  const [activeBlockParams, setActiveBlockParams] = useState<{
+    blockName: string;
+    blockTitle: string;
+    params: BlockParam[];
+    compositionPath: string;
+  } | null>(null);
 
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const activeCompPathRef = useRef(activeCompPath);
@@ -108,12 +117,9 @@ export function StudioApp() {
   });
   const editHistory = usePersistentEditHistory({ projectId });
   const domEditSaveTimestampRef = useRef(0);
+  const pendingTimelineEditPathRef = useRef(new Set<string>());
   const reloadPreview = useCallback(() => {
-    try {
-      previewIframeRef.current?.contentWindow?.location.reload();
-    } catch {
-      setRefreshKey((k) => k + 1);
-    }
+    setRefreshKey((k) => k + 1);
   }, []);
 
   const fileManager = useFileManager({
@@ -136,7 +142,7 @@ export function StudioApp() {
     setActiveCompPathHydrated(true);
   }, [activeCompPathHydrated, fileManager.fileTree, fileManager.fileTreeLoaded]);
 
-  const manifestPersistence = useManifestPersistence({
+  const previewPersistence = usePreviewPersistence({
     projectId,
     showToast,
     readOptionalProjectFile: fileManager.readOptionalProjectFile,
@@ -146,6 +152,7 @@ export function StudioApp() {
     activeCompPathRef,
     domEditSaveTimestampRef,
     reloadPreview: () => setRefreshKey((k) => k + 1),
+    pendingTimelineEditPathRef,
   });
 
   const timelineEditing = useTimelineEditing({
@@ -157,20 +164,108 @@ export function StudioApp() {
     recordEdit: editHistory.recordEdit,
     domEditSaveTimestampRef,
     reloadPreview,
+    previewIframeRef,
+    pendingTimelineEditPathRef,
     uploadProjectFiles: fileManager.uploadProjectFiles,
   });
 
-  const clearDomSelectionRef = useRef<() => void>(() => {});
-  const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
-  const handleDomEditElementDeleteRef = useRef<(selection: DomEditSelection) => Promise<void>>(
-    async () => {},
+  const handleAddBlock = useCallback(
+    (blockName: string) => {
+      if (!projectId) return;
+      void (async () => {
+        const result = await addBlockToProject({
+          projectId,
+          blockName,
+          activeCompPath,
+          timelineElements,
+          readProjectFile: fileManager.readProjectFile,
+          writeProjectFile: fileManager.writeProjectFile,
+          recordEdit: editHistory.recordEdit,
+          refreshFileTree: fileManager.refreshFileTree,
+          reloadPreview,
+          showToast,
+        });
+        const params = result?.block.type === "hyperframes:block" ? result.block.params : undefined;
+        if (params?.length) {
+          setActiveBlockParams({
+            blockName: result!.block.name,
+            blockTitle: result!.block.title,
+            params,
+            compositionPath: result!.compositionPath,
+          });
+          panelLayout.setRightCollapsed(false);
+          panelLayout.setRightPanelTab("block-params");
+        }
+      })();
+    },
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+      panelLayout,
+    ],
   );
 
+  const handleTimelineBlockDrop = useCallback(
+    (blockName: string, placement: { start: number; track: number }) => {
+      if (!projectId) return;
+      void addBlockToProject({
+        projectId,
+        blockName,
+        activeCompPath,
+        placement,
+        timelineElements,
+        readProjectFile: fileManager.readProjectFile,
+        writeProjectFile: fileManager.writeProjectFile,
+        recordEdit: editHistory.recordEdit,
+        refreshFileTree: fileManager.refreshFileTree,
+        reloadPreview,
+        showToast,
+      });
+    },
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+    ],
+  );
+
+  const clearDomSelectionRef = useRef<() => void>(() => {});
+  const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
+  const handleDomEditElementDeleteRef = useRef<(s: DomEditSelection) => Promise<void>>(
+    async () => {},
+  );
+  const domEditDeleteBridge = async (s: DomEditSelection) =>
+    handleDomEditElementDeleteRef.current(s);
+  const { handleCopy, handlePaste, handleCut } = useClipboard({
+    projectId,
+    activeCompPath,
+    domEditSelectionRef: domEditSelectionBridgeRef,
+    showToast,
+    writeProjectFile: fileManager.writeProjectFile,
+    recordEdit: editHistory.recordEdit,
+    domEditSaveTimestampRef,
+    reloadPreview,
+    handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
+    handleDomEditElementDelete: domEditDeleteBridge,
+    previewIframeRef,
+  });
   const appHotkeys = useAppHotkeys({
     toggleTimelineVisibility,
     handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
-    handleDomEditElementDelete: async (s: DomEditSelection) =>
-      handleDomEditElementDeleteRef.current(s),
+    handleDomEditElementDelete: domEditDeleteBridge,
     domEditSelectionRef: domEditSelectionBridgeRef,
     clearDomSelectionRef,
     editHistory,
@@ -179,9 +274,12 @@ export function StudioApp() {
     writeProjectFile: fileManager.writeProjectFile,
     domEditSaveTimestampRef,
     showToast,
-    syncHistoryPreviewAfterApply: manifestPersistence.syncHistoryPreviewAfterApply,
-    waitForPendingDomEditSaves: manifestPersistence.waitForPendingDomEditSaves,
+    syncHistoryPreviewAfterApply: previewPersistence.syncHistoryPreviewAfterApply,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
     leftSidebarRef,
+    handleCopy,
+    handlePaste,
+    handleCut,
   });
 
   const domEditSession = useDomEditSession({
@@ -199,10 +297,7 @@ export function StudioApp() {
     setRightPanelTab: panelLayout.setRightPanelTab,
     showToast,
     refreshPreviewDocumentVersion,
-    queueDomEditSave: manifestPersistence.queueDomEditSave,
-    commitStudioMotionManifestOptimistically:
-      manifestPersistence.commitStudioMotionManifestOptimistically,
-    applyCurrentStudioMotionToPreview: manifestPersistence.applyCurrentStudioMotionToPreview,
+    queueDomEditSave: previewPersistence.queueDomEditSave,
     readProjectFile: fileManager.readProjectFile,
     writeProjectFile: fileManager.writeProjectFile,
     domEditSaveTimestampRef,
@@ -214,11 +309,12 @@ export function StudioApp() {
     previewIframe,
     refreshKey,
     rightPanelTab: panelLayout.rightPanelTab,
-    applyStudioManualEditsToPreviewRef: manifestPersistence.applyStudioManualEditsToPreviewRef,
-    applyStudioMotionToPreviewRef: manifestPersistence.applyStudioMotionToPreviewRef,
+    applyStudioManualEditsToPreviewRef: previewPersistence.applyStudioManualEditsToPreviewRef,
     syncPreviewHistoryHotkey: appHotkeys.syncPreviewHistoryHotkey,
     reloadPreview,
     setRefreshKey,
+    openSourceForSelection: fileManager.openSourceForSelection,
+    selectSidebarTab: (tab: SidebarTab) => leftSidebarRef.current?.selectTab(tab),
   });
 
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
@@ -249,7 +345,7 @@ export function StudioApp() {
     projectId,
     activeCompPath,
     showToast,
-    waitForPendingDomEditSaves: manifestPersistence.waitForPendingDomEditSaves,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
   });
   const {
     consoleErrors,
@@ -292,10 +388,7 @@ export function StudioApp() {
 
   const selectedStudioMotion =
     STUDIO_INSPECTOR_PANELS_ENABLED && domEditSession.domEditSelection
-      ? getStudioMotionForSelection(
-          manifestPersistence.studioMotionManifestRef.current,
-          domEditSession.domEditSelection,
-        )
+      ? readStudioMotionFromElement(domEditSession.domEditSelection.element)
       : null;
   const layersPanelActive =
     STUDIO_INSPECTOR_PANELS_ENABLED && panelLayout.rightPanelTab === "layers";
@@ -360,7 +453,7 @@ export function StudioApp() {
       startRender: renderQueue.startRender as (options: unknown) => Promise<void>,
     },
     compositionDimensions,
-    waitForPendingDomEditSaves: manifestPersistence.waitForPendingDomEditSaves,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
     handlePreviewIframeRef,
     refreshPreviewDocumentVersion,
     timelineVisible,
@@ -415,6 +508,7 @@ export function StudioApp() {
                 <StudioLeftSidebar
                   leftSidebarRef={leftSidebarRef}
                   onSelectComposition={handleSelectComposition}
+                  onAddBlock={handleAddBlock}
                   onLint={handleLint}
                   linting={linting}
                 />
@@ -423,6 +517,7 @@ export function StudioApp() {
                   renderClipContent={renderClipContent}
                   handleTimelineElementDelete={timelineEditing.handleTimelineElementDelete}
                   handleTimelineAssetDrop={timelineEditing.handleTimelineAssetDrop}
+                  handleTimelineBlockDrop={handleTimelineBlockDrop}
                   handleTimelineFileDrop={timelineEditing.handleTimelineFileDrop}
                   handleTimelineElementMove={timelineEditing.handleTimelineElementMove}
                   handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
@@ -437,6 +532,11 @@ export function StudioApp() {
                     selectedStudioMotion={selectedStudioMotion}
                     designPanelActive={designPanelActive}
                     motionPanelActive={motionPanelActive}
+                    activeBlockParams={activeBlockParams}
+                    onCloseBlockParams={() => {
+                      setActiveBlockParams(null);
+                      panelLayout.setRightPanelTab("design");
+                    }}
                   />
                 )}
               </div>

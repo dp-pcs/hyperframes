@@ -165,6 +165,89 @@ describe("initSandboxRuntimeModular", () => {
     expect(child.style.visibility).toBe("hidden");
   });
 
+  it("keeps external composition hosts visible through their authored duration", async () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-start", "0");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    document.body.appendChild(root);
+
+    const child = document.createElement("div");
+    child.setAttribute("data-composition-id", "sub");
+    child.setAttribute("data-composition-src", "compositions/sub.html");
+    child.setAttribute("data-start", "0");
+    child.setAttribute("data-duration", "3");
+    root.appendChild(child);
+
+    const template = document.createElement("template");
+    template.id = "sub-template";
+    template.innerHTML = `
+      <div data-composition-id="sub" data-width="1920" data-height="1080">
+        <div id="hold-marker">HOLD ME</div>
+      </div>
+    `;
+    document.body.appendChild(template);
+
+    (window as Window & { __timelines?: Record<string, RuntimeTimelineLike> }).__timelines = {
+      main: createMockTimeline(3),
+      sub: createMockTimeline(1),
+    };
+
+    initSandboxRuntimeModular();
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+
+    const player = (
+      window as Window & {
+        __player?: { renderSeek: (timeSeconds: number) => void };
+      }
+    ).__player;
+    expect(player).toBeDefined();
+    expect(child.querySelector("#hold-marker")?.textContent).toBe("HOLD ME");
+
+    player?.renderSeek(2);
+
+    expect(child.style.visibility).toBe("visible");
+  });
+
+  it("keeps compiled external composition hosts visible through their authored duration", async () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-start", "0");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    document.body.appendChild(root);
+
+    const child = document.createElement("div");
+    child.setAttribute("data-composition-id", "sub");
+    child.setAttribute("data-composition-file", "compositions/sub.html");
+    child.setAttribute("data-start", "0");
+    child.setAttribute("data-duration", "3");
+    child.innerHTML = '<div id="hold-marker">HOLD ME</div>';
+    root.appendChild(child);
+
+    (window as Window & { __timelines?: Record<string, RuntimeTimelineLike> }).__timelines = {
+      main: createMockTimeline(3),
+      sub: createMockTimeline(1),
+    };
+
+    initSandboxRuntimeModular();
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+
+    const player = (
+      window as Window & {
+        __player?: { renderSeek: (timeSeconds: number) => void };
+      }
+    ).__player;
+    expect(player).toBeDefined();
+
+    player?.renderSeek(2);
+
+    expect(child.style.visibility).toBe("visible");
+  });
+
   it("pads the root timeline to the authored composition schedule before seeking visibility", () => {
     const root = document.createElement("div");
     root.setAttribute("data-composition-id", "main");
@@ -359,6 +442,75 @@ describe("initSandboxRuntimeModular", () => {
 
     expect(video.paused).toBe(true);
     expect(video.currentTime).toBe(0);
+  });
+
+  it("activates sub-composition timelines at data-start near 0 during renderSeek", () => {
+    // Regression: sub-compositions starting at or near t=0 had their GSAP
+    // sub-timelines ignored during render because renderSeek did not
+    // activate (unpause) nested child timelines before seeking the root.
+    // The children were added to the root while paused, and GSAP's
+    // totalTime() does not propagate to paused children.
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-start", "0");
+    root.setAttribute("data-duration", "24");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    document.body.appendChild(root);
+
+    const hookHost = document.createElement("div");
+    hookHost.setAttribute("data-composition-id", "hook");
+    hookHost.setAttribute("data-start", "0.001");
+    hookHost.setAttribute("data-duration", "2");
+    hookHost.setAttribute("data-track-index", "0");
+    hookHost.classList.add("clip");
+    root.appendChild(hookHost);
+
+    const laterHost = document.createElement("div");
+    laterHost.setAttribute("data-composition-id", "tweet");
+    laterHost.setAttribute("data-start", "1.5");
+    laterHost.setAttribute("data-duration", "4.5");
+    laterHost.setAttribute("data-track-index", "1");
+    laterHost.classList.add("clip");
+    root.appendChild(laterHost);
+
+    const hookTimeline = createMockTimeline(2);
+    const tweetTimeline = createMockTimeline(4.5);
+    const rootTimeline = createMockTimeline(24);
+
+    (window as Window & { __timelines?: Record<string, RuntimeTimelineLike> }).__timelines = {
+      main: rootTimeline,
+      hook: hookTimeline,
+      tweet: tweetTimeline,
+    };
+
+    initSandboxRuntimeModular();
+
+    const player = (
+      window as Window & {
+        __player?: { renderSeek: (timeSeconds: number) => void };
+      }
+    ).__player;
+    expect(player).toBeDefined();
+
+    // Simulate that the hook timeline was paused (as happens when
+    // children are added to a paused root timeline in GSAP)
+    hookTimeline.paused!(true);
+    tweetTimeline.paused!(true);
+
+    // Seek to 0.5s — well within the hook's window [0.001, 2.001]
+    player?.renderSeek(0.5);
+
+    // renderSeek should activate (unpause) all child timelines before
+    // seeking the root. Without the fix, children stay paused and GSAP's
+    // totalTime() propagation skips them, leaving elements at initial CSS
+    // state (opacity: 0).
+    expect(hookTimeline.paused!()).toBe(false);
+    expect(tweetTimeline.paused!()).toBe(false);
+
+    // The hook host should be visible at t=0.5
+    expect(hookHost.style.visibility).toBe("visible");
   });
 
   it("plays scheduled child timelines without a captured root timeline when audio has failed", () => {

@@ -42,6 +42,10 @@ interface NLELayoutProps {
     assetPath: string,
     placement: Pick<TimelineElement, "start" | "track">,
   ) => Promise<void> | void;
+  onBlockDrop?: (
+    blockName: string,
+    placement: Pick<TimelineElement, "start" | "track">,
+  ) => Promise<void> | void;
   /** Persist timeline move actions back into source HTML */
   onMoveElement?: (
     element: TimelineElement,
@@ -85,6 +89,7 @@ export const NLELayout = memo(function NLELayout({
   onFileDrop,
   onDeleteElement,
   onAssetDrop,
+  onBlockDrop,
   onMoveElement,
   onResizeElement,
   onBlockedEditAttempt,
@@ -99,7 +104,7 @@ export const NLELayout = memo(function NLELayout({
     togglePlay,
     seek,
     onIframeLoad: baseOnIframeLoad,
-    saveSeekPosition,
+    refreshPlayer,
   } = useTimelinePlayer();
 
   // Reset timeline state when the project changes
@@ -109,13 +114,16 @@ export const NLELayout = memo(function NLELayout({
     usePlayerStore.getState().reset();
   }
 
-  // Save seek position before refresh
+  // Lightweight reload: change iframe src instead of destroying the Player.
+  // refreshPlayer() saves the seek position and appends a cache-busting _t
+  // param, avoiding the full web-component teardown + crossfade that the
+  // key-based path uses.
   const prevRefreshKeyRef = useRef(refreshKey);
   useEffect(() => {
     if (refreshKey === prevRefreshKeyRef.current) return;
     prevRefreshKeyRef.current = refreshKey;
-    saveSeekPosition();
-  }, [refreshKey, saveSeekPosition]);
+    refreshPlayer();
+  }, [refreshKey, refreshPlayer]);
 
   const onIframeLoad = useCallback(() => {
     baseOnIframeLoad();
@@ -307,7 +315,7 @@ export const NLELayout = memo(function NLELayout({
     >
       {/* Preview + player controls */}
       <div className="flex-1 min-h-0 flex flex-col">
-        <div className="flex-1 min-h-0 relative">
+        <div className="flex-1 min-h-0 relative" data-preview-pan-surface="true">
           <NLEPreview
             projectId={projectId}
             iframeRef={iframeRef}
@@ -368,6 +376,7 @@ export const NLELayout = memo(function NLELayout({
                 onFileDrop={onFileDrop}
                 onDeleteElement={onDeleteElement}
                 onAssetDrop={onAssetDrop}
+                onBlockDrop={onBlockDrop}
                 onMoveElement={onMoveElement}
                 onResizeElement={onResizeElement}
                 onBlockedEditAttempt={onBlockedEditAttempt}

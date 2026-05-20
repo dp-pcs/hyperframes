@@ -106,6 +106,28 @@ describe("readTimelineDurationFromDocument", () => {
 
     expect(readTimelineDurationFromDocument(doc)).toBe(5.5);
   });
+
+  it("reads data-hf-authored-duration when data-duration is stripped", () => {
+    const doc = createDocument(`
+      <div data-composition-id="main">
+        <div data-composition-id="sub-a" data-start="0" data-hf-authored-duration="8"></div>
+        <div data-composition-id="sub-b" data-start="60" data-hf-authored-duration="10"></div>
+      </div>
+    `);
+
+    expect(readTimelineDurationFromDocument(doc)).toBe(70);
+  });
+
+  it("picks the larger of data-duration and data-hf-authored-duration children", () => {
+    const doc = createDocument(`
+      <div data-composition-id="main">
+        <div data-start="0" data-duration="5"></div>
+        <div data-composition-id="ext" data-start="74" data-hf-authored-duration="8"></div>
+      </div>
+    `);
+
+    expect(readTimelineDurationFromDocument(doc)).toBe(82);
+  });
 });
 
 describe("createStaticSeekPlaybackAdapter", () => {
@@ -152,6 +174,39 @@ describe("createStaticSeekPlaybackAdapter", () => {
 
     expect(renderedTimes).toEqual([2]);
     expect(adapter.getTime()).toBe(2);
+  });
+
+  it("works with a seek-only adapter (no renderSeek)", () => {
+    const clock = createManualAnimationClock();
+    const seekedTimes: number[] = [];
+    const adapter = createStaticSeekPlaybackAdapter(
+      {
+        getTime: () => 0,
+        seek: (time: number) => {
+          seekedTimes.push(time);
+        },
+      },
+      82,
+      clock,
+    );
+
+    adapter.seek(77);
+    expect(seekedTimes).toEqual([77]);
+    expect(adapter.getTime()).toBe(77);
+    expect(adapter.getDuration()).toBe(82);
+  });
+
+  it("pauses old adapter before replacing with new duration", () => {
+    const clock = createManualAnimationClock();
+    const adapter = createStaticSeekPlaybackAdapter(
+      { getTime: () => 0, renderSeek: () => {} },
+      10,
+      clock,
+    );
+    adapter.play();
+    expect(adapter.isPlaying()).toBe(true);
+    adapter.pause();
+    expect(adapter.isPlaying()).toBe(false);
   });
 });
 

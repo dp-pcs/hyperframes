@@ -1,9 +1,9 @@
 /**
  * `@hyperframes/producer/distributed` — the distributed render primitives.
  *
- * See `DISTRIBUTED-RENDERING-PLAN.md` for the full architecture. The three
- * activities (`plan` → `renderChunk` × N → `assemble`) are pure functions
- * over local file paths; networking + orchestration live in adapters.
+ * The three activities (`plan` → `renderChunk` × N → `assemble`) are pure
+ * functions over local file paths; networking + orchestration live in
+ * adapters.
  *
  * Adopters (AWS Lambda, Cloud Run Jobs, Temporal, K8s Jobs, plain SSH):
  *
@@ -44,7 +44,9 @@ export {
   // Constants
   DEFAULT_CHUNK_SIZE,
   DEFAULT_MAX_PARALLEL_CHUNKS,
+  MIN_CHUNK_SIZE,
   PLAN_DIR_SIZE_LIMIT_BYTES,
+  PLAN_PROJECT_DIR_SKIP_SEGMENTS,
   // Error codes + classes
   FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED,
   FormatNotSupportedInDistributedError,
@@ -67,6 +69,11 @@ export {
 
 // ── Assemble (Activity C) ───────────────────────────────────────────────────
 export { assemble, type AssembleResult } from "./services/distributed/assemble.js";
+
+// ── Format union ────────────────────────────────────────────────────────────
+// Canonical output-format type. The aws-lambda package re-exports it so
+// CLI / adopter SDKs can derive runtime allowlists from one source.
+export type { DistributedFormat } from "./services/distributed/shared.js";
 
 // ── Plan-time shared types from `freezePlan` ───────────────────────────────
 // Re-exported so adopters that deserialize a planDir's `meta/encoder.json`

@@ -1,13 +1,22 @@
 // Vite adapter that wires the shared Studio API to the local filesystem and build tools.
 
-import { readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
-import { join, relative, resolve, isAbsolute } from "node:path";
+import {
+  readFileSync,
+  readdirSync,
+  existsSync,
+  writeFileSync,
+  realpathSync,
+  mkdirSync,
+  copyFileSync,
+} from "node:fs";
+import { join, relative, resolve, isAbsolute, dirname } from "node:path";
 import type { ViteDevServer } from "vite";
 import {
   type ResolvedProject,
   type RenderJobState,
   type StudioApiAdapter,
 } from "@hyperframes/core/studio-api";
+import type { RegistryItem } from "@hyperframes/core/registry";
 import { createProjectSignature } from "../core/src/studio-api/helpers/projectSignature";
 import { createRetryingModuleLoader, ensureProducerDist } from "./vite.producer";
 import { createStudioDevRenderBodyScripts } from "./vite.studioMotion";
@@ -132,7 +141,11 @@ export function createViteAdapter(dataDir: string, server: ViteDevServer): Studi
             if (session.projectId) {
               projectDir = join(dataDir, session.projectId);
               if (existsSync(projectDir)) {
-                return { id: session.projectId, dir: projectDir, title: session.title };
+                return {
+                  id: session.projectId,
+                  dir: realpathSync(projectDir),
+                  title: session.title,
+                };
               }
             }
           } catch {
@@ -141,7 +154,7 @@ export function createViteAdapter(dataDir: string, server: ViteDevServer): Studi
         }
         return null;
       }
-      return { id, dir: projectDir };
+      return { id, dir: realpathSync(projectDir) };
     },
 
     async bundle(dir: string) {
@@ -201,6 +214,7 @@ export function createViteAdapter(dataDir: string, server: ViteDevServer): Studi
             format: opts.format,
             ...(renderBodyScripts.length > 0 ? { renderBodyScripts } : {}),
             outputResolution: opts.outputResolution,
+            ...(opts.composition ? { entryFile: opts.composition } : {}),
           });
           const onProgress = (j: { progress: number; currentStage?: string }) => {
             state.progress = j.progress;
@@ -244,6 +258,71 @@ export function createViteAdapter(dataDir: string, server: ViteDevServer): Studi
         /* ignore */
       }
       return null;
+    },
+
+    async listRegistryCatalog(): Promise<RegistryItem[]> {
+      const registryRoot = resolve(__dirname, "../../registry");
+      const items: RegistryItem[] = [];
+      for (const subdir of ["blocks", "components"]) {
+        const dir = join(registryRoot, subdir);
+        if (!existsSync(dir)) continue;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const manifestPath = join(dir, entry.name, "registry-item.json");
+          if (!existsSync(manifestPath)) continue;
+          try {
+            const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as RegistryItem;
+            if (manifest.type === "hyperframes:block" || manifest.type === "hyperframes:component")
+              items.push(manifest);
+          } catch {
+            /* skip malformed manifests */
+          }
+        }
+      }
+      return items;
+    },
+
+    // fallow-ignore-next-line complexity
+    async installRegistryBlock(opts: {
+      project: ResolvedProject;
+      blockName: string;
+    }): Promise<{ written: string[]; block: RegistryItem }> {
+      const registryRoot = resolve(__dirname, "../../registry");
+      let itemDir = join(registryRoot, "blocks", opts.blockName);
+      if (!existsSync(join(itemDir, "registry-item.json"))) {
+        itemDir = join(registryRoot, "components", opts.blockName);
+      }
+      const manifestPath = join(itemDir, "registry-item.json");
+
+      if (!existsSync(manifestPath)) {
+        throw new Error(`Item "${opts.blockName}" not found in registry`);
+      }
+
+      const block = JSON.parse(readFileSync(manifestPath, "utf-8")) as RegistryItem;
+      const written: string[] = [];
+
+      for (const file of block.files) {
+        const sourcePath = join(itemDir, file.path);
+        const targetPath = resolve(opts.project.dir, file.target);
+
+        if (!isPathWithin(opts.project.dir, targetPath)) {
+          throw new Error(`Target path escapes project directory: ${file.target}`);
+        }
+
+        mkdirSync(dirname(targetPath), { recursive: true });
+
+        if (file.type === "hyperframes:composition") {
+          let content = readFileSync(sourcePath, "utf-8");
+          content = `<!-- hyperframes-registry-item: ${block.name} -->\n${content}`;
+          writeFileSync(targetPath, content, "utf-8");
+        } else {
+          copyFileSync(sourcePath, targetPath);
+        }
+
+        written.push(file.target);
+      }
+
+      return { written, block };
     },
   };
 }
