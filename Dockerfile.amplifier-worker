@@ -63,7 +63,9 @@ COPY packages/aws-lambda/ packages/aws-lambda/
 COPY packages/producer/ packages/producer/
 COPY packages/amplifier-video-worker/ packages/amplifier-video-worker/
 
-RUN bun run --filter @hyperframes/aws-lambda build
+# aws-lambda is COPYed only so `bun install --frozen-lockfile` can resolve
+# the workspace symlink — producer's tsconfig excludes its sole consumer
+# (regression-harness-lambda-local.ts), so we don't need to build it.
 RUN bun run --filter @hyperframes/producer build
 RUN bun run --filter @hyperframes/amplifier-video-worker build
 
