@@ -44,14 +44,48 @@ if [[ "$SKIP_DEPLOY" == "1" ]]; then
   exit 0
 fi
 
-echo "🚀 Forcing new deployment on $ECS_CLUSTER/$ECS_SERVICE..."
+echo "📝 Registering new task definition revision pinned to $IMAGE_TAG..."
+TASKDEF_TMP="$(mktemp -t taskdef-XXXXXX.json)"
+TASKDEF_OUT="$(mktemp -t taskdef-out-XXXXXX.json)"
+trap 'rm -f "$TASKDEF_TMP" "$TASKDEF_OUT"' EXIT
+
+aws ecs describe-task-definition \
+  --task-definition "$ECS_SERVICE" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query 'taskDefinition' \
+  --output json > "$TASKDEF_TMP"
+
+python3 - "$TASKDEF_TMP" "$TASKDEF_OUT" "$ECR_REPO:$IMAGE_TAG" <<'PY'
+import json, sys
+src, dst, new_image = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    td = json.load(f)
+for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy','deregisteredAt']:
+    td.pop(k, None)
+td['containerDefinitions'][0]['image'] = new_image
+with open(dst, 'w') as f:
+    json.dump(td, f, indent=2)
+PY
+
+NEW_REVISION_ARN="$(aws ecs register-task-definition \
+  --cli-input-json "file://$TASKDEF_OUT" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query 'taskDefinition.taskDefinitionArn' \
+  --output text)"
+
+echo "    Registered: $NEW_REVISION_ARN"
+
+echo "🚀 Updating $ECS_CLUSTER/$ECS_SERVICE to use new revision..."
 aws ecs update-service \
   --cluster "$ECS_CLUSTER" \
   --service "$ECS_SERVICE" \
+  --task-definition "$NEW_REVISION_ARN" \
   --force-new-deployment \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION" \
-  --query 'service.{status:status,running:runningCount,desired:desiredCount}' \
+  --query 'service.{status:status,running:runningCount,desired:desiredCount,td:taskDefinition}' \
   --output table
 
 if [[ "$SKIP_WAIT" == "1" ]]; then
