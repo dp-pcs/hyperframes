@@ -87,6 +87,10 @@ export function emitStudioRenderError(
   failedStage: string | undefined,
   err: unknown,
 ): void {
+  // `workers` is intentionally omitted: studio renders don't accept a
+  // user-supplied worker count (the producer picks its default), so on early
+  // failures we genuinely don't know one. The CLI side has the value from
+  // `options.workers` even before `job.perfSummary` exists; studio doesn't.
   trackRenderError({
     fps: fpsToNumber(opts.fps),
     quality: opts.quality,

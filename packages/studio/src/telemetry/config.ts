@@ -51,3 +51,28 @@ export function markNoticeShown(): void {
     /* ignore */
   }
 }
+
+// Session-scoped (cleared when the tab closes) so HMR remounts and
+// route-level remounts within one tab don't refire `studio_session_start`.
+// Uses sessionStorage directly because the dedupe is per-tab, not per-browser.
+const SESSION_FIRED_KEY = "hyperframes-studio:sessionStartFired";
+
+function safeSessionStorage(): Storage | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function hasFiredSessionStart(): boolean {
+  return safeSessionStorage()?.getItem(SESSION_FIRED_KEY) === "1";
+}
+
+export function markSessionStartFired(): void {
+  try {
+    safeSessionStorage()?.setItem(SESSION_FIRED_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}

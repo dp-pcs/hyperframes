@@ -48,19 +48,20 @@ import {
   readStudioUrlStateFromWindow,
 } from "./utils/studioUrlState";
 import { trackStudioSessionStart } from "./telemetry/events";
+import { hasFiredSessionStart, markSessionStartFired } from "./telemetry/config";
 
 export function StudioApp() {
   const { projectId, resolving, waitingForServer } = useServerConnection();
   const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
 
-  // Fire once per browser session to mark a "studio open" event so we can
-  // separate studio sessions from CLI invocations in product analytics.
-  // `has_project` lets us tell scratch-open from project-context-open.
-  const sessionFiredRef = useRef(false);
+  // Fire once per browser tab session — sessionStorage-backed so HMR
+  // remounts, route changes, and any future StudioApp remount within the
+  // same tab don't refire `studio_session_start`. `has_project` lets us
+  // tell scratch-open from project-context-open.
   useEffect(() => {
-    if (sessionFiredRef.current) return;
     if (resolving || waitingForServer) return;
-    sessionFiredRef.current = true;
+    if (hasFiredSessionStart()) return;
+    markSessionStartFired();
     trackStudioSessionStart({ has_project: projectId != null });
   }, [projectId, resolving, waitingForServer]);
 

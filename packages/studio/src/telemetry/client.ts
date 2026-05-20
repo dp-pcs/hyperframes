@@ -38,9 +38,28 @@ function isApiKeyConfigured(): boolean {
   return POSTHOG_API_KEY.startsWith("phc_");
 }
 
-function shouldTrack(): boolean {
+// VITE_HYPERFRAMES_NO_TELEMETRY mirrors the CLI's HYPERFRAMES_NO_TELEMETRY=1
+// opt-out so HeyGen's own dev/CI builds can suppress telemetry from the studio
+// bundle the same way. Vite injects it at build time. Accepts "1" or "true".
+function isBuildTimeOptOut(): boolean {
+  const v = import.meta.env.VITE_HYPERFRAMES_NO_TELEMETRY as string | undefined;
+  return v === "1" || v === "true";
+}
+
+// `import.meta.env.DEV` is true under `vite dev` / `vite preview`. Auto-suppress
+// so developers running `hyperframes preview` don't pollute production telemetry.
+function isViteDevMode(): boolean {
+  return import.meta.env.DEV === true;
+}
+
+export function shouldTrack(): boolean {
   if (telemetryEnabled !== null) return telemetryEnabled;
-  telemetryEnabled = isApiKeyConfigured() && !isOptedOut() && !isDoNotTrackOn();
+  telemetryEnabled =
+    isApiKeyConfigured() &&
+    !isBuildTimeOptOut() &&
+    !isViteDevMode() &&
+    !isOptedOut() &&
+    !isDoNotTrackOn();
   return telemetryEnabled;
 }
 
@@ -63,6 +82,10 @@ export function trackEvent(event: string, properties: EventProperties = {}): voi
   showNoticeOnce();
 }
 
+// Fire-and-forget: the queue is cleared before `send()` resolves, so a network
+// failure drops the batch rather than retrying. Matches the CLI client's
+// design. Do NOT add retry logic here — a retry without cross-batch dedup
+// would risk double-counting events on transient PostHog 5xx responses.
 function flush(): void {
   if (eventQueue.length === 0) return;
   const distinctId = getAnonymousId();
