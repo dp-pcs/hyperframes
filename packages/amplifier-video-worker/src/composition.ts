@@ -88,6 +88,183 @@ export function formatLintForFeedback(result: LintResult, limit = 4000): string 
   return lines.join("\n").slice(0, limit);
 }
 
+// ── Duration extension for LLM-authored compositions ─────────────────────────
+
+export interface DurationModification {
+  target: "root" | "narration-track" | "last-scene";
+  from: number;
+  to: number;
+}
+
+export interface ExtendCompositionDurationResult {
+  html: string;
+  extended: boolean;
+  originalRootDurationSeconds: number;
+  newRootDurationSeconds: number;
+  modifications: DurationModification[];
+}
+
+const ROOT_TAG_PATTERN =
+  /<([a-zA-Z][a-zA-Z0-9-]*)([^>]*?data-composition-id\s*=\s*["']amplifier-explainer["'][^>]*?)>/i;
+const NARRATION_TAG_PATTERN =
+  /<([a-zA-Z][a-zA-Z0-9-]*)([^>]*?id\s*=\s*["']narration-track["'][^>]*?)>/i;
+const DATA_DURATION_ATTR = /data-duration\s*=\s*["']([0-9]*\.?[0-9]+)["']/i;
+const ANY_TAG_PATTERN_GLOBAL = /<([a-zA-Z][a-zA-Z0-9-]*)\s+([^>]*?)>/gs;
+
+function readAttr(attrs: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`${escaped}\\s*=\\s*["']([^"']*)["']`, "i");
+  const m = attrs.match(re);
+  return m ? (m[1] ?? null) : null;
+}
+
+function rewriteDurationInTag(tag: string, newDuration: number): string {
+  return tag.replace(DATA_DURATION_ATTR, `data-duration="${newDuration}"`);
+}
+
+/**
+ * Rewrite `data-duration` attributes in an LLM-authored composition when the
+ * actual narration duration exceeds the LLM-baked target. Updates the root
+ * composition element, the narration audio track, and the last scene clip so
+ * the rendered timeline covers the full voiceover. No-op when actual <= root.
+ */
+export function extendCompositionDuration(
+  html: string,
+  actualDurationSeconds: number,
+): ExtendCompositionDurationResult {
+  const noop: ExtendCompositionDurationResult = {
+    html,
+    extended: false,
+    originalRootDurationSeconds: 0,
+    newRootDurationSeconds: 0,
+    modifications: [],
+  };
+
+  if (!Number.isFinite(actualDurationSeconds) || actualDurationSeconds <= 0) {
+    return noop;
+  }
+
+  const rootMatch = html.match(ROOT_TAG_PATTERN);
+  if (!rootMatch || rootMatch.index === undefined) return noop;
+
+  const rootTag = rootMatch[0];
+  const rootDurationStr = readAttr(rootTag, "data-duration");
+  if (rootDurationStr === null) return noop;
+  const originalRootDuration = Number.parseFloat(rootDurationStr);
+  if (!Number.isFinite(originalRootDuration)) return noop;
+
+  noop.originalRootDurationSeconds = originalRootDuration;
+  noop.newRootDurationSeconds = originalRootDuration;
+
+  // Only extend — never shrink.
+  if (actualDurationSeconds <= originalRootDuration + 0.01) {
+    return noop;
+  }
+
+  const modifications: DurationModification[] = [];
+  type Replacement = { start: number; end: number; text: string };
+  const replacements: Replacement[] = [];
+
+  // 1. Root.
+  const newRootTag = rewriteDurationInTag(rootTag, actualDurationSeconds);
+  replacements.push({
+    start: rootMatch.index,
+    end: rootMatch.index + rootTag.length,
+    text: newRootTag,
+  });
+  modifications.push({
+    target: "root",
+    from: originalRootDuration,
+    to: actualDurationSeconds,
+  });
+
+  // 2. Narration audio track.
+  const narrationMatch = html.match(NARRATION_TAG_PATTERN);
+  if (narrationMatch && narrationMatch.index !== undefined) {
+    const narrationTag = narrationMatch[0];
+    const narrationDurStr = readAttr(narrationTag, "data-duration");
+    const originalNarrationDuration =
+      narrationDurStr !== null ? Number.parseFloat(narrationDurStr) : 0;
+    const newNarrationTag = rewriteDurationInTag(narrationTag, actualDurationSeconds);
+    if (newNarrationTag !== narrationTag) {
+      replacements.push({
+        start: narrationMatch.index,
+        end: narrationMatch.index + narrationTag.length,
+        text: newNarrationTag,
+      });
+      modifications.push({
+        target: "narration-track",
+        from: originalNarrationDuration,
+        to: actualDurationSeconds,
+      });
+    }
+  }
+
+  // 3. Last scene clip — the element (excluding root and narration track)
+  //    whose data-start + data-duration is largest. Extend that clip so its
+  //    end matches the new root duration; the final frame stays on-screen
+  //    while audio finishes instead of going blank.
+  let lastSceneIndex = -1;
+  let lastSceneTag = "";
+  let lastSceneEnd = -1;
+  let lastSceneStart = 0;
+  let lastSceneDuration = 0;
+  for (const tagMatch of html.matchAll(ANY_TAG_PATTERN_GLOBAL)) {
+    if (tagMatch.index === undefined) continue;
+    const fullTag = tagMatch[0];
+    const attrs = tagMatch[2];
+    if (attrs === undefined) continue;
+    if (/data-composition-id\s*=\s*["']amplifier-explainer["']/i.test(attrs)) continue;
+    if (/id\s*=\s*["']narration-track["']/i.test(attrs)) continue;
+    const startStr = readAttr(attrs, "data-start");
+    const durStr = readAttr(attrs, "data-duration");
+    if (startStr === null || durStr === null) continue;
+    const start = Number.parseFloat(startStr);
+    const dur = Number.parseFloat(durStr);
+    if (!Number.isFinite(start) || !Number.isFinite(dur)) continue;
+    const end = start + dur;
+    if (end > lastSceneEnd) {
+      lastSceneEnd = end;
+      lastSceneIndex = tagMatch.index;
+      lastSceneTag = fullTag;
+      lastSceneStart = start;
+      lastSceneDuration = dur;
+    }
+  }
+
+  if (lastSceneIndex >= 0 && lastSceneEnd + 0.01 < actualDurationSeconds) {
+    const newSceneDuration = Math.max(0, actualDurationSeconds - lastSceneStart);
+    const newSceneTag = rewriteDurationInTag(lastSceneTag, newSceneDuration);
+    if (newSceneTag !== lastSceneTag) {
+      replacements.push({
+        start: lastSceneIndex,
+        end: lastSceneIndex + lastSceneTag.length,
+        text: newSceneTag,
+      });
+      modifications.push({
+        target: "last-scene",
+        from: lastSceneDuration,
+        to: newSceneDuration,
+      });
+    }
+  }
+
+  // Apply replacements in reverse so earlier indices stay valid.
+  replacements.sort((a, b) => b.start - a.start);
+  let newHtml = html;
+  for (const r of replacements) {
+    newHtml = newHtml.slice(0, r.start) + r.text + newHtml.slice(r.end);
+  }
+
+  return {
+    html: newHtml,
+    extended: true,
+    originalRootDurationSeconds: originalRootDuration,
+    newRootDurationSeconds: actualDurationSeconds,
+    modifications,
+  };
+}
+
 // ── Post-render sanity check ──────────────────────────────────────────────────
 
 export type SanityResult = { ok: true } | { ok: false; reason: string };

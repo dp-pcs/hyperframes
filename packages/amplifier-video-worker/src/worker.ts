@@ -17,6 +17,7 @@ import {
 } from "./amplifier.js";
 import { authorComposition } from "./llm-client.js";
 import {
+  extendCompositionDuration,
   loadSkillBundle,
   lintCompositionHtml,
   postRenderSanityCheck,
@@ -1500,7 +1501,18 @@ async function processRenderJob(message: AmplifierQueueMessage) {
         )
       : script.targetDurationSeconds;
     if (!usingFallback && authoredIndexHtml) {
-      writeFileSync(join(projectDir, "index.html"), authoredIndexHtml, "utf-8");
+      // The LLM bakes data-duration to script.targetDurationSeconds (per
+      // amplifier-constraints.md) but ElevenLabs narration is unbounded.
+      // Extend the root, narration track, and last scene so audio plays
+      // to completion instead of cutting off mid-sentence.
+      const extended = extendCompositionDuration(authoredIndexHtml, durationSeconds);
+      writeFileSync(join(projectDir, "index.html"), extended.html, "utf-8");
+      if (extended.extended) {
+        console.log(
+          `[worker] extended LLM composition: ${extended.originalRootDurationSeconds}s → ${extended.newRootDurationSeconds}s`,
+          extended.modifications,
+        );
+      }
     } else {
       writeFileSync(
         join(projectDir, "index.html"),
