@@ -61,6 +61,8 @@ export interface ExplainerVideoBrief {
     customAudience?: string;
     durationSeconds: 30 | 45 | 60 | 90;
     narrativeStyle: string;
+    authorReferenceStyle?: "first_name" | "formal_third" | "full_attribution";
+    aspectRatio?: "16:9" | "1:1" | "9:16";
     textMode: "preserve" | "condense" | "rewrite";
     visualMode: "editorial" | "motion_social" | "documentary" | "captions_only";
     voiceoverMode: "ai_voice" | "captions_only" | "none";

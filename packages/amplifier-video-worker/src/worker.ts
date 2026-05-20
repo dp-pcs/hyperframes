@@ -17,6 +17,7 @@ import {
 } from "./amplifier.js";
 import { authorComposition } from "./llm-client.js";
 import {
+  dimensionsForAspect,
   extendCompositionDuration,
   loadSkillBundle,
   lintCompositionHtml,
@@ -503,6 +504,7 @@ function buildHtmlTemplate(args: {
   durationSeconds: number;
   narrationSrc?: string | null;
 }) {
+  const dims = dimensionsForAspect(args.plan.aspectRatio);
   const palette =
     args.brief.interview.visualMode === "motion_social"
       ? {
@@ -684,8 +686,8 @@ function buildHtmlTemplate(args: {
       body {
         margin: 0;
         padding: 0;
-        width: 1920px;
-        height: 1080px;
+        width: ${dims.width}px;
+        height: ${dims.height}px;
         overflow: hidden;
         background:
           radial-gradient(circle at top left, ${palette.bgB} 0%, ${palette.bgA} 55%, #020617 100%);
@@ -699,8 +701,8 @@ function buildHtmlTemplate(args: {
 
       [data-composition-id="amplifier-explainer"] {
         position: relative;
-        width: 1920px;
-        height: 1080px;
+        width: ${dims.width}px;
+        height: ${dims.height}px;
         overflow: hidden;
         background:
           radial-gradient(circle at top left, rgba(255, 255, 255, 0.08), transparent 38%),
@@ -710,8 +712,8 @@ function buildHtmlTemplate(args: {
       .cover-image {
         position: absolute;
         inset: 0;
-        width: 1920px;
-        height: 1080px;
+        width: ${dims.width}px;
+        height: ${dims.height}px;
         object-fit: cover;
         filter: brightness(0.32) saturate(1.05);
       }
@@ -1105,8 +1107,8 @@ function buildHtmlTemplate(args: {
     <div
       id="root"
       data-composition-id="amplifier-explainer"
-      data-width="1920"
-      data-height="1080"
+      data-width="${dims.width}"
+      data-height="${dims.height}"
       data-duration="${args.durationSeconds}"
     >
       ${coverImage}

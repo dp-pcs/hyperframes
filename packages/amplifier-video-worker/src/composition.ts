@@ -405,21 +405,57 @@ function sanitizeParagraphs(source: ExplainerSourceArtifact): string {
     .join("\n\n");
 }
 
+export function dimensionsForAspect(aspect: "16:9" | "1:1" | "9:16"): {
+  width: number;
+  height: number;
+} {
+  if (aspect === "1:1") return { width: 1080, height: 1080 };
+  if (aspect === "9:16") return { width: 1080, height: 1920 };
+  return { width: 1920, height: 1080 };
+}
+
+const AUTHOR_REFERENCE_INSTRUCTION: Record<
+  NonNullable<ExplainerVideoBrief["interview"]["authorReferenceStyle"]>,
+  string
+> = {
+  first_name:
+    "Author reference style: refer to the author by FIRST NAME throughout (casual, conversational tone).",
+  formal_third:
+    'Author reference style: refer to the author formally in the third person (e.g., "the author argues…"). Avoid first names.',
+  full_attribution:
+    "Author reference style: use the author's full name on first mention, then first or last name as natural thereafter.",
+};
+
+const ASPECT_SAFE_AREA: Record<"16:9" | "1:1" | "9:16", string> = {
+  "16:9":
+    "Aspect safe areas: hold focal content within the central 92% of the frame; captions sit in the lower third.",
+  "1:1":
+    "Aspect safe areas: SQUARE 1080×1080 — hold focal content in the central 80% of the frame; captions sit in the bottom 20%, away from edges. Avoid layouts that assume landscape width.",
+  "9:16":
+    "Aspect safe areas: PORTRAIT 1080×1920 — vertical stack layout; captions sit in the lower 25%; avoid landscape-only constructs.",
+};
+
 function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
   const { brief, plan, source } = args;
   const article = brief.article;
   const cleaned = sanitizeParagraphs(source);
+  const dims = dimensionsForAspect(plan.aspectRatio);
+  const authorRefInstruction = brief.interview?.authorReferenceStyle
+    ? AUTHOR_REFERENCE_INSTRUCTION[brief.interview.authorReferenceStyle]
+    : null;
 
   const lines: Array<string | false | null | undefined> = [
     "Author a complete Hyperframes composition for the article below.",
     "",
     `Target duration: ${plan.targetDurationSeconds}s`,
-    `Aspect ratio: ${plan.aspectRatio} (1920×1080)`,
+    `Aspect ratio: ${plan.aspectRatio} (${dims.width}×${dims.height})`,
+    ASPECT_SAFE_AREA[plan.aspectRatio],
     `Voice: ${plan.voice.enabled ? `enabled, style ${plan.voice.style ?? "documentary"}` : "disabled"}`,
     `Captions: ${plan.captions.enabled ? "enabled" : "disabled"}`,
     brief.interview?.goal && `Goal: ${brief.interview.goal}`,
     brief.interview?.audience && `Audience: ${brief.interview.audience}`,
     brief.interview?.narrativeStyle && `Narrative style: ${brief.interview.narrativeStyle}`,
+    authorRefInstruction,
     brief.interview?.textMode && `Text mode: ${brief.interview.textMode}`,
     brief.interview?.visualMode && `Visual mode: ${brief.interview.visualMode}`,
     `CTA: ${plan.cta.label}${plan.cta.url ? ` (${plan.cta.url})` : ""}`,
