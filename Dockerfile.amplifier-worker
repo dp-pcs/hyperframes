@@ -52,15 +52,18 @@ COPY packages/producer/package.json packages/producer/package.json
 COPY packages/cli/package.json packages/cli/package.json
 COPY packages/studio/package.json packages/studio/package.json
 COPY packages/shader-transitions/package.json packages/shader-transitions/package.json
+COPY packages/aws-lambda/package.json packages/aws-lambda/package.json
 COPY packages/amplifier-video-worker/package.json packages/amplifier-video-worker/package.json
 
 RUN bun install --frozen-lockfile
 
 COPY packages/core/ packages/core/
 COPY packages/engine/ packages/engine/
+COPY packages/aws-lambda/ packages/aws-lambda/
 COPY packages/producer/ packages/producer/
 COPY packages/amplifier-video-worker/ packages/amplifier-video-worker/
 
+RUN bun run --filter @hyperframes/aws-lambda build
 RUN bun run --filter @hyperframes/producer build
 RUN bun run --filter @hyperframes/amplifier-video-worker build
 
