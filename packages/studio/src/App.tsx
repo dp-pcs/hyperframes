@@ -47,10 +47,22 @@ import {
   normalizeStudioCompositionPath,
   readStudioUrlStateFromWindow,
 } from "./utils/studioUrlState";
+import { trackStudioSessionStart } from "./telemetry/events";
 
 export function StudioApp() {
   const { projectId, resolving, waitingForServer } = useServerConnection();
   const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
+
+  // Fire once per browser session to mark a "studio open" event so we can
+  // separate studio sessions from CLI invocations in product analytics.
+  // `has_project` lets us tell scratch-open from project-context-open.
+  const sessionFiredRef = useRef(false);
+  useEffect(() => {
+    if (sessionFiredRef.current) return;
+    if (resolving || waitingForServer) return;
+    sessionFiredRef.current = true;
+    trackStudioSessionStart({ has_project: projectId != null });
+  }, [projectId, resolving, waitingForServer]);
 
   const [activeCompPath, setActiveCompPath] = useState<string | null>(null);
   const [activeCompPathHydrated, setActiveCompPathHydrated] = useState(
