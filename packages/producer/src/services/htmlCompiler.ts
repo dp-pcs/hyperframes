@@ -575,6 +575,7 @@ function inlineSubCompositions(
       },
       parseHtml: (htmlStr: string) => parseHTML(htmlStr).document as unknown as Document,
       scriptErrorLabel: "[Compiler] Composition script failed",
+      compoundAuthoredRoot: true,
     },
   );
 
@@ -680,7 +681,32 @@ function ensureFullDocument(html: string): string {
   // Wrap fragment with a proper document including margin/padding reset.
   // Without this, Chrome applies default body { margin: 8px } which creates
   // visible white lines at the edges of rendered video.
-  return `<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="UTF-8">\n  <style>*{margin:0;padding:0;box-sizing:border-box}body{overflow:hidden;background:#000}</style>\n</head>\n<body style="margin:0;overflow:hidden">\n${html}\n</body>\n</html>`;
+  return `<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="UTF-8">\n  <style>*{margin:0;padding:0;box-sizing:border-box;text-rendering:geometricPrecision}body{overflow:hidden;background:#000}</style>\n</head>\n<body style="margin:0;overflow:hidden">\n${html}\n</body>\n</html>`;
+}
+
+/**
+ * Force subpixel glyph positioning so chrome-headless-shell (BeginFrame) and
+ * full Chrome (screenshot fallback) lay text out identically. `text-rendering:
+ * auto` resolves to `optimizeSpeed` (integer advances) in headless-shell but
+ * `geometricPrecision` in full Chrome — that ~1% advance-width gap shifts
+ * line-wrap points and any animation that reads `offsetWidth`. The `*`
+ * selector has zero specificity, so authored class/id rules still override.
+ */
+function injectTextRenderingRule(html: string): string {
+  const { document } = parseHTML(html);
+  const head = document.querySelector("head");
+  if (!head) return html;
+
+  if (document.querySelector("style[data-hyperframes-text-rendering]")) {
+    return html;
+  }
+
+  const styleEl = document.createElement("style");
+  styleEl.setAttribute("data-hyperframes-text-rendering", "true");
+  styleEl.textContent = "html,body,*{text-rendering:geometricPrecision}";
+  head.insertBefore(styleEl, head.firstChild);
+
+  return document.toString();
 }
 
 /**
@@ -846,6 +872,23 @@ export interface CompileForRenderOptions {
   failClosedFontFetch?: boolean;
 }
 
+const GSAP_CDN_BASE = "https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/";
+
+function rewriteUnresolvableGsapToCdn(html: string, projectDir: string): string {
+  return html.replace(
+    /(<script\b[^>]*\bsrc=["'])([^"']*gsap[^"']*\/dist\/([^"']+))(["'][^>]*>)/gi,
+    (full, prefix, src, file, suffix) => {
+      if (/^https?:\/\//i.test(src)) return full;
+      const absPath = resolve(projectDir, src);
+      if (existsSync(absPath)) return full;
+      console.log(
+        `[Compiler] Rewriting missing gsap script to CDN: ${src} → ${GSAP_CDN_BASE}${file}`,
+      );
+      return `${prefix}${GSAP_CDN_BASE}${file}${suffix}`;
+    },
+  );
+}
+
 /**
  * Compile an HTML composition project into a single self-contained HTML string
  * with all media metadata resolved.
@@ -856,7 +899,7 @@ export async function compileForRender(
   downloadDir: string,
   options: CompileForRenderOptions = {},
 ): Promise<CompiledComposition> {
-  const rawHtml = readFileSync(htmlPath, "utf-8");
+  const rawHtml = rewriteUnresolvableGsapToCdn(readFileSync(htmlPath, "utf-8"), projectDir);
   const { html: compiledHtml, unresolvedCompositions } = await compileHtmlFile(
     rawHtml,
     projectDir,
@@ -894,7 +937,9 @@ export async function compileForRender(
   const hasShaderTransitions = detectShaderTransitionUsage(sanitizedHtml);
 
   const coalescedHtml = await injectDeterministicFontFaces(
-    coalesceHeadStylesAndBodyScripts(promoteCssImportsToLinkTags(sanitizedHtml)),
+    injectTextRenderingRule(
+      coalesceHeadStylesAndBodyScripts(promoteCssImportsToLinkTags(sanitizedHtml)),
+    ),
     { failClosedFontFetch: options.failClosedFontFetch === true },
   );
 
