@@ -357,6 +357,25 @@ export interface BuildAuthoringMessagesArgs {
   source: ExplainerSourceArtifact;
   skillBundle: SkillBundle;
   retryFeedback: RetryFeedback | null;
+  /**
+   * When set, the narration text + per-scene start times have already been
+   * decided (typically by an earlier narration-only LLM call followed by TTS).
+   * The HTML-authoring call must illustrate this exact narration rather than
+   * generating new copy. Total audio duration is the source of truth for
+   * timeline length.
+   */
+  predeterminedNarration?: NarrationPlan | null;
+}
+
+export interface NarrationPlanScene {
+  sceneId: string;
+  startSeconds: number;
+  narrationText: string;
+}
+
+export interface NarrationPlan {
+  scenes: NarrationPlanScene[];
+  audioDurationSeconds: number;
 }
 
 function buildSystemContent(bundle: SkillBundle): string {
@@ -435,19 +454,52 @@ const ASPECT_SAFE_AREA: Record<"16:9" | "1:1" | "9:16", string> = {
     "Aspect safe areas: PORTRAIT 1080×1920 — vertical stack layout; captions sit in the lower 25%; avoid landscape-only constructs.",
 };
 
-function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
-  const { brief, plan, source } = args;
-  const article = brief.article;
+function formatPredeterminedNarration(plan: NarrationPlan): string {
+  const header = [
+    "PRE-DETERMINED NARRATION (audio is already synthesized — your HTML must illustrate this exact content).",
+    `Total audio duration: ${plan.audioDurationSeconds.toFixed(2)}s — your composition's data-duration on the root, the narration audio track, and the SUM of scene clip durations MUST cover this full duration.`,
+    "Scene-by-scene narration (use these sceneIds and startSeconds as the timing skeleton — your visual scenes should mount/unmount around these boundaries):",
+  ];
+  const items = plan.scenes.map(
+    (s) =>
+      `  • sceneId="${s.sceneId}" start=${s.startSeconds.toFixed(2)}s — ${s.narrationText.replace(/\s+/g, " ").trim()}`,
+  );
+  const footer = [
+    "Do NOT rewrite the narration. Echo it back verbatim in the response's narration array (same sceneId/startSeconds/narrationText).",
+    "Design your final scene to hold its visible content until the audio ends — never let the canvas go blank before the timeline ends.",
+  ];
+  return [...header, ...items, ...footer].join("\n");
+}
+
+function buildSourceBodyBlock(
+  source: ExplainerSourceArtifact,
+  predeterminedNarration: NarrationPlan | null | undefined,
+): string {
+  if (predeterminedNarration) {
+    return `${formatPredeterminedNarration(predeterminedNarration)}\n`;
+  }
   const cleaned = sanitizeParagraphs(source);
+  const body =
+    cleaned || "(article body was empty after sanitization — work from title/subtitle/description)";
+  return `Article body (use as the source of truth — do not invent claims):\n${body}`;
+}
+
+function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
+  const { brief, plan, source, predeterminedNarration } = args;
+  const article = brief.article;
   const dims = dimensionsForAspect(plan.aspectRatio);
   const authorRefInstruction = brief.interview?.authorReferenceStyle
     ? AUTHOR_REFERENCE_INSTRUCTION[brief.interview.authorReferenceStyle]
     : null;
+  const effectiveDuration = predeterminedNarration
+    ? predeterminedNarration.audioDurationSeconds
+    : plan.targetDurationSeconds;
+  const durationSuffix = predeterminedNarration ? " (locked to actual narration audio length)" : "";
 
   const lines: Array<string | false | null | undefined> = [
     "Author a complete Hyperframes composition for the article below.",
     "",
-    `Target duration: ${plan.targetDurationSeconds}s`,
+    `Target duration: ${effectiveDuration.toFixed(2)}s${durationSuffix}`,
     `Aspect ratio: ${plan.aspectRatio} (${dims.width}×${dims.height})`,
     ASPECT_SAFE_AREA[plan.aspectRatio],
     `Voice: ${plan.voice.enabled ? `enabled, style ${plan.voice.style ?? "documentary"}` : "disabled"}`,
@@ -470,8 +522,7 @@ function buildInitialUserContent(args: BuildAuthoringMessagesArgs): string {
     article.url && `Article URL: ${article.url}`,
     article.bookletLink?.shortUrl && `Booklet URL: ${article.bookletLink.shortUrl}`,
     "",
-    "Article body (use as the source of truth — do not invent claims):",
-    cleaned || "(article body was empty after sanitization — work from title/subtitle/description)",
+    buildSourceBodyBlock(source, predeterminedNarration),
     "",
     "Return JSON via the structured-output schema. The indexHtml field is the complete <!doctype html> document. The narration array carries per-scene narration text (omit/empty when voice is disabled).",
   ];
@@ -501,6 +552,94 @@ export function buildAuthoringMessages(args: BuildAuthoringMessagesArgs): Conver
   }
 
   return messages;
+}
+
+// ── Narration-only authoring (used to pre-decide what gets TTS'd) ────────────
+
+export interface BuildNarrationMessagesArgs {
+  brief: ExplainerVideoBrief;
+  plan: ExplainerVideoRenderPlan;
+  source: ExplainerSourceArtifact;
+  skillBundle: SkillBundle;
+}
+
+export const NARRATION_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["narration", "notes"],
+  properties: {
+    narration: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sceneId", "startSeconds", "narrationText"],
+        properties: {
+          sceneId: { type: "string" },
+          startSeconds: { type: "number" },
+          narrationText: { type: "string" },
+        },
+      },
+    },
+    notes: { type: ["string", "null"] },
+  },
+} as const;
+
+function buildNarrationOnlySystemContent(bundle: SkillBundle): string {
+  return [
+    "# Amplifier explainer narration writer",
+    "You are writing only the spoken narration for an explainer video — no HTML, no GSAP, no layout. The narration will be sent to ElevenLabs TTS and the resulting audio length will determine the video's exact runtime, so concise, intentional pacing matters.",
+    "",
+    "Speak in the voice style requested by the brief. Honor the author-reference style. Use the article body as the source of truth — do not invent claims.",
+    "",
+    "Pacing: ElevenLabs speaks at roughly 2.3 words per second for documentary/calm styles and 2.6 wps for energetic. Aim for narration whose word count, divided by that rate, lands within ±10% of the target duration.",
+    "",
+    "Plan 4–7 scenes that cover hook → context → insight(s) → close. Each scene's startSeconds should be your honest estimate of when that scene's narration begins given the pacing above. The HTML compositor will use your scene IDs and timing as the visual skeleton.",
+    "",
+    "# Amplifier constraints (relevant subset)",
+    bundle.amplifierConstraints,
+  ].join("\n\n");
+}
+
+function buildNarrationOnlyUserContent(args: BuildNarrationMessagesArgs): string {
+  const { brief, plan, source } = args;
+  const article = brief.article;
+  const cleaned = sanitizeParagraphs(source);
+  const authorRefInstruction = brief.interview?.authorReferenceStyle
+    ? AUTHOR_REFERENCE_INSTRUCTION[brief.interview.authorReferenceStyle]
+    : null;
+  const lines: Array<string | false | null | undefined> = [
+    "Write the narration for an explainer video about the article below.",
+    "",
+    `Target duration: ${plan.targetDurationSeconds}s (the audio you specify will determine the actual runtime).`,
+    `Voice: ${plan.voice.enabled ? `enabled, style ${plan.voice.style ?? "documentary"}` : "disabled"}`,
+    brief.interview?.goal && `Goal: ${brief.interview.goal}`,
+    brief.interview?.audience && `Audience: ${brief.interview.audience}`,
+    brief.interview?.narrativeStyle && `Narrative style: ${brief.interview.narrativeStyle}`,
+    authorRefInstruction,
+    `CTA: ${plan.cta.label}${plan.cta.url ? ` (${plan.cta.url})` : ""}`,
+    "",
+    `Article title: ${article.title}`,
+    article.subtitle && `Article subtitle: ${article.subtitle}`,
+    article.primaryAuthor?.name && `Author: ${article.primaryAuthor.name}`,
+    article.primaryAuthor?.bio && `Author bio: ${article.primaryAuthor.bio}`,
+    article.url && `Article URL: ${article.url}`,
+    "",
+    "Article body:",
+    cleaned || "(article body was empty after sanitization — work from title/subtitle/description)",
+    "",
+    "Return JSON via the structured-output schema. Only the narration array and notes — no HTML.",
+  ];
+  return lines.filter((entry): entry is string => Boolean(entry)).join("\n");
+}
+
+export function buildNarrationOnlyMessages(
+  args: BuildNarrationMessagesArgs,
+): ConversationMessage[] {
+  return [
+    { role: "system", content: buildNarrationOnlySystemContent(args.skillBundle) },
+    { role: "user", content: buildNarrationOnlyUserContent(args) },
+  ];
 }
 
 // ── Skill bundle loader ───────────────────────────────────────────────────────
@@ -545,6 +684,7 @@ export interface RunCompositionLoopArgs {
   llmTimeoutMs: number;
   llm: LlmFn;
   lint: LintFn;
+  predeterminedNarration?: NarrationPlan | null;
 }
 
 export async function runCompositionLoop(
@@ -560,6 +700,7 @@ export async function runCompositionLoop(
       source: args.source,
       skillBundle: args.skillBundle,
       retryFeedback,
+      predeterminedNarration: args.predeterminedNarration ?? null,
     });
 
     let llmResponse: Awaited<ReturnType<LlmFn>>;

@@ -17,11 +17,14 @@ import {
 } from "./amplifier.js";
 import { authorComposition } from "./llm-client.js";
 import {
+  buildNarrationOnlyMessages,
   dimensionsForAspect,
   extendCompositionDuration,
   loadSkillBundle,
   lintCompositionHtml,
+  NARRATION_JSON_SCHEMA,
   postRenderSanityCheck,
+  probeDurationWithFfprobe,
   runCompositionLoop,
 } from "./composition.js";
 import type { SkillBundle } from "./composition.js";
@@ -1291,6 +1294,148 @@ const COMPOSITION_LLM_TIMEOUT_MS = Number.parseInt(
   10,
 );
 
+interface NarrationSegment {
+  sceneId: string;
+  startSeconds: number;
+  narrationText: string;
+}
+
+interface VoiceoverResult {
+  voiceoverArtifact: ArtifactRef | null;
+  narrationSrc: string | null;
+  transcriptWords: TimedWord[];
+}
+
+async function authorNarrationPlan(opts: {
+  brief: ExplainerVideoBrief;
+  plan: ExplainerVideoRenderPlan;
+  source: ExplainerSourceArtifact;
+  skillBundle: SkillBundle;
+  ai: { baseUrl: string; apiKey: string; model: string };
+  timeoutMs: number;
+}): Promise<NarrationSegment[] | null> {
+  try {
+    const narrationMessages = buildNarrationOnlyMessages({
+      brief: opts.brief,
+      plan: opts.plan,
+      source: opts.source,
+      skillBundle: opts.skillBundle,
+    });
+    const result = await authorComposition<{
+      narration: NarrationSegment[];
+      notes: string | null;
+    }>({
+      conversation: narrationMessages,
+      schema: NARRATION_JSON_SCHEMA as object,
+      schemaName: "amplifier_explainer_narration",
+      ai: opts.ai,
+      timeoutMs: opts.timeoutMs,
+    });
+    return result.narration && result.narration.length > 0 ? result.narration : null;
+  } catch (err) {
+    console.warn(
+      "[worker] narration authoring failed; will use deterministic fallback script",
+      err,
+    );
+    return null;
+  }
+}
+
+function scriptFromNarration(
+  narration: NarrationSegment[],
+  targetDurationSeconds: number,
+): ExplainerScript {
+  const segments = narration.map((n, idx) => {
+    const next = narration[idx + 1];
+    const duration = next
+      ? Math.max(0.5, next.startSeconds - n.startSeconds)
+      : Math.max(0.5, targetDurationSeconds - n.startSeconds);
+    return {
+      id: n.sceneId,
+      title: n.sceneId,
+      narration: n.narrationText,
+      durationSeconds: duration,
+    };
+  });
+  return {
+    version: "2026-05-15",
+    targetDurationSeconds,
+    fullNarration: narration.map((n) => n.narrationText).join(" "),
+    scenes: [],
+    segments,
+  } as unknown as ExplainerScript;
+}
+
+async function synthesizeVoiceoverIfEnabled(opts: {
+  script: ExplainerScript;
+  plan: ExplainerVideoRenderPlan;
+  projectDir: string;
+  message: AmplifierQueueMessage;
+  jobId: string;
+  existingVoiceover: ArtifactRef | null;
+  onStart: () => Promise<unknown>;
+}): Promise<VoiceoverResult> {
+  if (opts.plan.voice.enabled) {
+    await opts.onStart();
+    const voiceStyle = opts.plan.voice.style || "documentary";
+    const seed = Number.parseInt(
+      createHash("sha256").update(opts.jobId).digest("hex").slice(0, 8),
+      16,
+    );
+    const tts = await synthesizeSpeechWithTimestamps({
+      text: opts.script.fullNarration,
+      style: voiceStyle,
+      seed,
+    });
+    writeFileSync(join(opts.projectDir, "narration.mp3"), tts.audio);
+    const voiceoverArtifact = await uploadBufferArtifact(
+      opts.message.assetsBucket,
+      `${opts.message.baseKey}/voiceover.mp3`,
+      tts.audio,
+      tts.mimeType,
+    );
+    return { voiceoverArtifact, narrationSrc: "narration.mp3", transcriptWords: tts.words };
+  }
+  if (opts.plan.captions.enabled) {
+    return {
+      voiceoverArtifact: opts.existingVoiceover,
+      narrationSrc: null,
+      transcriptWords: buildSyntheticWordTimings(opts.script.segments),
+    };
+  }
+  return {
+    voiceoverArtifact: opts.existingVoiceover,
+    narrationSrc: null,
+    transcriptWords: [],
+  };
+}
+
+async function measureCanonicalDuration(opts: {
+  narrationSrc: string | null;
+  projectDir: string;
+  transcriptWords: TimedWord[];
+  scriptTargetDuration: number;
+}): Promise<number> {
+  let audioDurationSeconds = 0;
+  if (opts.narrationSrc) {
+    try {
+      audioDurationSeconds = await probeDurationWithFfprobe(
+        join(opts.projectDir, opts.narrationSrc),
+      );
+    } catch (err) {
+      console.warn(
+        `[worker] ffprobe failed on ${opts.narrationSrc}; falling back to transcript last-word end`,
+        err,
+      );
+    }
+  }
+  const lastWordEnd = opts.transcriptWords[opts.transcriptWords.length - 1]?.end ?? 0;
+  if (opts.transcriptWords.length > 0 || audioDurationSeconds > 0) {
+    return Math.max(opts.scriptTargetDuration, audioDurationSeconds, lastWordEnd);
+  }
+  return opts.scriptTargetDuration;
+}
+
 async function processRenderJob(message: AmplifierQueueMessage) {
   let job = await getExplainerVideoJob(message.jobId);
   const source = await readJsonArtifact<ExplainerSourceArtifact>(
@@ -1315,11 +1460,93 @@ async function processRenderJob(message: AmplifierQueueMessage) {
     }
 
     const skillBundle = getSkillBundleOnce();
-    let currentAttemptCounter = 0;
+    const aiConfig = {
+      baseUrl: user.aiBaseUrl!,
+      apiKey: user.aiApiKey!,
+      model: user.aiModel!,
+    };
 
-    const loopResult = await runCompositionLoop({
+    // ── Step 1: LLM authors narration only ──────────────────────────────────
+    // Splitting narration from HTML lets us TTS first and feed the actual audio
+    // length back into the HTML authoring call. Without this, the LLM authors
+    // visual scenes for plan.targetDurationSeconds while ElevenLabs produces
+    // audio of a different length — the canvas freezes once scenes end but
+    // audio keeps playing (bd-33q round 3).
+    await mergeExplainerVideoJob(message.jobId, {
+      status: "planning",
+      stage: "authoring_narration",
+      progress: 0.22,
+      message: "Authoring narration script.",
+    });
+    const narrationFromLlm = await authorNarrationPlan({
       brief: job.videoBrief,
       plan: job.plan,
+      source,
+      skillBundle,
+      ai: aiConfig,
+      timeoutMs: COMPOSITION_LLM_TIMEOUT_MS,
+    });
+
+    // ── Step 2: Build initial script (from LLM narration or fallback) ───────
+    workDir = mkdtempSync(join(tmpdir(), "amplifier-video-worker-"));
+    const projectDir = join(workDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+
+    const script: ExplainerScript = narrationFromLlm
+      ? scriptFromNarration(narrationFromLlm, job.plan.targetDurationSeconds)
+      : buildExplainerScript({ brief: job.videoBrief, plan: job.plan, source });
+
+    // ── Step 3: TTS first (before HTML authoring) ───────────────────────────
+    const voiceover = await synthesizeVoiceoverIfEnabled({
+      script,
+      plan: job.plan,
+      projectDir,
+      message,
+      jobId: job.jobId,
+      existingVoiceover: job.artifacts.voiceover ?? null,
+      onStart: async () => {
+        job = await mergeExplainerVideoJob(message.jobId, {
+          status: "voiceover",
+          stage: "synthesizing_voiceover",
+          progress: 0.3,
+          message: "Generating voiceover with ElevenLabs.",
+          billingSurfaceId: "elevenlabs:text-to-speech",
+          rawBillingSurfaceKey: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
+        });
+      },
+    });
+    const { transcriptWords, narrationSrc, voiceoverArtifact } = voiceover;
+
+    // ── Step 4: Probe actual audio duration ─────────────────────────────────
+    const durationSeconds = await measureCanonicalDuration({
+      narrationSrc,
+      projectDir,
+      transcriptWords,
+      scriptTargetDuration: script.targetDurationSeconds,
+    });
+
+    // ── Step 5: LLM authors HTML composition for actual audio duration ──────
+    // Derived plan overrides targetDurationSeconds so the LLM sizes scenes to
+    // match the audio it has not seen but whose duration we now know exactly.
+    const derivedPlan: ExplainerVideoRenderPlan = {
+      ...job.plan,
+      targetDurationSeconds: durationSeconds,
+    };
+    const predeterminedNarration = narrationFromLlm
+      ? {
+          scenes: narrationFromLlm.map((n) => ({
+            sceneId: n.sceneId,
+            startSeconds: n.startSeconds,
+            narrationText: n.narrationText,
+          })),
+          audioDurationSeconds: durationSeconds,
+        }
+      : null;
+
+    let currentAttemptCounter = 0;
+    const loopResult = await runCompositionLoop({
+      brief: job.videoBrief,
+      plan: derivedPlan,
       source,
       skillBundle,
       maxAttempts: COMPOSITION_MAX_ATTEMPTS,
@@ -1329,8 +1556,8 @@ async function processRenderJob(message: AmplifierQueueMessage) {
         await mergeExplainerVideoJob(message.jobId, {
           status: "planning",
           stage: `composing_attempt_${currentAttemptCounter}`,
-          progress: Math.min(0.45, 0.18 + currentAttemptCounter * 0.06),
-          message: `Authoring composition (attempt ${currentAttemptCounter}/${COMPOSITION_MAX_ATTEMPTS}).`,
+          progress: Math.min(0.55, 0.4 + currentAttemptCounter * 0.04),
+          message: `Authoring composition HTML (attempt ${currentAttemptCounter}/${COMPOSITION_MAX_ATTEMPTS}).`,
         });
         return authorComposition({
           conversation,
@@ -1345,48 +1572,23 @@ async function processRenderJob(message: AmplifierQueueMessage) {
         });
       },
       lint: lintCompositionHtml,
+      predeterminedNarration,
     });
 
     let usingFallback = false;
     let scriptArtifact: ArtifactRef | null = null;
-    let script: ExplainerScript;
     let authoredIndexHtml: string | null = null;
 
     if (loopResult.ok) {
       authoredIndexHtml = loopResult.indexHtml;
-      // Persist the accepted composition as the script artifact (text/html).
       scriptArtifact = await uploadBufferArtifact(
         message.assetsBucket,
         `${message.baseKey}/composition.html`,
         Buffer.from(loopResult.indexHtml, "utf-8"),
         "text/html",
       );
-      // Build a minimal ExplainerScript so existing voiceover/captions code keeps working.
-      // Derive per-segment durations from narration startSeconds so buildSyntheticWordTimings
-      // produces non-colliding word timings on the captions-only path.
-      const narration = loopResult.narration;
-      const llmSegments = narration.map((n, idx) => {
-        const next = narration[idx + 1];
-        const duration = next
-          ? Math.max(0.5, next.startSeconds - n.startSeconds)
-          : Math.max(0.5, job.plan.targetDurationSeconds - n.startSeconds);
-        return {
-          id: n.sceneId,
-          title: n.sceneId,
-          narration: n.narrationText,
-          durationSeconds: duration,
-        };
-      });
-      script = {
-        version: "2026-05-15",
-        targetDurationSeconds: job.plan.targetDurationSeconds,
-        fullNarration: narration.map((n) => n.narrationText).join(" "),
-        scenes: [],
-        segments: llmSegments,
-      } as unknown as ExplainerScript;
     } else {
       usingFallback = true;
-      // Archive each failed attempt's error to S3 for post-mortem.
       for (const err of loopResult.errors) {
         const detail = err.detail ? `\n\n${err.detail}` : "";
         await uploadBufferArtifact(
@@ -1399,69 +1601,14 @@ async function processRenderJob(message: AmplifierQueueMessage) {
       await mergeExplainerVideoJob(message.jobId, {
         status: "planning",
         stage: "fallback_template_render",
-        progress: 0.5,
-        message: `LLM authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — using template renderer.`,
-      });
-      script = buildExplainerScript({
-        brief: job.videoBrief,
-        plan: job.plan,
-        source,
+        progress: 0.58,
+        message: `LLM HTML authoring failed after ${COMPOSITION_MAX_ATTEMPTS} attempts — using template renderer.`,
       });
       scriptArtifact = await uploadJsonArtifact(
         message.assetsBucket,
         `${message.baseKey}/script.json`,
         script,
       );
-    }
-
-    job = await mergeExplainerVideoJob(message.jobId, {
-      status: "storyboarding",
-      stage: "script_ready",
-      progress: 0.5,
-      artifacts: {
-        ...job.artifacts,
-        script: scriptArtifact,
-      },
-      message: usingFallback
-        ? "Template script ready (fallback). Continuing with voiceover and render."
-        : "LLM-authored composition accepted. Continuing with voiceover and render.",
-    });
-
-    let transcriptWords: TimedWord[] = [];
-    let voiceoverArtifact = job.artifacts.voiceover ?? null;
-    workDir = mkdtempSync(join(tmpdir(), "amplifier-video-worker-"));
-    const projectDir = join(workDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-
-    let narrationSrc: string | null = null;
-    if (job.plan.voice.enabled) {
-      const voiceStyle = job.plan.voice.style || "documentary";
-      job = await mergeExplainerVideoJob(message.jobId, {
-        status: "voiceover",
-        stage: "synthesizing_voiceover",
-        progress: 0.46,
-        message: "Generating voiceover with ElevenLabs.",
-        billingSurfaceId: "elevenlabs:text-to-speech",
-        rawBillingSurfaceKey: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
-      });
-
-      const tts = await synthesizeSpeechWithTimestamps({
-        text: script.fullNarration,
-        style: voiceStyle,
-        seed: Number.parseInt(createHash("sha256").update(job.jobId).digest("hex").slice(0, 8), 16),
-      });
-      const narrationPath = join(projectDir, "narration.mp3");
-      writeFileSync(narrationPath, tts.audio);
-      voiceoverArtifact = await uploadBufferArtifact(
-        message.assetsBucket,
-        `${message.baseKey}/voiceover.mp3`,
-        tts.audio,
-        tts.mimeType,
-      );
-      narrationSrc = "narration.mp3";
-      transcriptWords = tts.words;
-    } else if (job.plan.captions.enabled) {
-      transcriptWords = buildSyntheticWordTimings(script.segments);
     }
 
     const transcriptArtifact =
@@ -1493,15 +1640,10 @@ async function processRenderJob(message: AmplifierQueueMessage) {
         captions: captionsArtifact,
         voiceover: voiceoverArtifact,
       },
-      message: "Composition ready. Rendering explainer video with Hyperframes.",
+      message: usingFallback
+        ? "Template script ready (fallback). Rendering explainer video with Hyperframes."
+        : "LLM-authored composition accepted. Rendering explainer video with Hyperframes.",
     });
-
-    const durationSeconds = transcriptWords.length
-      ? Math.max(
-          script.targetDurationSeconds,
-          transcriptWords[transcriptWords.length - 1]?.end || 0,
-        )
-      : script.targetDurationSeconds;
     if (!usingFallback && authoredIndexHtml) {
       // The LLM bakes data-duration to script.targetDurationSeconds (per
       // amplifier-constraints.md) but ElevenLabs narration is unbounded.
@@ -1520,7 +1662,7 @@ async function processRenderJob(message: AmplifierQueueMessage) {
         join(projectDir, "index.html"),
         buildHtmlTemplate({
           brief: job.videoBrief,
-          plan: job.plan,
+          plan: derivedPlan,
           script,
           transcript: transcriptWords,
           durationSeconds,
