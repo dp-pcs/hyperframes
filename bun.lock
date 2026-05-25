@@ -20,8 +20,8 @@
         "typescript": "^5.0.0",
       },
     },
-    "packages/amplifier-video-worker": {
-      "name": "@hyperframes/amplifier-video-worker",
+    "packages/amplify-video-worker": {
+      "name": "@hyperframes/amplify-video-worker",
       "version": "0.0.1",
       "dependencies": {
         "@aws-sdk/client-dynamodb": "^3.1021.0",
@@ -609,7 +609,7 @@
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 
-    "@hyperframes/amplifier-video-worker": ["@hyperframes/amplifier-video-worker@workspace:packages/amplifier-video-worker"],
+    "@hyperframes/amplify-video-worker": ["@hyperframes/amplify-video-worker@workspace:packages/amplify-video-worker"],
 
     "@hyperframes/aws-lambda": ["@hyperframes/aws-lambda@workspace:packages/aws-lambda"],
 
