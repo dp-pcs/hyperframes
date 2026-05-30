@@ -58,21 +58,256 @@ function normalizeFinding(raw: {
   };
 }
 
-export async function lintCompositionHtml(html: string): Promise<LintResult> {
+function readCoreLintFindings(html: string): unknown[] {
   const raw = lintHyperframeHtml(html, {});
-  const rawFindings: unknown = Array.isArray(raw)
-    ? raw
-    : ((raw as { findings?: unknown[] }).findings ?? []);
-  const findings = Array.isArray(rawFindings) ? rawFindings : [];
+  if (Array.isArray(raw)) return raw;
+  const wrapped = (raw as { findings?: unknown[] }).findings;
+  return Array.isArray(wrapped) ? wrapped : [];
+}
+
+function normalizeCoreLintFindings(html: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  for (const finding of readCoreLintFindings(html)) {
+    if (typeof finding !== "object" || finding === null) continue;
+    out.push(normalizeFinding(finding as Parameters<typeof normalizeFinding>[0]));
+  }
+  return out;
+}
+
+function partitionBySeverity(findings: LintFinding[]): LintResult {
   const errors: LintFinding[] = [];
   const warnings: LintFinding[] = [];
   for (const finding of findings) {
-    if (typeof finding !== "object" || finding === null) continue;
-    const normalized = normalizeFinding(finding as Parameters<typeof normalizeFinding>[0]);
-    if (normalized.severity === "error") errors.push(normalized);
-    else if (normalized.severity === "warning") warnings.push(normalized);
+    if (finding.severity === "error") errors.push(finding);
+    else if (finding.severity === "warning") warnings.push(finding);
   }
   return { errors, warnings };
+}
+
+export async function lintCompositionHtml(html: string): Promise<LintResult> {
+  return partitionBySeverity([...normalizeCoreLintFindings(html), ...lintGsapSelectors(html)]);
+}
+
+// ── GSAP selector lint (bd-n59) ──────────────────────────────────────────────
+//
+// LLM-authored compositions hard-code GSAP selectors inside an inline <script>
+// (e.g. `gsap.from("#scene-hook .kicker", ...)`) but the LLM is free to pick
+// the actual class names inside each scene's content block. When a selector
+// references an id or class that no element actually carries, `gsap.from()`
+// silently no-ops — text appears in its final state from t=0 instead of fading
+// in, so the scene looks broken on render. We catch the mismatch up front so
+// the retry-feedback loop can ask the LLM to fix it before we burn an MP4.
+//
+// Strategy: regex-extract DOM ids + class tokens (excluding script bodies),
+// regex-extract string-literal selectors passed to gsap.from/.to/.fromTo/.set
+// (and the same on chained timelines), then for each compound selector verify
+// every #id and .class token it references exists somewhere in the DOM.
+
+const GSAP_CALL_PATTERN =
+  /(?:^|[^A-Za-z0-9_$])(?:gsap|tl|timeline|master|t)\s*\.\s*(from|to|fromTo|set|add)\s*\(\s*((?:'(?:\\.|[^'\\])*')|(?:"(?:\\.|[^"\\])*")|(?:`(?:\\.|[^`\\])*`))/g;
+const CLASS_ATTR_PATTERN = /\sclass\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const ID_ATTR_PATTERN = /\sid\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const SCRIPT_BLOCK_PATTERN = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+
+function stripScripts(html: string): string {
+  return html.replace(SCRIPT_BLOCK_PATTERN, " ");
+}
+
+function matchedAttrValue(match: RegExpMatchArray): string {
+  return (match[1] ?? match[2] ?? "").trim();
+}
+
+function collectDomIds(htmlSansScripts: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of htmlSansScripts.matchAll(ID_ATTR_PATTERN)) {
+    const value = matchedAttrValue(m);
+    if (value) out.add(value);
+  }
+  return out;
+}
+
+function collectDomClasses(htmlSansScripts: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of htmlSansScripts.matchAll(CLASS_ATTR_PATTERN)) {
+    for (const token of matchedAttrValue(m).split(/\s+/)) {
+      if (token) out.add(token);
+    }
+  }
+  return out;
+}
+
+const QUOTE_CHARS = new Set(["'", '"', "`"]);
+
+function unquote(raw: string): string {
+  if (raw.length < 2) return raw;
+  const quote = raw.charAt(0);
+  if (!QUOTE_CHARS.has(quote)) return raw;
+  if (raw.charAt(raw.length - 1) !== quote) return raw;
+  return raw.slice(1, -1);
+}
+
+function lineForIndex(html: string, index: number): number {
+  if (index <= 0) return 1;
+  let count = 1;
+  const stop = Math.min(index, html.length);
+  for (let i = 0; i < stop; i += 1) {
+    if (html.charCodeAt(i) === 10) count += 1;
+  }
+  return count;
+}
+
+interface CompoundTokens {
+  ids: string[];
+  classes: string[];
+}
+
+const ID_TOKEN_PATTERN = /#[A-Za-z_][\w-]*/g;
+const CLASS_TOKEN_PATTERN = /\.[A-Za-z_][\w-]*/g;
+const PSEUDO_PATTERN = /::?[A-Za-z-]/;
+const ATTR_SELECTOR_PATTERN = /\[[^\]]*\]/g;
+
+function collectMatchesAfter(input: string, pattern: RegExp, skipChars: number): string[] {
+  const found = input.match(pattern);
+  if (!found) return [];
+  return found.map((m) => m.slice(skipChars));
+}
+
+function stripPseudoAndAttr(part: string): string {
+  // Strip pseudo-classes/elements (`:hover`, `::before`) and attribute
+  // selectors (`[data-foo="bar"]`) before we look for id/class tokens.
+  const noPseudo = part.split(PSEUDO_PATTERN)[0] ?? part;
+  return noPseudo.replace(ATTR_SELECTOR_PATTERN, "");
+}
+
+function extractTokensFromCompound(compound: string): CompoundTokens {
+  // Compound selectors are space-separated descendant chains; each chain
+  // element can be tag#id.class.class, .class, #id, *, etc. We only care
+  // about #id and .class tokens — combinators (`>`, `+`, `~`, `*`) and
+  // attribute-only selectors are fine and left untouched.
+  const parts = compound.trim().split(/\s+/).filter(Boolean);
+  const ids: string[] = [];
+  const classes: string[] = [];
+  for (const part of parts) {
+    const cleaned = stripPseudoAndAttr(part);
+    ids.push(...collectMatchesAfter(cleaned, ID_TOKEN_PATTERN, 1));
+    classes.push(...collectMatchesAfter(cleaned, CLASS_TOKEN_PATTERN, 1));
+  }
+  return { ids, classes };
+}
+
+function findMissingTokens(
+  compound: string,
+  knownIds: Set<string>,
+  knownClasses: Set<string>,
+): { missingIds: string[]; missingClasses: string[] } | null {
+  const { ids, classes } = extractTokensFromCompound(compound);
+  const missingIds = ids.filter((id) => !knownIds.has(id));
+  const missingClasses = classes.filter((cls) => !knownClasses.has(cls));
+  if (missingIds.length === 0 && missingClasses.length === 0) return null;
+  return { missingIds, missingClasses };
+}
+
+function formatMissingTokens(missingIds: string[], missingClasses: string[]): string {
+  const parts: string[] = [];
+  if (missingIds.length > 0)
+    parts.push(`missing id(s): ${missingIds.map((s) => `#${s}`).join(", ")}`);
+  if (missingClasses.length > 0)
+    parts.push(`missing class(es): ${missingClasses.map((s) => `.${s}`).join(", ")}`);
+  return parts.join("; ");
+}
+
+function makeGsapSelectorFinding(
+  method: string,
+  compound: string,
+  detail: string,
+  line: number,
+): LintFinding {
+  return {
+    severity: "error",
+    ruleId: "gsap-selector-missing",
+    message: `gsap.${method}("${compound}") references DOM tokens that no element carries — ${detail}. The animation will silently no-op (text appears static from t=0). Either add the tokens to the scene markup or change the selector to match what your DOM actually emits.`,
+    line,
+  };
+}
+
+function isStaticallyResolvableSelector(selector: string): boolean {
+  // Template literals with `${...}` can't be resolved at lint time.
+  return selector.length > 0 && !selector.includes("${");
+}
+
+interface GsapCallSite {
+  method: string;
+  selector: string;
+  line: number;
+}
+
+function checkCompound(
+  compound: string,
+  call: GsapCallSite,
+  knownIds: Set<string>,
+  knownClasses: Set<string>,
+): LintFinding | null {
+  const missing = findMissingTokens(compound, knownIds, knownClasses);
+  if (!missing) return null;
+  const detail = formatMissingTokens(missing.missingIds, missing.missingClasses);
+  return makeGsapSelectorFinding(call.method, compound, detail, call.line);
+}
+
+function shouldVisitCompound(compound: string, call: GsapCallSite, seen: Set<string>): boolean {
+  if (!compound) return false;
+  const dedupeKey = `${call.line}::${call.method}::${compound}`;
+  if (seen.has(dedupeKey)) return false;
+  seen.add(dedupeKey);
+  return true;
+}
+
+function lintGsapCallSite(
+  call: GsapCallSite,
+  knownIds: Set<string>,
+  knownClasses: Set<string>,
+  seen: Set<string>,
+): LintFinding[] {
+  const findings: LintFinding[] = [];
+  for (const compoundRaw of call.selector.split(",")) {
+    const compound = compoundRaw.trim();
+    if (!shouldVisitCompound(compound, call, seen)) continue;
+    const finding = checkCompound(compound, call, knownIds, knownClasses);
+    if (finding) findings.push(finding);
+  }
+  return findings;
+}
+
+// fallow-ignore-next-line complexity
+function gsapMatchToSite(html: string, match: RegExpMatchArray): GsapCallSite | null {
+  const selector = unquote(match[2] ?? "");
+  if (!isStaticallyResolvableSelector(selector)) return null;
+  return {
+    method: match[1] ?? "",
+    selector,
+    line: lineForIndex(html, match.index ?? 0),
+  };
+}
+
+function collectGsapCallSites(html: string): GsapCallSite[] {
+  const sites: GsapCallSite[] = [];
+  for (const match of html.matchAll(GSAP_CALL_PATTERN)) {
+    const site = gsapMatchToSite(html, match);
+    if (site) sites.push(site);
+  }
+  return sites;
+}
+
+export function lintGsapSelectors(html: string): LintFinding[] {
+  if (!/gsap\s*\./.test(html)) return [];
+  const htmlSansScripts = stripScripts(html);
+  const knownIds = collectDomIds(htmlSansScripts);
+  const knownClasses = collectDomClasses(htmlSansScripts);
+  const seen = new Set<string>();
+  const findings: LintFinding[] = [];
+  for (const call of collectGsapCallSites(html)) {
+    findings.push(...lintGsapCallSite(call, knownIds, knownClasses, seen));
+  }
+  return findings;
 }
 
 export function formatLintForFeedback(result: LintResult, limit = 4000): string {
@@ -547,8 +782,14 @@ export function buildAuthoringMessages(args: BuildAuthoringMessagesArgs): Conver
   ];
 
   if (args.retryFeedback) {
-    messages.push({ role: "assistant", content: args.retryFeedback.previousIndexHtml });
-    messages.push({ role: "user", content: buildRetryUserContent(args.retryFeedback) });
+    messages.push({
+      role: "assistant",
+      content: args.retryFeedback.previousIndexHtml,
+    });
+    messages.push({
+      role: "user",
+      content: buildRetryUserContent(args.retryFeedback),
+    });
   }
 
   return messages;
@@ -637,7 +878,10 @@ export function buildNarrationOnlyMessages(
   args: BuildNarrationMessagesArgs,
 ): ConversationMessage[] {
   return [
-    { role: "system", content: buildNarrationOnlySystemContent(args.skillBundle) },
+    {
+      role: "system",
+      content: buildNarrationOnlySystemContent(args.skillBundle),
+    },
     { role: "user", content: buildNarrationOnlyUserContent(args) },
   ];
 }
@@ -669,7 +913,11 @@ export function loadSkillBundle(skillsRoot: string): SkillBundle {
 
 export type LlmFn = (conversation: ConversationMessage[]) => Promise<{
   indexHtml: string;
-  narration: Array<{ sceneId: string; startSeconds: number; narrationText: string }>;
+  narration: Array<{
+    sceneId: string;
+    startSeconds: number;
+    narrationText: string;
+  }>;
   notes: string | null;
 }>;
 
@@ -721,7 +969,10 @@ export async function runCompositionLoop(
     if (!validation.ok) {
       const detail = `Missing required markers: ${validation.missing.join(", ")}`;
       errors.push({ attempt, kind: "html_invalid", message: detail });
-      retryFeedback = { previousIndexHtml: llmResponse.indexHtml, errorText: detail };
+      retryFeedback = {
+        previousIndexHtml: llmResponse.indexHtml,
+        errorText: detail,
+      };
       continue;
     }
 
@@ -734,7 +985,10 @@ export async function runCompositionLoop(
         message: `${lintResult.errors.length} lint errors`,
         detail,
       });
-      retryFeedback = { previousIndexHtml: llmResponse.indexHtml, errorText: detail };
+      retryFeedback = {
+        previousIndexHtml: llmResponse.indexHtml,
+        errorText: detail,
+      };
       continue;
     }
 
