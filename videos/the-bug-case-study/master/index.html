@@ -1,0 +1,1192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>The Bug That Kept Cutting Our AI Videos Off — Case Study Explainer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Design tokens — see DESIGN.md for rationale */
+      :root {
+        --void: #050510;
+        --void-elevated: #0d0d1a;
+        --void-line: #1a1a2e;
+        --void-soft: #2a2a40;
+        --paper: #ffffff;
+        --paper-muted: #b5b8cc;
+        --paper-dim: #8a8da8;
+        --signal: #00ff88;
+        --signal-soft: rgba(0, 255, 136, 0.18);
+        --signal-glow: rgba(0, 255, 136, 0.4);
+        --danger: #ff3355;
+        --danger-soft: rgba(255, 51, 85, 0.18);
+        --danger-glow: rgba(255, 51, 85, 0.5);
+        --code: #7dd3fc;
+        --code-soft: rgba(125, 211, 252, 0.15);
+        --warn: #ffb84d;
+        --font-display: "Inter Tight", "Inter", system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+      }
+      [data-composition-id^="bug-case-study"] {
+        position: absolute;
+        inset: 0;
+        background: var(--void);
+        color: var(--paper);
+        font-family: var(--font-display);
+        overflow: hidden;
+      }
+      [data-composition-id^="bug-case-study"]::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.4) 100%);
+        pointer-events: none;
+        z-index: 100;
+      }
+    </style>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 1920px;
+        height: 1080px;
+        background: var(--void);
+        overflow: hidden;
+      }
+
+      /* ============================================================ */
+      /* BEAT 1 — HOOK                                                */
+      /* ============================================================ */
+      .b1-root {
+        position: absolute;
+        inset: 0;
+      }
+      .b1-stage {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 80px;
+      }
+      .b1-waveform {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 280px;
+        width: 1200px;
+        justify-content: center;
+      }
+      .b1-bar {
+        width: 12px;
+        background: var(--paper);
+        border-radius: 6px;
+        transform-origin: center;
+        will-change: transform;
+        box-shadow: 0 0 24px var(--signal-glow);
+      }
+      .b1-headline {
+        font-family: var(--font-display);
+        font-size: 144px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        color: var(--paper);
+        line-height: 1;
+        text-align: center;
+      }
+      .b1-headline .b1-word {
+        display: inline-block;
+      }
+      .b1-headline .b1-bug {
+        color: var(--danger);
+        text-shadow: 0 0 60px var(--danger-glow);
+      }
+      .b1-flash {
+        position: absolute;
+        inset: 0;
+        background: var(--danger);
+        opacity: 0;
+        mix-blend-mode: screen;
+      }
+      .b1-eyebrow {
+        font-family: var(--font-mono);
+        font-size: 18px;
+        font-weight: 500;
+        letter-spacing: 0.4em;
+        color: var(--paper-muted);
+        text-transform: uppercase;
+      }
+      .b1-timecode {
+        position: absolute;
+        top: 60px;
+        left: 96px;
+        font-family: var(--font-mono);
+        font-size: 16px;
+        color: var(--paper-dim);
+        letter-spacing: 0.06em;
+      }
+      .b1-timecode .b1-tc-num {
+        color: var(--paper-muted);
+      }
+
+      /* ============================================================ */
+      /* BEAT 2 — SYMPTOM (two timelines diverge)                     */
+      /* ============================================================ */
+      .b2-root {
+        position: absolute;
+        inset: 0;
+        padding: 80px 96px;
+        box-sizing: border-box;
+      }
+      .b2-label {
+        font-family: var(--font-mono);
+        font-size: 16px;
+        font-weight: 500;
+        letter-spacing: 0.06em;
+        color: var(--paper-muted);
+        text-transform: uppercase;
+      }
+      .b2-stage {
+        display: flex;
+        flex-direction: column;
+        gap: 56px;
+        padding-top: 140px;
+      }
+      .b2-track {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        position: relative;
+      }
+      .b2-track-label {
+        font-family: var(--font-mono);
+        font-size: 22px;
+        font-weight: 500;
+        color: var(--paper-muted);
+        letter-spacing: 0.04em;
+      }
+      .b2-track-canvas {
+        position: relative;
+        height: 120px;
+        background: var(--void-elevated);
+        border: 1px solid var(--void-line);
+        border-radius: 4px;
+      }
+      /* Top track — VIDEO: a solid bar that ends at 30s */
+      .b2-video-bar {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0%;
+        background: linear-gradient(90deg, var(--void-soft), var(--paper-muted));
+        border-right: 3px solid var(--danger);
+      }
+      /* Bottom track — NARRATION: waveform that runs to 42s */
+      .b2-wave-row {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 0 6px;
+        box-sizing: border-box;
+      }
+      .b2-wave-bar {
+        flex: 1;
+        background: var(--paper-muted);
+        border-radius: 2px;
+        will-change: transform;
+      }
+      .b2-wave-bar.b2-overrun {
+        background: var(--danger);
+        box-shadow: 0 0 12px var(--danger-glow);
+      }
+      .b2-cutline {
+        position: absolute;
+        top: -40px;
+        bottom: -40px;
+        width: 2px;
+        background: var(--danger);
+        opacity: 0;
+        box-shadow: 0 0 20px var(--danger-glow);
+      }
+      .b2-cutline-label {
+        position: absolute;
+        top: -76px;
+        font-family: var(--font-mono);
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--danger);
+        white-space: nowrap;
+        transform: translateX(-50%);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        opacity: 0;
+      }
+      .b2-tick-row {
+        display: flex;
+        justify-content: space-between;
+        padding-top: 12px;
+        font-family: var(--font-mono);
+        font-size: 14px;
+        color: var(--paper-dim);
+        letter-spacing: 0.04em;
+      }
+      .b2-tick-row span.b2-target {
+        color: var(--warn);
+        font-weight: 600;
+      }
+      .b2-tick-row span.b2-actual {
+        color: var(--danger);
+        font-weight: 600;
+      }
+      .b2-caption {
+        position: absolute;
+        bottom: 80px;
+        left: 96px;
+        font-family: var(--font-display);
+        font-size: 72px;
+        font-weight: 500;
+        letter-spacing: -0.01em;
+        color: var(--paper);
+        line-height: 1.1;
+      }
+      .b2-caption .b2-word {
+        display: inline-block;
+        margin-right: 0.25em;
+      }
+      .b2-caption .b2-not {
+        color: var(--danger);
+      }
+
+      /* ============================================================ */
+      /* BEAT 3 — ROOT CAUSE (the disagreement)                       */
+      /* ============================================================ */
+      .b3-root {
+        position: absolute;
+        inset: 0;
+        padding: 100px 120px;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 60px;
+      }
+      .b3-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 80px;
+        width: 100%;
+      }
+      .b3-block {
+        background: var(--void-elevated);
+        border: 1px solid var(--void-line);
+        border-radius: 12px;
+        padding: 36px 48px;
+        flex: 0 0 auto;
+        position: relative;
+      }
+      .b3-block-label {
+        font-family: var(--font-mono);
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        color: var(--paper-dim);
+        text-transform: uppercase;
+        margin-bottom: 18px;
+      }
+      .b3-block-content {
+        font-family: var(--font-mono);
+        font-size: 28px;
+        font-weight: 500;
+        color: var(--paper);
+        white-space: nowrap;
+      }
+      .b3-block .b3-attr-key {
+        color: var(--code);
+      }
+      .b3-block .b3-attr-value {
+        color: var(--warn);
+        position: relative;
+        padding: 0 6px;
+      }
+      .b3-block.b3-actual {
+        border-color: var(--danger-soft);
+      }
+      .b3-block.b3-actual .b3-attr-value {
+        color: var(--danger);
+      }
+      .b3-vs {
+        font-family: var(--font-mono);
+        font-size: 56px;
+        font-weight: 700;
+        color: var(--paper-dim);
+        letter-spacing: 0.04em;
+      }
+      .b3-vs-line {
+        height: 2px;
+        background: linear-gradient(90deg, var(--warn), var(--danger));
+        width: 240px;
+        position: relative;
+        transform-origin: left center;
+      }
+      .b3-vs-line::after {
+        content: "≠";
+        position: absolute;
+        top: -40px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-family: var(--font-mono);
+        font-size: 56px;
+        font-weight: 700;
+        color: var(--danger);
+        background: var(--void);
+        padding: 0 16px;
+      }
+      .b3-caption {
+        font-family: var(--font-display);
+        font-size: 64px;
+        font-weight: 500;
+        letter-spacing: -0.01em;
+        color: var(--paper);
+        text-align: center;
+      }
+      .b3-caption .b3-word {
+        display: inline-block;
+        margin-right: 0.25em;
+      }
+      .b3-caption .b3-reconcile {
+        color: var(--danger);
+      }
+
+      /* ============================================================ */
+      /* BEAT 4 — THE FIX (extendCompositionDuration)                 */
+      /* ============================================================ */
+      .b4-root {
+        position: absolute;
+        inset: 0;
+        padding: 80px 96px;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 80px;
+        align-items: center;
+      }
+      .b4-left {
+        display: flex;
+        flex-direction: column;
+        gap: 28px;
+      }
+      .b4-section-label {
+        font-family: var(--font-mono);
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        color: var(--paper-dim);
+        text-transform: uppercase;
+      }
+      .b4-section-label .b4-section-accent {
+        color: var(--signal);
+      }
+      .b4-code-panel {
+        background: var(--void-elevated);
+        border: 1px solid var(--void-line);
+        border-left: 3px solid var(--signal);
+        border-radius: 10px;
+        padding: 36px 40px;
+        font-family: var(--font-mono);
+        font-size: 22px;
+        line-height: 1.7;
+        color: var(--paper);
+      }
+      .b4-code-line {
+        white-space: nowrap;
+      }
+      .b4-code-token-keyword {
+        color: var(--code);
+      }
+      .b4-code-token-fn {
+        color: var(--signal);
+        font-weight: 600;
+      }
+      .b4-code-token-arg {
+        color: var(--paper-muted);
+      }
+      .b4-code-token-comment {
+        color: var(--paper-dim);
+        font-style: italic;
+      }
+      .b4-right {
+        display: flex;
+        flex-direction: column;
+        gap: 26px;
+      }
+      .b4-target {
+        background: var(--void-elevated);
+        border: 1px solid var(--void-line);
+        border-radius: 10px;
+        padding: 22px 30px;
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        position: relative;
+        opacity: 0.35;
+      }
+      .b4-target.b4-fired {
+        opacity: 1;
+        border-color: var(--signal);
+        background: linear-gradient(90deg, var(--void-elevated), var(--signal-soft));
+        box-shadow: 0 0 40px var(--signal-glow);
+      }
+      .b4-target-icon {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--paper-dim);
+        flex: 0 0 14px;
+        position: relative;
+      }
+      .b4-target.b4-fired .b4-target-icon {
+        background: var(--signal);
+        box-shadow: 0 0 16px var(--signal-glow);
+      }
+      .b4-target-label {
+        font-family: var(--font-mono);
+        font-size: 22px;
+        font-weight: 500;
+        color: var(--paper-muted);
+        letter-spacing: 0.02em;
+        flex: 1;
+      }
+      .b4-target.b4-fired .b4-target-label {
+        color: var(--paper);
+      }
+      .b4-target-values {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-family: var(--font-mono);
+        font-size: 22px;
+        font-weight: 600;
+      }
+      .b4-target-old {
+        color: var(--warn);
+        text-decoration: line-through;
+        text-decoration-color: var(--danger);
+        opacity: 0.7;
+      }
+      .b4-target-arrow {
+        color: var(--paper-dim);
+      }
+      .b4-target-new {
+        color: var(--signal);
+        opacity: 0;
+      }
+      .b4-target.b4-fired .b4-target-new {
+        opacity: 1;
+      }
+      .b4-fn-title {
+        font-family: var(--font-display);
+        font-size: 28px;
+        font-weight: 500;
+        color: var(--paper);
+        letter-spacing: -0.01em;
+      }
+      .b4-fn-title .b4-fn-name {
+        font-family: var(--font-mono);
+        color: var(--signal);
+        font-weight: 600;
+        font-size: 24px;
+      }
+
+      /* ============================================================ */
+      /* BEAT 5 — RESULT                                              */
+      /* ============================================================ */
+      .b5-root {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 56px;
+        padding: 80px;
+        box-sizing: border-box;
+      }
+      .b5-eyebrow {
+        font-family: var(--font-mono);
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.32em;
+        color: var(--signal);
+        text-transform: uppercase;
+      }
+      .b5-big {
+        font-family: var(--font-display);
+        font-size: 320px;
+        font-weight: 700;
+        letter-spacing: -0.04em;
+        color: var(--signal);
+        line-height: 0.9;
+        text-shadow: 0 0 80px var(--signal-glow);
+      }
+      .b5-big-unit {
+        font-size: 120px;
+        color: var(--paper);
+        font-weight: 500;
+      }
+      .b5-subcap {
+        font-family: var(--font-display);
+        font-size: 48px;
+        font-weight: 500;
+        color: var(--paper);
+        letter-spacing: -0.005em;
+        text-align: center;
+      }
+      .b5-stats {
+        display: flex;
+        gap: 96px;
+        padding-top: 32px;
+      }
+      .b5-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .b5-stat-num {
+        font-family: var(--font-display);
+        font-size: 80px;
+        font-weight: 700;
+        color: var(--paper);
+        font-variant-numeric: tabular-nums;
+      }
+      .b5-stat-num.b5-zero {
+        color: var(--signal);
+      }
+      .b5-stat-label {
+        font-family: var(--font-mono);
+        font-size: 16px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        color: var(--paper-muted);
+        text-transform: uppercase;
+        text-align: center;
+        line-height: 1.4;
+      }
+
+      /* ============================================================ */
+      /* BEAT 6 — LESSON + CTA                                        */
+      /* ============================================================ */
+      .b6-root {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 80px;
+        box-sizing: border-box;
+      }
+      .b6-stage {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0;
+        position: relative;
+        width: 100%;
+        height: 100%;
+        justify-content: center;
+      }
+      .b6-quote {
+        font-family: var(--font-display);
+        font-size: 96px;
+        font-weight: 500;
+        line-height: 1.12;
+        letter-spacing: -0.02em;
+        color: var(--paper);
+        text-align: center;
+        max-width: 1500px;
+        margin: 0 auto;
+      }
+      .b6-quote .b6-word {
+        display: inline-block;
+        margin-right: 0.22em;
+      }
+      .b6-quote .b6-key {
+        color: var(--signal);
+      }
+      .b6-quote-mark {
+        font-family: var(--font-display);
+        font-size: 240px;
+        font-weight: 700;
+        color: var(--signal);
+        line-height: 0.6;
+        opacity: 0.6;
+        margin-bottom: -40px;
+        text-align: center;
+      }
+      .b6-cta {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        align-items: center;
+        gap: 64px;
+        opacity: 0;
+        background: var(--void-elevated);
+        border: 1px solid var(--void-line);
+        border-radius: 24px;
+        padding: 56px 72px;
+      }
+      .b6-qr {
+        width: 240px;
+        height: 240px;
+        background: var(--paper);
+        border-radius: 16px;
+        padding: 20px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 240px;
+      }
+      .b6-qr svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .b6-qr svg path {
+        stroke: var(--void) !important;
+      }
+      .b6-cta-text {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .b6-cta-eyebrow {
+        font-family: var(--font-mono);
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.24em;
+        color: var(--signal);
+        text-transform: uppercase;
+      }
+      .b6-cta-title {
+        font-family: var(--font-display);
+        font-size: 44px;
+        font-weight: 500;
+        color: var(--paper);
+        letter-spacing: -0.015em;
+        line-height: 1.1;
+        max-width: 540px;
+      }
+      .b6-cta-url {
+        font-family: var(--font-mono);
+        font-size: 28px;
+        color: var(--paper-muted);
+        letter-spacing: 0.02em;
+      }
+      .b6-cta-url .b6-cta-url-accent {
+        color: var(--signal);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="stage"
+      data-composition-id="bug-case-study-master"
+      data-start="0"
+      data-duration="52"
+      data-width="1920"
+      data-height="1080"
+    >
+      <!-- BEAT 1: HOOK -->
+      <div id="beat-1-hook" class="clip b1-root" data-start="0" data-duration="6.1" data-track-index="0">
+        <div class="b1-stage">
+          <div class="b1-eyebrow">PART 02 · CASE STUDY</div>
+          <div class="b1-waveform" id="b1-waveform"></div>
+          <div class="b1-headline">
+            <span class="b1-word">We</span>
+            <span class="b1-word">shipped</span>
+            <span class="b1-word">a</span>
+            <span class="b1-word b1-bug">bug.</span>
+          </div>
+        </div>
+        <div class="b1-flash"></div>
+        <div class="b1-timecode">
+          <span class="b1-tc-num">00:00:00</span> · master cut
+        </div>
+      </div>
+
+      <!-- BEAT 2: SYMPTOM -->
+      <div id="beat-2-symptom" class="clip b2-root" data-start="6.1" data-duration="6.1" data-track-index="0">
+        <div class="b2-label">amplifier-video-worker / production · 2026-05-19</div>
+        <div class="b2-stage">
+          <!-- Top track: VIDEO timeline -->
+          <div class="b2-track">
+            <div class="b2-track-label">VIDEO ▸ data-duration=&quot;30&quot;</div>
+            <div class="b2-track-canvas" id="b2-video-canvas">
+              <div class="b2-video-bar"></div>
+              <div class="b2-cutline" style="left: 71.4%">
+                <div class="b2-cutline-label">video ends</div>
+              </div>
+            </div>
+          </div>
+          <!-- Bottom track: NARRATION audio -->
+          <div class="b2-track">
+            <div class="b2-track-label">NARRATION ▸ elevenlabs.mp3 (42s actual)</div>
+            <div class="b2-track-canvas" id="b2-narration-canvas">
+              <div class="b2-wave-row" id="b2-wave-row"></div>
+              <div class="b2-cutline" style="left: 71.4%">
+                <div class="b2-cutline-label" style="top: 100%; padding-top: 12px">truncated here</div>
+              </div>
+            </div>
+            <div class="b2-tick-row">
+              <span>0s</span>
+              <span>10s</span>
+              <span>20s</span>
+              <span class="b2-target">30s TARGET</span>
+              <span class="b2-actual">42s ACTUAL</span>
+            </div>
+          </div>
+        </div>
+        <div class="b2-caption">
+          <span class="b2-word">The</span>
+          <span class="b2-word">visuals</span>
+          <span class="b2-word">finished.</span>
+          <span class="b2-word">The</span>
+          <span class="b2-word">voice</span>
+          <span class="b2-word b2-not">did&nbsp;not.</span>
+        </div>
+      </div>
+
+      <!-- BEAT 3: ROOT CAUSE -->
+      <div id="beat-3-root-cause" class="clip b3-root" data-start="12.2" data-duration="4.8" data-track-index="0">
+        <div class="b3-row">
+          <div class="b3-block">
+            <div class="b3-block-label">LLM authors HTML</div>
+            <div class="b3-block-content">
+              <span class="b3-attr-key">data-duration</span>=<span class="b3-attr-value">"30"</span>
+            </div>
+          </div>
+          <div class="b3-vs-line"></div>
+          <div class="b3-block b3-actual">
+            <div class="b3-block-label">ElevenLabs returns</div>
+            <div class="b3-block-content">
+              <span class="b3-attr-key">narration.mp3</span> → <span class="b3-attr-value">42s</span>
+            </div>
+          </div>
+        </div>
+        <div class="b3-caption">
+          <span class="b3-word">Two</span>
+          <span class="b3-word">systems.</span>
+          <span class="b3-word">Two</span>
+          <span class="b3-word">durations.</span>
+          <span class="b3-word b3-reconcile">No reconciliation.</span>
+        </div>
+      </div>
+
+      <!-- BEAT 4: THE FIX -->
+      <div id="beat-4-the-fix" class="clip b4-root" data-start="17" data-duration="11.3" data-track-index="0">
+        <div class="b4-left">
+          <div class="b4-section-label">The <span class="b4-section-accent">fix</span> · packages/amplify-video-worker/src/composition.ts</div>
+          <div class="b4-code-panel">
+            <div class="b4-code-line"><span class="b4-code-token-keyword">export function</span> <span class="b4-code-token-fn">extendCompositionDuration</span>(</div>
+            <div class="b4-code-line">&nbsp;&nbsp;<span class="b4-code-token-arg">html</span>: string,</div>
+            <div class="b4-code-line">&nbsp;&nbsp;<span class="b4-code-token-arg">actualDurationSeconds</span>: number,</div>
+            <div class="b4-code-line">): {</div>
+            <div class="b4-code-line">&nbsp;&nbsp;html: string;</div>
+            <div class="b4-code-line">&nbsp;&nbsp;extended: boolean;</div>
+            <div class="b4-code-line">&nbsp;&nbsp;modifications: Array&lt;{ target: string; from: number; to: number }&gt;;</div>
+            <div class="b4-code-line">}</div>
+            <div class="b4-code-line" style="margin-top: 18px"><span class="b4-code-token-comment">// pure. one job. no DOM.</span></div>
+          </div>
+        </div>
+        <div class="b4-right">
+          <div class="b4-fn-title">Rewrite <span class="b4-fn-name">data-duration</span> on three elements:</div>
+          <div class="b4-target" id="b4-target-1">
+            <div class="b4-target-icon"></div>
+            <div class="b4-target-label">root composition</div>
+            <div class="b4-target-values">
+              <span class="b4-target-old">30</span>
+              <span class="b4-target-arrow">→</span>
+              <span class="b4-target-new">42</span>
+            </div>
+          </div>
+          <div class="b4-target" id="b4-target-2">
+            <div class="b4-target-icon"></div>
+            <div class="b4-target-label">narration track</div>
+            <div class="b4-target-values">
+              <span class="b4-target-old">30</span>
+              <span class="b4-target-arrow">→</span>
+              <span class="b4-target-new">42</span>
+            </div>
+          </div>
+          <div class="b4-target" id="b4-target-3">
+            <div class="b4-target-icon"></div>
+            <div class="b4-target-label">last scene clip</div>
+            <div class="b4-target-values">
+              <span class="b4-target-old">30</span>
+              <span class="b4-target-arrow">→</span>
+              <span class="b4-target-new">42</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BEAT 5: RESULT -->
+      <div id="beat-5-result" class="clip b5-root" data-start="28.3" data-duration="7.2" data-track-index="0">
+        <div class="b5-eyebrow">POST-FIX · MEDIAN DEVIATION</div>
+        <div class="b5-big">≤ 0.2<span class="b5-big-unit">s</span></div>
+        <div class="b5-subcap">timelines now match narration length</div>
+        <div class="b5-stats">
+          <div class="b5-stat">
+            <div class="b5-stat-num b5-zero">0</div>
+            <div class="b5-stat-label">truncated videos<br/>in 48 hours</div>
+          </div>
+          <div class="b5-stat">
+            <div class="b5-stat-num">9</div>
+            <div class="b5-stat-label">tests covering<br/>the rewriter</div>
+          </div>
+          <div class="b5-stat">
+            <div class="b5-stat-num">1</div>
+            <div class="b5-stat-label">pure function,<br/>one call site</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BEAT 6: LESSON + CTA -->
+      <div id="beat-6-lesson-cta" class="clip b6-root" data-start="35.5" data-duration="16.5" data-track-index="0">
+        <div class="b6-stage">
+          <div class="b6-quote-mark">"</div>
+          <div class="b6-quote">
+            <span class="b6-word">When</span>
+            <span class="b6-word">the</span>
+            <span class="b6-word">model</span>
+            <span class="b6-word b6-key">owns</span>
+            <span class="b6-word">a</span>
+            <span class="b6-word">dimension,</span>
+            <br/>
+            <span class="b6-word">audit</span>
+            <span class="b6-word">every</span>
+            <span class="b6-word">dimension</span>
+            <span class="b6-word">that</span>
+            <span class="b6-word b6-key">depends</span>
+            <span class="b6-word">on</span>
+            <span class="b6-word">it.</span>
+          </div>
+          <div class="b6-cta">
+            <div class="b6-qr" id="b6-qr"></div>
+            <div class="b6-cta-text">
+              <div class="b6-cta-eyebrow">SCAN TO READ THE CASE STUDY</div>
+              <div class="b6-cta-title">The Bug That Kept Cutting Our AI Videos Off</div>
+              <div class="b6-cta-url"><span class="b6-cta-url-accent">aicoe.fit</span>/the-bug-that-kept-cutting-our-ai</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AUDIO NARRATION -->
+      <audio
+        id="narration-track"
+        data-start="4.5"
+        data-duration="36.08"
+        data-track-index="1"
+        data-volume="1.0"
+        src="narration/master-narration.mp3"
+      ></audio>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const SCOPE = '[data-composition-id="bug-case-study-master"] ';
+      const sel = (s) => SCOPE + s;
+
+      // -------- Build dynamic waveform bars for Beat 1 --------
+      (function buildB1Waveform() {
+        const root = document.getElementById("b1-waveform");
+        if (!root) return;
+        const N = 64;
+        // Deterministic pseudo-random amplitudes via mulberry32
+        let seed = 1234567;
+        function rand() {
+          seed |= 0;
+          seed = (seed + 0x6d2b79f5) | 0;
+          let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        for (let i = 0; i < N; i++) {
+          const bar = document.createElement("div");
+          bar.className = "b1-bar";
+          // base height varies; the timeline will pulse via scaleY
+          const baseHeight = 30 + Math.floor(rand() * 220);
+          bar.style.height = baseHeight + "px";
+          bar.dataset.phase = String(i * 0.12);
+          bar.dataset.amp = String(0.4 + rand() * 0.5);
+          root.appendChild(bar);
+        }
+      })();
+
+      // -------- Build dynamic narration waveform for Beat 2 --------
+      (function buildB2Waveform() {
+        const row = document.getElementById("b2-wave-row");
+        if (!row) return;
+        // 42 bars representing 42 seconds of audio. Bars 0-29 are within target, 30-41 are overrun.
+        const N = 84; // 2 bars per second visual density
+        let seed = 91011;
+        function rand() {
+          seed |= 0;
+          seed = (seed + 0x6d2b79f5) | 0;
+          let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        const overrunStart = Math.floor(N * (30 / 42));
+        for (let i = 0; i < N; i++) {
+          const bar = document.createElement("div");
+          bar.className = "b2-wave-bar" + (i >= overrunStart ? " b2-overrun" : "");
+          const h = 18 + Math.floor(rand() * 90);
+          bar.style.height = h + "px";
+          row.appendChild(bar);
+        }
+      })();
+
+      // -------- Inject QR SVG into Beat 6 --------
+      (function injectQR() {
+        const slot = document.getElementById("b6-qr");
+        if (!slot) return;
+        // Use fetch synchronously? No — we use XHR fallback to keep init sync-friendly.
+        // The runtime reads __timelines synchronously, so we inline the QR fetch with XHR.
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "assets/qr-article.svg", false); // sync
+        try {
+          xhr.send();
+          if (xhr.status === 200 || xhr.status === 0) {
+            slot.innerHTML = xhr.responseText;
+          }
+        } catch (e) {
+          // fall back: tiny placeholder
+          slot.innerHTML = '<svg viewBox="0 0 1 1"><rect width="1" height="1" fill="#000"/></svg>';
+        }
+      })();
+
+      // ============================================================
+      // MASTER timeline — all beats on one timeline, absolute master_t
+      // ============================================================
+      const tl = gsap.timeline({ paused: true });
+
+      // Beat offsets (master_t in seconds)
+      const B1 = 0;       // HOOK
+      const B2 = 6.1;     // SYMPTOM
+      const B3 = 12.2;    // ROOT CAUSE
+      const B4 = 17.0;    // THE FIX
+      const B5 = 28.3;    // RESULT
+      const B6 = 35.5;    // LESSON + CTA
+
+      // ---------- BEAT 1 — HOOK ----------
+      tl.from(sel(".b1-eyebrow"), { opacity: 0, y: 8, duration: 0.5, ease: "power2.out" }, B1);
+
+      // Waveform bars pulse — each bar oscillates scaleY with phase offset
+      const b1Bars = document.querySelectorAll(sel(".b1-bar"));
+      b1Bars.forEach((bar, i) => {
+        const phase = parseFloat(bar.dataset.phase || "0");
+        const amp = parseFloat(bar.dataset.amp || "0.6");
+        tl.set(bar, { scaleY: 0.2, opacity: 0 }, B1);
+        tl.to(bar, { opacity: 1, duration: 0.4, ease: "power2.out" }, B1 + 0.3 + i * 0.012);
+        const cycle = 0.42;
+        const cycles = Math.ceil(4.3 / cycle);
+        for (let c = 0; c < cycles; c++) {
+          const startT = B1 + 0.5 + c * cycle + (phase % cycle);
+          tl.to(bar, { scaleY: amp + 0.3, duration: cycle / 2, ease: "sine.inOut" }, startT);
+          tl.to(bar, { scaleY: 0.25, duration: cycle / 2, ease: "sine.inOut" }, startT + cycle / 2);
+        }
+      });
+
+      // Headline reveals at ~4.5s into beat 1 (sync to "We shipped a bug")
+      tl.from(sel(".b1-word"), { y: 60, opacity: 0, duration: 0.5, ease: "power3.out", stagger: 0.12 }, B1 + 4.5);
+
+      // At ~5.85s, bars freeze → danger color → collapse
+      tl.to(sel(".b1-bar"), { backgroundColor: "var(--danger)", duration: 0.1, ease: "power4.in" }, B1 + 5.85);
+      tl.to(sel(".b1-bar"), { opacity: 0, scaleY: 0.05, duration: 0.2, ease: "power4.in" }, B1 + 5.95);
+
+      // Danger flash
+      tl.to(sel(".b1-flash"), { opacity: 0.25, duration: 0.08, ease: "power4.in" }, B1 + 5.9);
+      tl.to(sel(".b1-flash"), { opacity: 0, duration: 0.2, ease: "power2.out" }, B1 + 5.98);
+
+      // ---------- BEAT 2 — SYMPTOM ----------
+      tl.from(sel(".b2-label"), { opacity: 0, y: -8, duration: 0.4, ease: "power2.out" }, B2);
+      tl.from(sel(".b2-track-label"), { opacity: 0, x: -20, duration: 0.4, ease: "power2.out", stagger: 0.15 }, B2 + 0.3);
+
+      // Video bar grows to 71.4% (30 of 42)
+      tl.to(sel(".b2-video-bar"), { width: "71.4%", duration: 1.2, ease: "power2.out" }, B2 + 0.5);
+
+      // Narration waveform bars reveal left-to-right (animate FROM hidden state)
+      tl.fromTo(sel(".b2-wave-bar"),
+        { opacity: 0, scaleY: 0.1, transformOrigin: "center" },
+        { opacity: 1, scaleY: 1, duration: 0.5, ease: "power2.out", stagger: 0.012 },
+        B2 + 0.7);
+
+      // Tick row
+      tl.from(sel(".b2-tick-row"), { opacity: 0, y: 10, duration: 0.4, ease: "power2.out" }, B2 + 1.5);
+
+      // Cutlines + labels appear at ~2.5s
+      tl.to(sel(".b2-cutline"), { opacity: 1, duration: 0.3, ease: "power3.out" }, B2 + 2.5);
+      tl.to(sel(".b2-cutline-label"), { opacity: 1, duration: 0.4, ease: "power2.out" }, B2 + 2.7);
+
+      // Overrun bars pulse danger glow
+      tl.to(sel(".b2-wave-bar.b2-overrun"), {
+        boxShadow: "0 0 24px var(--danger-glow)",
+        duration: 0.6, ease: "sine.inOut", yoyo: true, repeat: 3,
+      }, B2 + 2.5);
+
+      // Caption word-by-word (slight lead before "The visuals finished")
+      tl.from(sel(".b2-caption .b2-word"), {
+        y: 30, opacity: 0, duration: 0.45, ease: "power3.out", stagger: 0.13,
+      }, B2 + 2.8);
+
+      // ---------- BEAT 3 — ROOT CAUSE ----------
+      tl.from(sel(".b3-row .b3-block:first-child"), {
+        x: -40, opacity: 0, duration: 0.5, ease: "power3.out",
+      }, B3 + 0.2);
+      tl.from(sel(".b3-vs-line"), {
+        scaleX: 0, duration: 0.5, ease: "power2.inOut", transformOrigin: "left center",
+      }, B3 + 0.7);
+      tl.from(sel(".b3-row .b3-block:last-child"), {
+        x: 40, opacity: 0, duration: 0.5, ease: "power3.out",
+      }, B3 + 1.0);
+
+      // Pulse the values
+      tl.to(sel(".b3-block:first-child .b3-attr-value"), {
+        scale: 1.15, duration: 0.2, yoyo: true, repeat: 1, ease: "power2.inOut",
+      }, B3 + 1.6);
+      tl.to(sel(".b3-block:last-child .b3-attr-value"), {
+        scale: 1.15, duration: 0.2, yoyo: true, repeat: 1, ease: "power2.inOut",
+      }, B3 + 1.8);
+
+      // Caption
+      tl.from(sel(".b3-caption .b3-word"), {
+        y: 28, opacity: 0, duration: 0.45, ease: "power3.out", stagger: 0.13,
+      }, B3 + 2.4);
+
+      // ---------- BEAT 4 — THE FIX ----------
+      tl.from(sel(".b4-section-label"), { opacity: 0, y: -8, duration: 0.4, ease: "power2.out" }, B4);
+      tl.from(sel(".b4-code-panel"), { x: -40, opacity: 0, duration: 0.6, ease: "power3.out" }, B4 + 0.2);
+      tl.from(sel(".b4-code-line"), {
+        opacity: 0, y: 8, duration: 0.3, ease: "power2.out", stagger: 0.08,
+      }, B4 + 0.5);
+      tl.from(sel(".b4-fn-title"), { opacity: 0, x: 30, duration: 0.5, ease: "power3.out" }, B4 + 1.4);
+
+      // Three target boxes enter in dimmed (unfired) state
+      tl.fromTo(sel(".b4-target"),
+        { opacity: 0, x: 40 },
+        { opacity: 0.35, x: 0, duration: 0.5, ease: "power3.out", stagger: 0.15 },
+        B4 + 1.7);
+
+      // Fire each target one-by-one in sync with "Root. Narration track. Last scene."
+      // Narration says these around master_t ~25-27 → beat_t ~8-10
+      const fireTarget = (id, beatT) => {
+        tl.to(sel("#" + id), {
+          opacity: 1,
+          duration: 0.01,
+          onComplete: () => {
+            const el = document.getElementById(id);
+            if (el) el.classList.add("b4-fired");
+          },
+        }, B4 + beatT);
+        tl.fromTo(sel("#" + id),
+          { scale: 1.0 },
+          { scale: 1.04, duration: 0.2, yoyo: true, repeat: 1, ease: "power2.inOut" },
+          B4 + beatT);
+      };
+      fireTarget("b4-target-1", 6.8);
+      fireTarget("b4-target-2", 7.8);
+      fireTarget("b4-target-3", 8.8);
+
+      // ---------- BEAT 5 — RESULT ----------
+      tl.from(sel(".b5-eyebrow"), { opacity: 0, y: -8, duration: 0.4, ease: "power2.out" }, B5);
+      tl.from(sel(".b5-big"), {
+        scale: 0.85, opacity: 0, duration: 0.7, ease: "back.out(1.6)",
+      }, B5 + 0.3);
+      tl.to(sel(".b5-big"), {
+        textShadow: "0 0 120px var(--signal-glow)",
+        duration: 1.2, ease: "sine.inOut", yoyo: true, repeat: 2,
+      }, B5 + 1.2);
+      tl.from(sel(".b5-subcap"), { opacity: 0, y: 24, duration: 0.5, ease: "power3.out" }, B5 + 1.0);
+      tl.from(sel(".b5-stat"), {
+        opacity: 0, y: 30, duration: 0.5, ease: "power3.out", stagger: 0.18,
+      }, B5 + 1.8);
+
+      // Stat numbers tick from 0
+      const tickStat = (selector, target, beatT) => {
+        const el = document.querySelector(sel(selector));
+        if (!el) return;
+        const obj = { v: 0 };
+        tl.to(obj, {
+          v: target,
+          duration: 0.8,
+          ease: "power2.out",
+          snap: { v: 1 },
+          onUpdate: () => { el.textContent = Math.round(obj.v); },
+        }, B5 + beatT);
+      };
+      tickStat(".b5-stat:nth-child(1) .b5-stat-num", 0, 1.9);
+      tickStat(".b5-stat:nth-child(2) .b5-stat-num", 9, 2.05);
+      tickStat(".b5-stat:nth-child(3) .b5-stat-num", 1, 2.2);
+
+      // ---------- BEAT 6 — LESSON + CTA ----------
+      // Beat duration: 16.5s. Narration ends at beat_t=5.08.
+      // 0.0-5.5s: quote reveals + holds
+      // 5.5-6.1s: quote exits (fade + scale out)
+      // 5.9-6.8s: CTA card slides into center (overlaps tail of exit)
+      // 6.8-15.5s: hold for scanning (~8.7s of clear time + ambient breath)
+      // 15.5-16.5s: final fade to black
+
+      tl.from(sel(".b6-quote-mark"), {
+        opacity: 0, y: 60, scale: 0.6, duration: 0.6, ease: "back.out(2)",
+      }, B6 + 0.2);
+      tl.from(sel(".b6-quote .b6-word"), {
+        y: 40, opacity: 0, duration: 0.5, ease: "power3.out", stagger: 0.16,
+      }, B6 + 0.5);
+
+      // Quote exits as narration finishes
+      tl.to(sel(".b6-quote, .b6-quote-mark"), {
+        opacity: 0, y: -40, scale: 0.94, duration: 0.6, ease: "power2.in",
+      }, B6 + 5.5);
+
+      // CTA card enters center — overlaps the tail of the quote exit for a smooth handoff
+      tl.fromTo(sel(".b6-cta"),
+        { opacity: 0, y: 40, scale: 0.94 },
+        { opacity: 1, y: 0, scale: 1.0, duration: 0.9, ease: "power3.out" },
+        B6 + 5.9);
+
+      // QR glow pulse on entry
+      tl.fromTo(sel(".b6-qr"),
+        { boxShadow: "0 0 0 0 rgba(0,255,136,0)" },
+        { boxShadow: "0 0 60px 12px rgba(0,255,136,0.4)", duration: 0.5, yoyo: true, repeat: 1, ease: "sine.inOut" },
+        B6 + 6.6);
+
+      // Ambient slow breath on CTA — fits within the hold window
+      tl.to(sel(".b6-cta"), {
+        scale: 1.015, duration: 2.2, ease: "sine.inOut", yoyo: true, repeat: 3,
+      }, B6 + 7.5);
+
+      // Final fade-to-black
+      tl.to(sel(".b6-root"), { opacity: 0, duration: 1.0, ease: "power2.in" }, B6 + 15.5);
+
+      window.__timelines["bug-case-study-master"] = tl;
+    </script>
+  </body>
+</html>

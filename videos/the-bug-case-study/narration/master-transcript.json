@@ -1,0 +1,407 @@
+{
+  "voiceId": "nPczCjzI2devNBz1zQrb",
+  "modelId": "eleven_multilingual_v2",
+  "totalDurationSeconds": 36.084,
+  "words": [
+    {
+      "text": "Last",
+      "start": 0,
+      "end": 0.337
+    },
+    {
+      "text": "week,",
+      "start": 0.383,
+      "end": 0.569
+    },
+    {
+      "text": "we",
+      "start": 0.592,
+      "end": 0.662
+    },
+    {
+      "text": "shipped",
+      "start": 0.708,
+      "end": 0.929
+    },
+    {
+      "text": "a",
+      "start": 0.952,
+      "end": 0.975
+    },
+    {
+      "text": "bug.",
+      "start": 1.022,
+      "end": 1.451
+    },
+    {
+      "text": "Our",
+      "start": 1.834,
+      "end": 2.009
+    },
+    {
+      "text": "AI-generated",
+      "start": 2.078,
+      "end": 2.926
+    },
+    {
+      "text": "videos",
+      "start": 2.972,
+      "end": 3.379
+    },
+    {
+      "text": "cut",
+      "start": 3.437,
+      "end": 3.576
+    },
+    {
+      "text": "off",
+      "start": 3.622,
+      "end": 3.738
+    },
+    {
+      "text": "mid-sentence.",
+      "start": 3.82,
+      "end": 4.69
+    },
+    {
+      "text": "The",
+      "start": 5.016,
+      "end": 5.132
+    },
+    {
+      "text": "visuals",
+      "start": 5.19,
+      "end": 5.631
+    },
+    {
+      "text": "finished.",
+      "start": 5.689,
+      "end": 6.223
+    },
+    {
+      "text": "The",
+      "start": 6.548,
+      "end": 6.664
+    },
+    {
+      "text": "voice",
+      "start": 6.722,
+      "end": 6.954
+    },
+    {
+      "text": "did",
+      "start": 6.989,
+      "end": 7.129
+    },
+    {
+      "text": "not.",
+      "start": 7.187,
+      "end": 7.57
+    },
+    {
+      "text": "The",
+      "start": 7.953,
+      "end": 8.069
+    },
+    {
+      "text": "model",
+      "start": 8.127,
+      "end": 8.359
+    },
+    {
+      "text": "locked",
+      "start": 8.44,
+      "end": 8.684
+    },
+    {
+      "text": "the",
+      "start": 8.707,
+      "end": 8.777
+    },
+    {
+      "text": "duration.",
+      "start": 8.812,
+      "end": 9.451
+    },
+    {
+      "text": "Then",
+      "start": 9.834,
+      "end": 10.019
+    },
+    {
+      "text": "ElevenLabs",
+      "start": 10.089,
+      "end": 10.774
+    },
+    {
+      "text": "ran",
+      "start": 10.832,
+      "end": 11.029
+    },
+    {
+      "text": "longer",
+      "start": 11.099,
+      "end": 11.378
+    },
+    {
+      "text": "than",
+      "start": 11.424,
+      "end": 11.54
+    },
+    {
+      "text": "it",
+      "start": 11.587,
+      "end": 11.645
+    },
+    {
+      "text": "said",
+      "start": 11.691,
+      "end": 11.854
+    },
+    {
+      "text": "it",
+      "start": 11.889,
+      "end": 11.947
+    },
+    {
+      "text": "would.",
+      "start": 11.981,
+      "end": 12.307
+    },
+    {
+      "text": "The",
+      "start": 12.69,
+      "end": 12.817
+    },
+    {
+      "text": "fix:",
+      "start": 12.91,
+      "end": 13.514
+    },
+    {
+      "text": "one",
+      "start": 13.723,
+      "end": 14.013
+    },
+    {
+      "text": "pure",
+      "start": 14.083,
+      "end": 14.373
+    },
+    {
+      "text": "function.",
+      "start": 14.431,
+      "end": 15.023
+    },
+    {
+      "text": "After",
+      "start": 15.464,
+      "end": 15.789
+    },
+    {
+      "text": "the",
+      "start": 15.836,
+      "end": 15.905
+    },
+    {
+      "text": "voice",
+      "start": 15.952,
+      "end": 16.172
+    },
+    {
+      "text": "came",
+      "start": 16.207,
+      "end": 16.393
+    },
+    {
+      "text": "back,",
+      "start": 16.428,
+      "end": 16.834
+    },
+    {
+      "text": "rewrite",
+      "start": 17.078,
+      "end": 17.542
+    },
+    {
+      "text": "data-duration",
+      "start": 17.589,
+      "end": 18.344
+    },
+    {
+      "text": "on",
+      "start": 18.425,
+      "end": 18.541
+    },
+    {
+      "text": "three",
+      "start": 18.599,
+      "end": 18.808
+    },
+    {
+      "text": "elements.",
+      "start": 18.843,
+      "end": 19.4
+    },
+    {
+      "text": "Root.",
+      "start": 20.004,
+      "end": 20.433
+    },
+    {
+      "text": "Narration",
+      "start": 20.944,
+      "end": 21.467
+    },
+    {
+      "text": "track.",
+      "start": 21.525,
+      "end": 21.977
+    },
+    {
+      "text": "Last",
+      "start": 22.674,
+      "end": 22.976
+    },
+    {
+      "text": "scene.",
+      "start": 23.034,
+      "end": 23.533
+    },
+    {
+      "text": "Timelines",
+      "start": 24.137,
+      "end": 24.775
+    },
+    {
+      "text": "now",
+      "start": 24.868,
+      "end": 25.043
+    },
+    {
+      "text": "match",
+      "start": 25.159,
+      "end": 25.426
+    },
+    {
+      "text": "within",
+      "start": 25.472,
+      "end": 25.751
+    },
+    {
+      "text": "zero",
+      "start": 25.844,
+      "end": 26.192
+    },
+    {
+      "text": "point",
+      "start": 26.273,
+      "end": 26.494
+    },
+    {
+      "text": "two",
+      "start": 26.54,
+      "end": 26.703
+    },
+    {
+      "text": "seconds.",
+      "start": 26.784,
+      "end": 27.423
+    },
+    {
+      "text": "Zero",
+      "start": 28.119,
+      "end": 28.56
+    },
+    {
+      "text": "truncated",
+      "start": 28.63,
+      "end": 29.199
+    },
+    {
+      "text": "videos",
+      "start": 29.257,
+      "end": 29.768
+    },
+    {
+      "text": "in",
+      "start": 29.814,
+      "end": 29.872
+    },
+    {
+      "text": "forty-eight",
+      "start": 29.942,
+      "end": 30.337
+    },
+    {
+      "text": "hours.",
+      "start": 30.36,
+      "end": 30.847
+    },
+    {
+      "text": "When",
+      "start": 31.289,
+      "end": 31.474
+    },
+    {
+      "text": "the",
+      "start": 31.509,
+      "end": 31.579
+    },
+    {
+      "text": "model",
+      "start": 31.649,
+      "end": 31.997
+    },
+    {
+      "text": "owns",
+      "start": 32.078,
+      "end": 32.31
+    },
+    {
+      "text": "a",
+      "start": 32.357,
+      "end": 32.38
+    },
+    {
+      "text": "dimension,",
+      "start": 32.45,
+      "end": 33.158
+    },
+    {
+      "text": "audit",
+      "start": 33.402,
+      "end": 33.831
+    },
+    {
+      "text": "every",
+      "start": 33.982,
+      "end": 34.307
+    },
+    {
+      "text": "dimension",
+      "start": 34.365,
+      "end": 34.841
+    },
+    {
+      "text": "that",
+      "start": 34.899,
+      "end": 35.027
+    },
+    {
+      "text": "depends",
+      "start": 35.074,
+      "end": 35.457
+    },
+    {
+      "text": "on",
+      "start": 35.515,
+      "end": 35.619
+    },
+    {
+      "text": "it.",
+      "start": 35.666,
+      "end": 36.084
+    }
+  ]
+}

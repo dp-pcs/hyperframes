@@ -1,0 +1,48 @@
+/* Design tokens — see DESIGN.md for rationale */
+:root {
+  /* Void scale */
+  --void: #050510;
+  --void-elevated: #0d0d1a;
+  --void-line: #1a1a2e;
+  --void-soft: #2a2a40;
+
+  /* Paper */
+  --paper: #ffffff;
+  --paper-muted: #9999b3;
+  --paper-dim: #5a5a73;
+
+  /* Accents */
+  --signal: #00ff88;
+  --signal-soft: rgba(0, 255, 136, 0.18);
+  --signal-glow: rgba(0, 255, 136, 0.4);
+  --danger: #ff3355;
+  --danger-soft: rgba(255, 51, 85, 0.18);
+  --danger-glow: rgba(255, 51, 85, 0.5);
+  --code: #7dd3fc;
+  --code-soft: rgba(125, 211, 252, 0.15);
+  --warn: #ffb84d;
+
+  /* Type families */
+  --font-display: "Inter Tight", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+/* Universal beat reset */
+[data-composition-id^="bug-case-study"] {
+  position: absolute;
+  inset: 0;
+  background: var(--void);
+  color: var(--paper);
+  font-family: var(--font-display);
+  overflow: hidden;
+}
+
+/* Subtle film grain via radial vignette */
+[data-composition-id^="bug-case-study"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.4) 100%);
+  pointer-events: none;
+  z-index: 100;
+}
