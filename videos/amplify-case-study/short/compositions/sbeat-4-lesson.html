@@ -1,0 +1,64 @@
+<template id="sbeat-4-lesson-template">
+  <div
+    id="amplify-case-study-short-4"
+    data-composition-id="amplify-case-study-short-4"
+    data-start="0"
+    data-duration="6"
+    data-width="1080"
+    data-height="1080"
+  >
+    <div class="sb4-stub">
+      <div class="sb4-label">SHORT BEAT 4</div>
+      <div class="sb4-title">Lesson</div>
+      <div class="sb4-todo">stub — author per PLAN.md Task 16</div>
+    </div>
+
+    <style>
+      [data-composition-id="amplify-case-study-short-4"] {
+        position: absolute;
+        inset: 0;
+        background: var(--ink);
+        color: var(--paper);
+        font-family: "Inter Tight", "Inter", system-ui, sans-serif;
+        overflow: hidden;
+      }
+      [data-composition-id="amplify-case-study-short-4"] .sb4-stub {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+      }
+      [data-composition-id="amplify-case-study-short-4"] .sb4-label {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-weight: 500;
+        font-size: 18px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--paper-muted);
+      }
+      [data-composition-id="amplify-case-study-short-4"] .sb4-title {
+        font-family: "Inter Tight", "Inter", system-ui, sans-serif;
+        font-weight: 600;
+        font-size: 56px;
+        color: var(--paper);
+      }
+      [data-composition-id="amplify-case-study-short-4"] .sb4-todo {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-weight: 400;
+        font-size: 16px;
+        color: var(--warn);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["amplify-case-study-short-4"] = gsap.timeline({
+        paused: true,
+      });
+    </script>
+  </div>
+</template>

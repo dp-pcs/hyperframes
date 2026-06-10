@@ -8,6 +8,14 @@
 
 **Tech Stack:** HyperFrames 0.6.x (CLI for `lint`/`validate`/`snapshot`/`render`/`tts`), GSAP (paused-and-registered timelines), Inter Tight + JetBrains Mono via Google Fonts CDN, vanilla HTML/CSS/JS (no bundler).
 
+> **⚠️ CLI surface note (added 2026-06-10, hyperframes v0.6.88):** the example commands below were authored against an older CLI. The current binary differs:
+>
+> - `lint`, `validate`, `snapshot`, `render` all take a **project DIR** (containing an `index.html`), not a single composition file. A standalone `beat-N.html` outside a project root cannot be linted/snapshotted directly.
+> - `snapshot` uses `--at <comma-list>` (not `--times`); there is **no `--output` flag** — snapshots write under the project's snapshots dir by default.
+> - Always `npx hyperframes <cmd> --help` before trusting an example command in this PLAN.
+>
+> Tasks 1-12 were already shipped using corrected invocations at execution time. Short-cut tasks (13+) have been partially updated; if you find a stale flag, fix it inline and append a note here.
+
 **Reference docs:**
 
 - `videos/amplify-case-study/DESIGN.md` — visual system (palette, type, motion)
@@ -1526,6 +1534,33 @@ git commit -m "feat(videos/amplify-case-study): generate short narration MP3"
 
 ---
 
+## Task 12.5: Short cut project scaffold — `short/index.html` stub
+
+**Why this exists:** `hyperframes lint`/`validate`/`snapshot` all need a project DIR with an `index.html` root. Authoring sbeat-N.html files in `short/compositions/` without a parent project means none of them can be linted or snapshot-verified in isolation. This task lands the parent project shell once so every subsequent sbeat task can validate as it goes.
+
+**Files:**
+
+- Create: `videos/amplify-case-study/short/index.html`
+
+The stub mirrors `master/index.html`'s structure: 1080×1080 stage, four empty `<div class="clip" data-composition-src="compositions/sbeat-N-*.html" ...>` clip slots with correct `data-start`/`data-duration` from the 30s short timeline (per SCRIPT.md and STORYBOARD.md), the design-token `<style>` block inlined (so `validate` works without `shared/`), the narration `<audio>` chain pointing at `narration/short-narration.mp3` and (later) per-line MP3s, and an empty paused master GSAP timeline.
+
+- [ ] **Step 1: Author `short/index.html`** with the four sbeat clip slots even though the referenced `compositions/sbeat-N-*.html` files don't exist yet. The runtime will degrade gracefully on missing children; lint/validate of the index alone should pass.
+
+- [ ] **Step 2: Lint the project DIR**
+
+```bash
+npx hyperframes lint videos/amplify-case-study/short
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add videos/amplify-case-study/short/index.html
+git commit -m "feat(videos/amplify-case-study): scaffold short/index.html stub (bd-y0y Task 12.5)"
+```
+
+---
+
 ## Task 13: Short Beat 1 — Template Grid (8s, 1:1)
 
 **Files:**
@@ -1551,11 +1586,14 @@ GSAP timeline: same as Master Beat 2 (cells populate stagger, synced pulse, capt
 - [ ] **Step 3: Lint + validate + snapshot**
 
 ```bash
-npx hyperframes lint videos/amplify-case-study/short/compositions/sbeat-1-template-grid.html
-npx hyperframes validate videos/amplify-case-study/short/compositions/sbeat-1-template-grid.html
-npx hyperframes snapshot videos/amplify-case-study/short/compositions/sbeat-1-template-grid.html \
-  --times 0,1.5,3.5,6.0,7.8 \
-  --output videos/amplify-case-study/short/snapshots/sbeat-1/
+# Lint/validate/snapshot operate on the project DIR (videos/amplify-case-study/short),
+# which must already exist with an index.html (see Task 12.5). The clip referenced
+# from short/index.html drives which composition the runtime activates.
+npx hyperframes lint videos/amplify-case-study/short
+npx hyperframes validate videos/amplify-case-study/short
+npx hyperframes snapshot videos/amplify-case-study/short \
+  --at 0,1.5,3.5,6.0,7.8
+# Snapshots write under videos/amplify-case-study/short/snapshots/<composition-id>/
 ```
 
 - [ ] **Step 4: Commit**
@@ -1594,9 +1632,9 @@ Skip the git-log preamble and the commit line (no time for them).
 - [ ] **Step 3: Lint + validate + snapshot**
 
 ```bash
-npx hyperframes snapshot videos/amplify-case-study/short/compositions/sbeat-2-delete.html \
-  --times 0,1.0,2.5,4.0,5.5 \
-  --output videos/amplify-case-study/short/snapshots/sbeat-2/
+npx hyperframes snapshot videos/amplify-case-study/short \
+  --at 0,1.0,2.5,4.0,5.5
+# Snapshots write under videos/amplify-case-study/short/snapshots/<composition-id>/
 ```
 
 - [ ] **Step 4: Commit**
@@ -1629,9 +1667,8 @@ GSAP timeline: cell-by-cell reveal, ambient motion inside each cell, caption rev
 - [ ] **Step 3: Lint + validate + snapshot**
 
 ```bash
-npx hyperframes snapshot videos/amplify-case-study/short/compositions/sbeat-3-bespoke-grid.html \
-  --times 0,1.5,3.5,5.5,7.5,9.5 \
-  --output videos/amplify-case-study/short/snapshots/sbeat-3/
+npx hyperframes snapshot videos/amplify-case-study/short \
+  --at 0,1.5,3.5,5.5,7.5,9.5
 ```
 
 - [ ] **Step 4: Commit**
@@ -1675,9 +1712,8 @@ GSAP timeline: word reveal, hold, CTA fade-in, final fade-to-black.
 - [ ] **Step 3: Lint + validate + snapshot**
 
 ```bash
-npx hyperframes snapshot videos/amplify-case-study/short/compositions/sbeat-4-lesson.html \
-  --times 0,1.5,3.0,4.5,6.0 \
-  --output videos/amplify-case-study/short/snapshots/sbeat-4/
+npx hyperframes snapshot videos/amplify-case-study/short \
+  --at 0,1.5,3.0,4.5,6.0
 ```
 
 - [ ] **Step 4: Commit**
