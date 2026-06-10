@@ -113,6 +113,12 @@ compositions/
 videos/amplify-case-study/master/compositions/*.mp4
 videos/amplify-case-study/master/compositions/*.mov
 videos/amplify-case-study/master/compositions/*.MOV
+# Same exception for the short cut (bd-y0y Task 12.5 onward).
+!videos/amplify-case-study/short/compositions/
+!videos/amplify-case-study/short/compositions/*.html
+videos/amplify-case-study/short/compositions/*.mp4
+videos/amplify-case-study/short/compositions/*.mov
+videos/amplify-case-study/short/compositions/*.MOV
 video-6-2-patched/
 claude-design-hyperframes-video/
 .claude/worktrees/
