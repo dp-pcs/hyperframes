@@ -7,11 +7,40 @@
     data-width="1080"
     data-height="1080"
   >
-    <div class="sb1-stub">
-      <div class="sb1-label">SHORT BEAT 1</div>
-      <div class="sb1-title">Template Grid</div>
-      <div class="sb1-todo">stub — author per PLAN.md Task 13</div>
+    <div class="sb1-label">amplify / 2026-05-15</div>
+
+    <div class="sb1-grid">
+      <div class="sb1-cell">
+        <div class="sb1-eyebrow">EPISODE 014</div>
+        <div class="sb1-title">Dev Day Recap: What Agents Got Right</div>
+        <div class="sb1-accent"></div>
+      </div>
+      <div class="sb1-cell">
+        <div class="sb1-eyebrow">EARNINGS Q1</div>
+        <div class="sb1-title">Reading the Numbers Behind the Pivot</div>
+        <div class="sb1-accent"></div>
+      </div>
+      <div class="sb1-cell">
+        <div class="sb1-eyebrow">BENCHMARK</div>
+        <div class="sb1-title">Agent Performance Across Six Models</div>
+        <div class="sb1-accent"></div>
+      </div>
+      <div class="sb1-cell">
+        <div class="sb1-eyebrow">MODEL DROP</div>
+        <div class="sb1-title">What Changed in This Week's Release</div>
+        <div class="sb1-accent"></div>
+      </div>
     </div>
+
+    <div class="sb1-caption">
+      <span class="sb1-word">Every</span>
+      <span class="sb1-word">video</span>
+      <span class="sb1-word">looked</span>
+      <span class="sb1-word">the</span>
+      <span class="sb1-word">same.</span>
+    </div>
+
+    <div class="hf-hairline sb1-hairline"></div>
 
     <style>
       [data-composition-id="amplify-case-study-short-1"] {
@@ -22,43 +51,162 @@
         font-family: "Inter Tight", "Inter", system-ui, sans-serif;
         overflow: hidden;
       }
-      [data-composition-id="amplify-case-study-short-1"] .sb1-stub {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 24px;
-      }
       [data-composition-id="amplify-case-study-short-1"] .sb1-label {
+        position: absolute;
+        top: 56px;
+        right: 64px;
         font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
         font-weight: 500;
-        font-size: 18px;
-        letter-spacing: 0.08em;
+        font-size: 16px;
+        letter-spacing: 0.04em;
+        color: var(--paper-muted);
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-grid {
+        position: absolute;
+        top: 120px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: grid;
+        grid-template-columns: repeat(2, 440px);
+        grid-template-rows: repeat(2, 248px);
+        gap: 32px;
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-cell {
+        position: relative;
+        width: 440px;
+        height: 248px;
+        box-sizing: border-box;
+        padding: 24px;
+        background: var(--ink-elevated);
+        border: 1px solid var(--ink-line);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        will-change: transform, opacity;
+        transform-origin: center center;
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-eyebrow {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-weight: 500;
+        font-size: 14px;
+        letter-spacing: 0.06em;
         text-transform: uppercase;
         color: var(--paper-muted);
       }
       [data-composition-id="amplify-case-study-short-1"] .sb1-title {
         font-family: "Inter Tight", "Inter", system-ui, sans-serif;
-        font-weight: 600;
-        font-size: 56px;
+        font-weight: 500;
+        font-size: 30px;
+        line-height: 1.15;
+        max-width: 380px;
         color: var(--paper);
       }
-      [data-composition-id="amplify-case-study-short-1"] .sb1-todo {
-        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-        font-weight: 400;
-        font-size: 16px;
-        color: var(--warn);
+      [data-composition-id="amplify-case-study-short-1"] .sb1-accent {
+        height: 4px;
+        width: 60%;
+        background: var(--warn);
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-caption {
+        position: absolute;
+        top: 900px;
+        left: 64px;
+        width: 952px;
+        font-family: "Inter Tight", "Inter", system-ui, sans-serif;
+        font-weight: 500;
+        font-size: 56px;
+        line-height: 1.2;
+        color: var(--paper);
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-word {
+        display: inline-block;
+        margin: 0 10px 0 0;
+        will-change: transform, opacity;
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-hairline {
+        position: absolute;
+        bottom: 60px;
+        left: 64px;
+        height: 1px;
+        width: 25%;
+        background: var(--signal);
+        transform-origin: left center;
+        transform: scaleX(0.32);
+        opacity: 0.85;
       }
     </style>
 
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <script>
       window.__timelines = window.__timelines || {};
-      window.__timelines["amplify-case-study-short-1"] = gsap.timeline({
-        paused: true,
-      });
+      const tl = gsap.timeline({ paused: true });
+
+      // Top-right label fades in immediately
+      tl.from(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-label',
+        { opacity: 0, duration: 0.3 },
+        0,
+      );
+
+      // Cells populate one-by-one with subtle scale.
+      // Compressed from master (0.12s stagger → 0.08s) to fit in 8s vs 10s.
+      tl.from(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-cell',
+        {
+          opacity: 0,
+          scale: 0.96,
+          duration: 0.45,
+          ease: "power3.out",
+          stagger: 0.08,
+        },
+        0.25,
+      );
+
+      // Hairline grows across same window as cells populating.
+      tl.fromTo(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-hairline',
+        { scaleX: 0.32 },
+        { scaleX: 1.0, duration: 1.4, ease: "power2.out" },
+        0.25,
+      );
+
+      // Synchronized pulse on all cells — "breathing together".
+      // Master beat-2 ran this at 3..5.5s over 10s; scale to 2.4..4.4s over 8s.
+      tl.to(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-cell',
+        {
+          keyframes: [{ opacity: 0.85 }, { opacity: 1.0 }, { opacity: 0.85 }],
+          duration: 2.0,
+          ease: "sine.inOut",
+          repeat: 0,
+        },
+        2.4,
+      );
+
+      // Caption word-by-word reveal at 3.2s (master started caption at 4s of 10s;
+      // proportional placement at 3.2s of 8s keeps the same rhythm).
+      tl.from(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-caption .sb1-word',
+        {
+          y: 24,
+          opacity: 0,
+          duration: 0.4,
+          ease: "power3.out",
+          stagger: 0.1,
+        },
+        3.2,
+      );
+
+      // Final settle — slight dim across grid to push caption forward at end.
+      // (No zoom-cell beat here: short-1's job is to set the "same-y-same"
+      // baseline that short-2 disrupts. Beat 3 / sbeat-3 is where bespoke
+      // variety enters.)
+      tl.to(
+        '[data-composition-id="amplify-case-study-short-1"] .sb1-cell',
+        { opacity: 0.55, duration: 0.5 },
+        7.2,
+      );
+
+      window.__timelines["amplify-case-study-short-1"] = tl;
     </script>
   </div>
 </template>
