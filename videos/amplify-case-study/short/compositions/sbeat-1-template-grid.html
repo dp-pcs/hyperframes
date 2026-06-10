@@ -1,0 +1,64 @@
+<template id="sbeat-1-template-grid-template">
+  <div
+    id="amplify-case-study-short-1"
+    data-composition-id="amplify-case-study-short-1"
+    data-start="0"
+    data-duration="8"
+    data-width="1080"
+    data-height="1080"
+  >
+    <div class="sb1-stub">
+      <div class="sb1-label">SHORT BEAT 1</div>
+      <div class="sb1-title">Template Grid</div>
+      <div class="sb1-todo">stub — author per PLAN.md Task 13</div>
+    </div>
+
+    <style>
+      [data-composition-id="amplify-case-study-short-1"] {
+        position: absolute;
+        inset: 0;
+        background: var(--ink);
+        color: var(--paper);
+        font-family: "Inter Tight", "Inter", system-ui, sans-serif;
+        overflow: hidden;
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-stub {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-label {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-weight: 500;
+        font-size: 18px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--paper-muted);
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-title {
+        font-family: "Inter Tight", "Inter", system-ui, sans-serif;
+        font-weight: 600;
+        font-size: 56px;
+        color: var(--paper);
+      }
+      [data-composition-id="amplify-case-study-short-1"] .sb1-todo {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-weight: 400;
+        font-size: 16px;
+        color: var(--warn);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["amplify-case-study-short-1"] = gsap.timeline({
+        paused: true,
+      });
+    </script>
+  </div>
+</template>
