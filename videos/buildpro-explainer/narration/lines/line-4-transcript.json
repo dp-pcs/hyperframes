@@ -1,117 +1,122 @@
 [
   {
     "text": "Progress",
-    "start": 0.05,
-    "end": 0.55
+    "start": 0.09,
+    "end": 0.61
   },
   {
     "text": "reports",
-    "start": 0.55,
-    "end": 0.96
+    "start": 0.68,
+    "end": 1.25
   },
   {
-    "text": "itself,",
-    "start": 1.04,
-    "end": 1.6
+    "text": "itself.",
+    "start": 1.25,
+    "end": 1.76
   },
   {
-    "text": "quiet",
-    "start": 1.67,
-    "end": 1.86
+    "text": "Quiet",
+    "start": 1.85,
+    "end": 2.14
   },
   {
     "text": "projects",
-    "start": 1.96,
-    "end": 2.39
+    "start": 2.14,
+    "end": 2.74
   },
   {
     "text": "get",
-    "start": 2.47,
-    "end": 2.63
+    "start": 2.81,
+    "end": 2.99
   },
   {
     "text": "one",
-    "start": 2.63,
-    "end": 2.82
+    "start": 2.99,
+    "end": 3.07
   },
   {
     "text": "friendly",
-    "start": 2.82,
-    "end": 3.34
+    "start": 3.57,
+    "end": 3.81
   },
   {
-    "text": "question",
-    "start": 3.34,
-    "end": 3.78
+    "text": "question.",
+    "start": 3.91,
+    "end": 4.48
   },
   {
-    "text": "and",
-    "start": 3.92,
-    "end": 4
+    "text": "And",
+    "start": 4.59,
+    "end": 4.7
   },
   {
     "text": "abandoned",
-    "start": 4,
-    "end": 4.51
+    "start": 4.7,
+    "end": 5.31
   },
   {
     "text": "ideas",
-    "start": 4.52,
-    "end": 5.04
+    "start": 5.31,
+    "end": 5.65
   },
   {
     "text": "become",
-    "start": 5.12,
-    "end": 5.45
+    "start": 5.65,
+    "end": 5.81
   },
   {
     "text": "collective",
-    "start": 5.45,
-    "end": 6.13
+    "start": 6.34,
+    "end": 6.74
   },
   {
     "text": "intelligence.",
-    "start": 6.13,
-    "end": 7.16
+    "start": 6.74,
+    "end": 7.8
   },
   {
-    "text": "Twelve",
-    "start": 7.24,
-    "end": 7.48
+    "text": "12",
+    "start": 7.89,
+    "end": 8.23
   },
   {
     "text": "people",
-    "start": 7.48,
-    "end": 7.72
+    "start": 8.23,
+    "end": 8.62
   },
   {
     "text": "tried",
-    "start": 7.8,
-    "end": 8.06
+    "start": 8.67,
+    "end": 9.01
   },
   {
-    "text": "this,",
-    "start": 8.06,
-    "end": 8.38
+    "text": "this.",
+    "start": 9.01,
+    "end": 9.48
   },
   {
-    "text": "here's",
-    "start": 8.38,
-    "end": 8.6
+    "text": "Here",
+    "start": 9.61,
+    "end": 9.93
+  },
+  {
+    "text": "is",
+    "start": 9.93,
+    "end": 10.13
   },
   {
     "text": "why",
-    "start": 8.83,
-    "end": 8.85
+    "start": 10.13,
+    "end": 10.44
   },
   {
     "text": "they",
-    "start": 8.85,
-    "end": 9.02
+    "start": 10.44,
+    "end": 10.83
   },
   {
     "text": "stopped.",
-    "start": 9.12,
-    "end": 9.68
+    "start": 11.33,
+    "end": 11.88
   }
 ]

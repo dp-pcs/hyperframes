@@ -12,26 +12,26 @@ Source of truth: `~/Documents/GitHub/buildpro/server/src/brand.ts` and
 
 ## Colors (Progressive palette — exact values, do not invent)
 
-| Token       | Hex     | Use                                  |
-| ----------- | ------- | ------------------------------------ |
-| blue-700    | #0077B3 | Primary accent, links, actions       |
-| blue-900    | #2862A4 | Deep blue surfaces                   |
-| blue-500    | #4EBEE5 | Illustrative accent                  |
-| blue-100    | #F3F9FC | Tinted panel bg                      |
-| steel-900   | #0A3360 | Headlines, wordmark "Build"          |
-| steel-700   | #405E7C | Secondary text                       |
-| steel-300   | #D1E2E5 | Borders / rules                      |
-| steel-100   | #F4F9FA | Page background (canvas)             |
-| gray-900    | #2D2D2D | Body text                            |
-| gray-700    | #707070 | Muted text                           |
-| green-900   | #067462 | Success text                         |
-| green-700   | #08CAA9 | Fresh / active / adopted             |
-| green-100   | #EFFBF7 | Success chip bg                      |
-| yellow-900  | #A86800 | Caution text                         |
-| yellow-700  | #EFAB00 | Quiet / paused                       |
-| yellow-100  | #FFF8E5 | Caution chip bg                      |
-| red-700     | #D41659 | Caution / bypassed / PII             |
-| red-100     | #FCEFF2 | Bypass chip bg                       |
+| Token      | Hex     | Use                            |
+| ---------- | ------- | ------------------------------ |
+| blue-700   | #0077B3 | Primary accent, links, actions |
+| blue-900   | #2862A4 | Deep blue surfaces             |
+| blue-500   | #4EBEE5 | Illustrative accent            |
+| blue-100   | #F3F9FC | Tinted panel bg                |
+| steel-900  | #0A3360 | Headlines, wordmark "Build"    |
+| steel-700  | #405E7C | Secondary text                 |
+| steel-300  | #D1E2E5 | Borders / rules                |
+| steel-100  | #F4F9FA | Page background (canvas)       |
+| gray-900   | #2D2D2D | Body text                      |
+| gray-700   | #707070 | Muted text                     |
+| green-900  | #067462 | Success text                   |
+| green-700  | #08CAA9 | Fresh / active / adopted       |
+| green-100  | #EFFBF7 | Success chip bg                |
+| yellow-900 | #A86800 | Caution text                   |
+| yellow-700 | #EFAB00 | Quiet / paused                 |
+| yellow-100 | #FFF8E5 | Caution chip bg                |
+| red-700    | #D41659 | Caution / bypassed / PII       |
+| red-100    | #FCEFF2 | Bypass chip bg                 |
 
 ## Typography
 

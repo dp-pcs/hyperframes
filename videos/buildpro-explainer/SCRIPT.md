@@ -8,13 +8,13 @@ Rhythm: calm — build — PEAK(slam) — settle — resolve.
 
 ## Beats
 
-| # | Beat            | Window   | Narration line (TTS input)                                                                                                                                                                                            |
-| - | --------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1 | Shadow builds   | 0–10s    | Right now, someone in your company is building software you'll never hear about. A-I made building easy. Governance never caught up.                                                                                  |
-| 2 | Enrollment      | 10–22s   | BuildPro meets builders at the moment they start, inside the A-I tool they're already using. One short interview, and the project is registered, visible, and connected.                                              |
-| 3 | The policy fork | 22–37s   | When a build touches an org standard, guidance appears right in the conversation. Take it, or proceed anyway. Nothing blocks. But every choice leaves a record. Bypassing is allowed. Invisible bypassing is impossible. |
-| 4 | Zero-effort     | 37–48s   | Progress reports itself. Quiet projects get one friendly question. And abandoned ideas become collective intelligence. Twelve people tried this. Here's why they stopped.                                              |
-| 5 | The packet / CTA| 48–60s   | So when review time comes, the paper trail already exists. BuildPro. Governance that shows up as a colleague, from day one.                                                                                            |
+| #   | Beat             | Window | Narration line (TTS input)                                                                                                                                                                                               |
+| --- | ---------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Shadow builds    | 0–10s  | Right now, someone in your company is building software you'll never hear about. A-I made building easy. Governance never caught up.                                                                                     |
+| 2   | Enrollment       | 10–22s | BuildPro meets builders at the moment they start, inside the A-I tool they're already using. One short interview, and the project is registered, visible, and connected.                                                 |
+| 3   | The policy fork  | 22–37s | When a build touches an org standard, guidance appears right in the conversation. Take it, or proceed anyway. Nothing blocks. But every choice leaves a record. Bypassing is allowed. Invisible bypassing is impossible. |
+| 4   | Zero-effort      | 37–48s | Progress reports itself. Quiet projects get one friendly question. And abandoned ideas become collective intelligence. Twelve people tried this. Here's why they stopped.                                                |
+| 5   | The packet / CTA | 48–60s | So when review time comes, the paper trail already exists. BuildPro. Governance that shows up as a colleague, from day one.                                                                                              |
 
 ## Beat direction
 
