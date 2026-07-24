@@ -1,20 +1,21 @@
 # BuildPro Explainer — Script & Beat Plan
 
-60s executive brief / commercial. 1920x1080. Voice: af_nova (warm,
-professional — the brand voice is a colleague, not a compliance officer).
-~127 words ≈ 2.1 w/s — breathing room by design.
+62s executive brief / commercial. 1920x1080. Voice: ElevenLabs "Sarah"
+(eleven_multilingual_v2) — mature, reassuring, professional; the brand voice
+is a colleague, not a compliance officer. (v1 used local Kokoro af_nova;
+replaced for a more natural read.) ~127 words — breathing room by design.
 
 Rhythm: calm — build — PEAK(slam) — settle — resolve.
 
 ## Beats
 
-| #   | Beat             | Window | Narration line (TTS input)                                                                                                                                                                                               |
-| --- | ---------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Shadow builds    | 0–10s  | Right now, someone in your company is building software you'll never hear about. A-I made building easy. Governance never caught up.                                                                                     |
-| 2   | Enrollment       | 10–22s | BuildPro meets builders at the moment they start, inside the A-I tool they're already using. One short interview, and the project is registered, visible, and connected.                                                 |
-| 3   | The policy fork  | 22–37s | When a build touches an org standard, guidance appears right in the conversation. Take it, or proceed anyway. Nothing blocks. But every choice leaves a record. Bypassing is allowed. Invisible bypassing is impossible. |
-| 4   | Zero-effort      | 37–48s | Progress reports itself. Quiet projects get one friendly question. And abandoned ideas become collective intelligence. Twelve people tried this. Here's why they stopped.                                                |
-| 5   | The packet / CTA | 48–60s | So when review time comes, the paper trail already exists. BuildPro. Governance that shows up as a colleague, from day one.                                                                                              |
+| #   | Beat             | Window   | Narration line (TTS input)                                                                                                                                                                                               |
+| --- | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Shadow builds    | 0–10.2s  | Right now, someone in your company is building software you'll never hear about. AI made building easy. Governance never caught up.                                                                                      |
+| 2   | Enrollment       | 10.2–22s | BuildPro meets builders at the moment they start, inside the AI tool they're already using. One short interview, and the project is registered, visible, and connected.                                                  |
+| 3   | The policy fork  | 22–39s   | When a build touches an org standard, guidance appears right in the conversation. Take it, or proceed anyway. Nothing blocks. But every choice leaves a record. Bypassing is allowed. Invisible bypassing is impossible. |
+| 4   | Zero-effort      | 39–51s   | Progress reports itself. Quiet projects get one friendly question. And abandoned ideas become collective intelligence. Twelve people tried this. Here's why they stopped.                                                |
+| 5   | The packet / CTA | 51–62s   | So when review time comes, the paper trail already exists. BuildPro. Governance that shows up as a colleague, from day one.                                                                                              |
 
 ## Beat direction
 
