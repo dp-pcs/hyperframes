@@ -3,11 +3,59 @@ import {
   applyPatch,
   applyPatchByTarget,
   readAttributeByTarget,
+  readTagAttribute,
   readTagSnippetByTarget,
   type PatchOperation,
 } from "./sourcePatcher";
 
 describe("applyPatchByTarget", () => {
+  it("removes all duplicate boolean attributes so unmuting cannot reveal another", () => {
+    expect(
+      applyPatch(`<video id="clip" muted muted></video>`, "clip", {
+        type: "html-attribute",
+        property: "muted",
+        value: null,
+      }),
+    ).toBe(`<video id="clip"></video>`);
+  });
+
+  it("locates Unicode custom tags and respects the first duplicate attribute", () => {
+    const html = `<my-élement id="real" id="other" data-duration="1"></my-élement>`;
+    const op: PatchOperation = { type: "attribute", property: "duration", value: "2" };
+    expect(applyPatch(html, "real", op)).toContain('data-duration="2"');
+    expect(applyPatch(html, "other", op)).toBe(html);
+  });
+
+  it("reads and patches only the real source outside quoted attribute content", () => {
+    const html = `<video id="hero" title="example src='other.mp4'" data-src="lazy.mp4" src="assets/it's.mp4"></video>`;
+    expect(readTagAttribute(html, "src")).toBe("assets/it's.mp4");
+    const op: PatchOperation = { type: "html-attribute", property: "src", value: "new.mp4" };
+    const expected = `<video id="hero" title="example src='other.mp4'" data-src="lazy.mp4" src="new.mp4"></video>`;
+    expect(applyPatch(html, "hero", op)).toBe(expected);
+    expect(applyPatchByTarget(html, { id: "hero" }, op)).toBe(expected);
+  });
+
+  it("does not locate a target through a prefixed or quoted id", () => {
+    const html = `<video data-id="hero" title="id='hero'" src="other.mp4"></video><video id="hero" src="real.mp4"></video>`;
+    expect(readTagSnippetByTarget(html, { id: "hero" })).toContain('src="real.mp4"');
+  });
+
+  it.each(['"', "'"])("patches long and multiline styles quoted with %s", (quote) => {
+    const otherQuote = quote === '"' ? "'" : '"';
+    const op: PatchOperation = { type: "inline-style", property: "opacity", value: "0.5" };
+    for (const value of [
+      "",
+      "line1\nline2",
+      "a".repeat(100_000),
+      `style=${otherQuote}a`.repeat(10_000),
+    ]) {
+      const html = `<img id="hero" class="hero" style=${quote}--label:${value}${quote} />`;
+      const expected = `<img id="hero" class="hero" style=${quote}--label: ${value}; opacity: 0.5${quote} />`;
+      expect(applyPatch(html, "hero", op)).toBe(expected);
+      expect(applyPatchByTarget(html, { selector: ".hero" }, op)).toBe(expected);
+    }
+  });
+
   it("updates a composition host by data-composition-id selector", () => {
     const html = `<div data-composition-id="intro" data-start="0" data-track-index="1"></div>`;
     const op: PatchOperation = { type: "attribute", property: "start", value: "2.5" };
@@ -23,6 +71,15 @@ describe("applyPatchByTarget", () => {
 
     expect(applyPatchByTarget(html, { selector: ".headline" }, op)).toContain(
       'data-track-index="3"',
+    );
+  });
+
+  it("removes a boolean data attribute by selector", () => {
+    const html = `<div class="headline clip" data-start="0" data-hidden></div>`;
+    const op: PatchOperation = { type: "attribute", property: "hidden", value: null };
+
+    expect(applyPatchByTarget(html, { selector: ".headline" }, op)).toBe(
+      `<div class="headline clip" data-start="0"></div>`,
     );
   });
 
@@ -56,6 +113,23 @@ describe("applyPatchByTarget", () => {
     );
     expect(result).not.toContain("/ style");
   });
+
+  it.each(["", " ", "\t\r\n", "\u00a0\u2028", " ".repeat(100_000)])(
+    "preserves self-closing whitespace handling (case %#)",
+    (whitespace) => {
+      const prefix = '<img id="hero" class="hero"';
+      const op: PatchOperation = { type: "inline-style", property: "opacity", value: "0.5" };
+      for (const suffix of ["/", "/\n", "/\r", "/\r\n", "/\u2028", "", "x", "/ "]) {
+        const tag = prefix + whitespace + suffix;
+        const selfClosing = suffix === "/";
+        // The original operation removes whitespace before the slash only.
+        const expectedBase = selfClosing ? prefix + suffix.slice(1) : tag;
+        const expected = `${expectedBase} style="opacity: 0.5"${selfClosing ? " /" : ""}>`;
+        expect(applyPatch(tag + ">", "hero", op)).toBe(expected);
+        expect(applyPatchByTarget(tag + ">", { selector: ".hero" }, op)).toBe(expected);
+      }
+    },
+  );
 
   it("patches inline move styles by target", () => {
     const html = `<div id="card" style="position: absolute; left: 108px; top: 112px"></div>`;
@@ -366,6 +440,7 @@ describe("motion attribute round-trip via sourcePatcher", () => {
       duration: 0.6,
       ease: "power2.out",
       from: { autoAlpha: 0, y: 32 },
+      // fallow-ignore-next-line code-duplication
       to: { autoAlpha: 1, y: 0 },
     };
 
@@ -420,6 +495,7 @@ describe("motion attribute round-trip via sourcePatcher", () => {
       duration: 1,
       ease: "none",
       from: { opacity: 0 },
+      // fallow-ignore-next-line code-duplication
       to: { opacity: 1 },
     };
 
@@ -515,4 +591,193 @@ describe("motion attribute round-trip via sourcePatcher", () => {
     expect(readBack).toBeDefined();
     expect(JSON.parse(readBack!)).toEqual(motion);
   });
+});
+
+// T3 — id-based targeting (R1).
+describe("T3 — hfId targeting (spec for R1)", () => {
+  it("updates inline style by data-hf-id", () => {
+    const html = `<h1 data-hf-id="hf-x7k2" style="color: red">Hello</h1>`;
+    const result = applyPatchByTarget(
+      html,
+      { hfId: "hf-x7k2" },
+      {
+        type: "inline-style",
+        property: "color",
+        value: "blue",
+      },
+    );
+    expect(result).toContain("color: blue");
+    expect(result).toContain('data-hf-id="hf-x7k2"');
+  });
+
+  it("updates text content by data-hf-id", () => {
+    const html = `<p data-hf-id="hf-a1b2">Old text</p>`;
+    const result = applyPatchByTarget(
+      html,
+      { hfId: "hf-a1b2" },
+      {
+        type: "text-content",
+        property: "",
+        value: "New text",
+      },
+    );
+    expect(result).toContain(">New text<");
+  });
+
+  it("updates attribute by data-hf-id", () => {
+    const html = `<div data-hf-id="hf-c3d4" data-start="0"></div>`;
+    const result = applyPatchByTarget(
+      html,
+      { hfId: "hf-c3d4" },
+      {
+        type: "attribute",
+        property: "start",
+        value: "2.5",
+      },
+    );
+    expect(result).toContain('data-start="2.5"');
+  });
+
+  it("data-hf-id attribute is preserved after a style patch", () => {
+    const html = `<h1 data-hf-id="hf-x7k2" style="color: red">Hello</h1>`;
+    const patched = applyPatchByTarget(
+      html,
+      { hfId: "hf-x7k2" },
+      {
+        type: "inline-style",
+        property: "color",
+        value: "blue",
+      },
+    );
+    expect(readAttributeByTarget(patched, { hfId: "hf-x7k2" }, "data-hf-id")).toBe("hf-x7k2");
+  });
+
+  it("hfId lookup falls through to selector when hfId not found", () => {
+    const html = `<h1 class="headline" style="color: red">Hello</h1>`;
+    const result = applyPatchByTarget(
+      html,
+      { hfId: "hf-missing", selector: ".headline" },
+      { type: "inline-style", property: "color", value: "blue" },
+    );
+    expect(result).toContain("color: blue");
+  });
+
+  it("hfId match is authoritative — selector is not used as a narrowing filter", () => {
+    // hfId matches h1; selector points at h2. hfId wins — patch lands on h1, h2 untouched.
+    const html = `<h1 data-hf-id="hf-x7k2" class="a">A</h1><h2 class="b">B</h2>`;
+    const result = applyPatchByTarget(
+      html,
+      { hfId: "hf-x7k2", selector: ".b" },
+      { type: "inline-style", property: "color", value: "blue" },
+    );
+    expect(result).toContain('data-hf-id="hf-x7k2"');
+    const h1End = result.indexOf("</h1>");
+    const bluePos = result.indexOf("color: blue");
+    expect(bluePos).toBeGreaterThan(-1);
+    expect(bluePos).toBeLessThan(h1End);
+    expect(result).toContain('<h2 class="b">B</h2>');
+  });
+});
+
+describe("file names with special characters", () => {
+  const src = (value: string): PatchOperation => ({
+    type: "html-attribute",
+    property: "src",
+    value,
+  });
+
+  it("replaces a double-quoted value that holds an apostrophe instead of adding a second one", () => {
+    expect(applyPatch(`<img id="a" src="assets/it's.png">`, "a", src("assets/b.png"))).toBe(
+      `<img id="a" src="assets/b.png">`,
+    );
+    expect(applyPatch(`<img id="a" src='assets/say "hi".png'>`, "a", src("b.png"))).toBe(
+      `<img id="a" src="b.png">`,
+    );
+  });
+
+  it("writes $ sequences in a value literally", () => {
+    expect(applyPatch(`<img id="a" src="old.png">`, "a", src("assets/$100 bill.png"))).toBe(
+      `<img id="a" src="assets/$100 bill.png">`,
+    );
+    expect(applyPatch(`<img id="a">`, "a", src("$&$1.png"))).toBe(
+      `<img id="a" src="$&amp;$1.png">`,
+    );
+    expect(
+      applyPatch(`<div id="a" data-src="old">`, "a", {
+        type: "attribute",
+        property: "src",
+        value: "$' and $`",
+      }),
+    ).toBe(`<div id="a" data-src="$' and $\`">`);
+  });
+
+  it("reads a data attribute whose value holds the other quote kind", () => {
+    expect(readAttributeByTarget(`<div id="a" data-title="it's here">`, { id: "a" }, "title")).toBe(
+      "it's here",
+    );
+  });
+});
+
+describe("readTagAttribute", () => {
+  it("reads both quote kinds and decodes entities without losing the other quote", () => {
+    expect(readTagAttribute(`<video src="assets/it's&amp;ours.mp4">`, "src")).toBe(
+      "assets/it's&ours.mp4",
+    );
+    expect(readTagAttribute(`<video src='assets/say "hi".mp4'>`, "src")).toBe(
+      'assets/say "hi".mp4',
+    );
+  });
+
+  it("distinguishes an empty attribute from a missing attribute", () => {
+    expect(readTagAttribute('<video src="">', "src")).toBe("");
+    expect(readTagAttribute("<video>", "src")).toBeUndefined();
+  });
+});
+
+describe("whole attribute names", () => {
+  it.each(["data-src", "x-src", "xml:src", "srcset"])(
+    "reads and edits src without matching %s",
+    (other) => {
+      const tag = `<img id="a" ${other}="assets/other.png" src="assets/original.png">`;
+      expect(readTagAttribute(tag, "src")).toBe("assets/original.png");
+      for (const patch of [
+        (op: PatchOperation) => applyPatch(tag, "a", op),
+        (op: PatchOperation) => applyPatchByTarget(tag, { id: "a" }, op),
+      ]) {
+        expect(patch({ type: "html-attribute", property: "src", value: "assets/new.png" })).toBe(
+          `<img id="a" ${other}="assets/other.png" src="assets/new.png">`,
+        );
+        expect(patch({ type: "html-attribute", property: "src", value: null })).toBe(
+          `<img id="a" ${other}="assets/other.png">`,
+        );
+      }
+      expect(readTagAttribute(`<img ${other}="assets/other.png">`, "src")).toBeUndefined();
+    },
+  );
+
+  it("does not treat a longer data attribute as a boolean attribute to remove", () => {
+    const tag = '<div id="a" data-title-long="keep">';
+    expect(
+      applyPatchByTarget(tag, { id: "a" }, { type: "attribute", property: "title", value: null }),
+    ).toBe(tag);
+  });
+});
+
+it("removes a boolean attribute without truncating a longer attribute name", () => {
+  const tag = '<video id="a" muted-long="keep" muted>';
+  expect(
+    applyPatchByTarget(
+      tag,
+      { id: "a" },
+      { type: "html-attribute", property: "muted", value: null },
+    ),
+  ).toBe('<video id="a" muted-long="keep">');
+});
+
+it("decodes an authored apostrophe entity once", () => {
+  expect(readTagAttribute("<video src='assets/it&apos;s.mp4'>", "src")).toBe("assets/it's.mp4");
+  expect(readTagAttribute("<video src='assets/it&#39;s.mp4'>", "src")).toBe("assets/it's.mp4");
+  expect(readTagAttribute('<video src="assets/it&amp;apos;s.mp4">', "src")).toBe(
+    "assets/it&apos;s.mp4",
+  );
 });

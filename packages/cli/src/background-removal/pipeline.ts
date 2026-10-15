@@ -1,3 +1,4 @@
+// fallow-ignore-file complexity
 /**
  * Background-removal rendering pipeline.
  *
@@ -13,10 +14,18 @@
  * decode the alpha plane.
  */
 import { spawn } from "node:child_process";
-import { extname } from "node:path";
-import { hasFFmpeg, hasFFprobe } from "../whisper/manager.js";
+import { randomUUID } from "node:crypto";
+import { renameSync, rmSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
+import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { createSession, type Session } from "./inference.js";
 import { type Device, type ModelId } from "./manager.js";
+import {
+  DEFAULT_VP9_CPU_USED,
+  SDR_RGB_TO_BT709_FILTER,
+  SDR_RGB_TO_TAGGED_BT709_FILTER,
+  renderProvenanceArgs,
+} from "@hyperframes/engine";
 
 export type OutputFormat = "webm" | "mov" | "png";
 
@@ -148,6 +157,8 @@ export function buildEncoderArgs(
   if (format === "webm") {
     return [
       ...base,
+      "-vf",
+      SDR_RGB_TO_BT709_FILTER,
       "-c:v",
       "libvpx-vp9",
       "-b:v",
@@ -158,15 +169,12 @@ export function buildEncoderArgs(
       "good",
       "-row-mt",
       "1",
+      "-cpu-used",
+      String(DEFAULT_VP9_CPU_USED),
       "-auto-alt-ref",
       "0",
       "-pix_fmt",
       "yuva420p",
-      // Tag the output as BT.709 limited range so browsers use the same
-      // YUV→RGB matrix the source video was encoded with. Without these tags
-      // ffmpeg's default RGB→YUV conversion is BT.601, which causes a visible
-      // color shift (red/skin tones in particular) when the matted overlay is
-      // composited over the original mp4.
       "-colorspace",
       "bt709",
       "-color_primaries",
@@ -178,12 +186,15 @@ export function buildEncoderArgs(
       "-metadata:s:v:0",
       "alpha_mode=1",
       "-an",
+      ...renderProvenanceArgs(outputPath),
       outputPath,
     ];
   }
   if (format === "mov") {
     return [
       ...base,
+      "-vf",
+      SDR_RGB_TO_TAGGED_BT709_FILTER,
       "-c:v",
       "prores_ks",
       "-profile:v",
@@ -193,6 +204,7 @@ export function buildEncoderArgs(
       "-pix_fmt",
       "yuva444p10le",
       "-an",
+      ...renderProvenanceArgs(outputPath),
       outputPath,
     ];
   }
@@ -263,8 +275,9 @@ export function resolveRenderTargets(
 }
 
 export async function render(options: RenderOptions): Promise<RenderResult> {
-  if (!hasFFmpeg() || !hasFFprobe()) {
-    throw new Error("ffmpeg and ffprobe are required. Install: brew install ffmpeg");
+  const ffmpegPath = findFFmpeg();
+  if (!ffmpegPath || !findFFprobe()) {
+    throw new Error(`ffmpeg and ffprobe are required. Install: ${getFFmpegInstallHint()}`);
   }
 
   const { format, bgFormat } = resolveRenderTargets(
@@ -289,9 +302,20 @@ export async function render(options: RenderOptions): Promise<RenderResult> {
     onProgress: (msg) => options.onProgress?.({ kind: "info", message: msg }),
   });
 
+  const output = tempBeside(options.outputPath);
+  const background = options.backgroundOutputPath && tempBeside(options.backgroundOutputPath);
   try {
     const start = Date.now();
-    const framesProcessed = await runPipeline(options, session, media, format, bgFormat);
+    const framesProcessed = await runPipeline(
+      { ...options, outputPath: output, backgroundOutputPath: background },
+      session,
+      media,
+      format,
+      bgFormat,
+      ffmpegPath,
+    );
+    renameSync(output, options.outputPath);
+    if (background) renameSync(background, options.backgroundOutputPath!);
     const durationSeconds = (Date.now() - start) / 1000;
     const avgMsPerFrame = framesProcessed ? (durationSeconds * 1000) / framesProcessed : 0;
 
@@ -306,7 +330,14 @@ export async function render(options: RenderOptions): Promise<RenderResult> {
     };
   } finally {
     await session.close();
+    rmSync(output, { force: true, maxRetries: 3 });
+    if (background) rmSync(background, { force: true, maxRetries: 3 });
   }
+}
+
+/** ffmpeg follows a link planted at its output mid-job; a fresh unguessable name renamed over the output cannot. */
+function tempBeside(path: string): string {
+  return join(dirname(path), `.tmp-${randomUUID()}-${basename(path)}`);
 }
 
 const RECENT_WINDOW = 30;
@@ -321,8 +352,13 @@ interface FfmpegProc {
 type StdioFd = "ignore" | "pipe";
 type StdioTuple = [StdioFd, StdioFd, StdioFd];
 
-function spawnFfmpeg(args: string[], label: string, stdio: StdioTuple): FfmpegProc {
-  const proc = spawn("ffmpeg", args, { stdio });
+function spawnFfmpeg(
+  ffmpegPath: string,
+  args: string[],
+  label: string,
+  stdio: StdioTuple,
+): FfmpegProc {
+  const proc = spawn(ffmpegPath, args, { stdio, windowsHide: true });
   let stderrBuf = "";
   proc.stderr?.on("data", (d: Buffer) => {
     stderrBuf += d.toString();
@@ -343,6 +379,7 @@ async function runPipeline(
   media: MediaInfo,
   format: OutputFormat,
   bgFormat: OutputFormat | undefined,
+  ffmpegPath: string,
 ): Promise<number> {
   const { inputPath, outputPath, backgroundOutputPath } = options;
   const { width, height, fps, frameCount } = media;
@@ -350,12 +387,14 @@ async function runPipeline(
   const quality = options.quality ?? DEFAULT_QUALITY;
 
   const decoder = spawnFfmpeg(
+    ffmpegPath,
     ["-loglevel", "error", "-i", inputPath, "-f", "rawvideo", "-pix_fmt", "rgb24", "-an", "-"],
     "ffmpeg decoder",
     ["ignore", "pipe", "pipe"],
   );
 
   const fg = spawnFfmpeg(
+    ffmpegPath,
     buildEncoderArgs(format, width, height, fps || 30, outputPath, quality),
     "ffmpeg encoder",
     ["pipe", "ignore", "pipe"],
@@ -364,6 +403,7 @@ async function runPipeline(
   const bg =
     backgroundOutputPath && bgFormat
       ? spawnFfmpeg(
+          ffmpegPath,
           buildEncoderArgs(bgFormat, width, height, fps || 30, backgroundOutputPath, quality),
           "ffmpeg background encoder",
           ["pipe", "ignore", "pipe"],

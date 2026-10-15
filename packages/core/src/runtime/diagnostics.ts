@@ -27,24 +27,24 @@
  * helper call is a real statement, so no `no-empty` warnings ship in the
  * inlined IIFE.
  */
-export interface SwallowedEvent {
-  /** Short, descriptive label naming the operation that failed. */
-  label: string;
-  /** The thrown value (often an Error, but JS allows anything). */
-  error: unknown;
-}
+import { getDebugSurface } from "./globals.js";
 
-interface HFDebugSurface {
-  __hfDebug?: boolean;
-  __HYPERFRAMES_DEBUG?: boolean;
-  __hf?: {
-    onSwallowed?: (event: SwallowedEvent) => void;
-  };
+/** The named error readiness waits fail with once start-up or the render-ready publish throws; it stays set. */
+export function recordStartupError(error: unknown): void {
+  let detail = "unknown error";
+  try {
+    detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  } catch (err) {
+    swallow("runtime.startupError", err);
+  }
+  (window as Window & { __hfStartupError?: string }).__hfStartupError =
+    `HyperFrames runtime failed: ${detail}. Check the composition's scripts and window.__timelines ` +
+    `entries; if they look right, report this as a HyperFrames bug.`;
 }
 
 export function swallow(label: string, error?: unknown): void {
   if (typeof window === "undefined") return;
-  const w = window as unknown as HFDebugSurface;
+  const w = getDebugSurface();
 
   const handler = w.__hf?.onSwallowed;
   if (handler) {

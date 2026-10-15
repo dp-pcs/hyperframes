@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { statSync, readFileSync } from "node:fs";
 import { join as joinPath } from "node:path";
-import { lintHyperframeHtml } from "@hyperframes/core";
+import { lintHyperframeHtml } from "@hyperframes/lint";
 import type {
   LintFinding,
   ExplainerSourceArtifact,
@@ -59,7 +59,7 @@ function normalizeFinding(raw: {
 }
 
 export async function lintCompositionHtml(html: string): Promise<LintResult> {
-  const raw = lintHyperframeHtml(html, {});
+  const raw = await lintHyperframeHtml(html, {});
   const rawFindings: unknown = Array.isArray(raw)
     ? raw
     : ((raw as { findings?: unknown[] }).findings ?? []);

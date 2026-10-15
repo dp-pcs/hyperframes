@@ -14,8 +14,25 @@ export type FileType =
 
 /** A single file to install as part of a registry item. */
 export interface FileTarget {
-  /** Path to the source file, relative to the item's `registry-item.json`. */
+  /**
+   * Path to the source file, relative to the item's `registry-item.json`.
+   * Stays the file's identity even when the bytes live off-repo: it is what an
+   * installed composition references, and what `url` replaces only the source
+   * of.
+   */
   path: string;
+  /**
+   * Absolute `https://` URL the bytes are fetched from, instead of
+   * `<registry base>/<type dir>/<item>/<path>`.
+   *
+   * Binary assets are the one thing a repository-backed registry carries
+   * badly: every revision of a 100 KB JPEG is permanent, and a block shipping
+   * two dozen of them costs more history than every composition in the
+   * registry combined. Hosting them keeps the repository text-only. `path`
+   * still says where the file lands relative to the item, so nothing that
+   * reads an installed composition can tell the difference.
+   */
+  url?: string;
   /** Destination path in the user's project, relative to the project root. */
   target: string;
   /** File type — controls how the installer treats this file. */
@@ -128,6 +145,11 @@ export interface RegistryManifest {
   name: string;
   /** Registry homepage URL. */
   homepage: string;
+  /** Published on-device vector artifact, when this registry provides one. */
+  catalogArtifact?: {
+    /** SHA-256 identity of the searchable corpus and embedding contract. */
+    revision: string;
+  };
   /** Items in this registry. */
   items: RegistryManifestEntry[];
 }
@@ -181,7 +203,9 @@ export type BlockCategory =
   | "data"
   | "scenes"
   | "captions"
-  | "effects";
+  | "effects"
+  | "text-effects"
+  | "code-animation";
 
 export interface BlockCategoryMeta {
   id: BlockCategory;
@@ -191,9 +215,11 @@ export interface BlockCategoryMeta {
 
 export const BLOCK_CATEGORIES: BlockCategoryMeta[] = [
   { id: "captions", label: "Captions", color: "cyan" },
+  { id: "code-animation", label: "Code Animations", color: "emerald" },
   { id: "vfx", label: "VFX", color: "purple" },
   { id: "transitions", label: "Transitions", color: "blue" },
   { id: "effects", label: "Effects", color: "rose" },
+  { id: "text-effects", label: "Text Effects", color: "violet" },
   { id: "social", label: "Social", color: "pink" },
   { id: "data", label: "Data", color: "green" },
   { id: "scenes", label: "Scenes", color: "amber" },
@@ -203,10 +229,12 @@ export function resolveBlockCategory(tags: string[] | undefined): BlockCategory 
   if (!tags || tags.length === 0) return "scenes";
   const set = new Set(tags);
   if (set.has("captions") || set.has("caption-style")) return "captions";
+  if (set.has("code-animation")) return "code-animation";
   if (set.has("transition")) return "transitions";
   if (set.has("social") || set.has("overlay")) return "social";
   if (set.has("data") || set.has("chart") || set.has("map")) return "data";
   if (set.has("html-in-canvas") || set.has("webgl") || set.has("shader")) return "vfx";
+  if (set.has("text-effect")) return "text-effects";
   if (set.has("effect") || set.has("grain") || set.has("vignette")) return "effects";
   return "scenes";
 }

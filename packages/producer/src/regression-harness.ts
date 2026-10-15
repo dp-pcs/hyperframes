@@ -1,3 +1,4 @@
+// fallow-ignore-file complexity
 import {
   existsSync,
   mkdirSync,
@@ -5,6 +6,7 @@ import {
   readFileSync,
   writeFileSync,
   copyFileSync,
+  mkdtempSync,
   rmSync,
   statSync,
   cpSync,
@@ -17,7 +19,7 @@ import process from "node:process";
 import { createRenderJob, executeRenderJob } from "./services/renderOrchestrator.js";
 import { compileForRender } from "./services/htmlCompiler.js";
 import { validateCompilation } from "./services/compilationTester.js";
-import { extractMediaMetadata } from "./utils/ffprobe.js";
+import { extractMediaMetadata, extractAudioMetadata } from "./utils/ffprobe.js";
 import {
   buildRmsEnvelope,
   compareAudioEnvelopes,
@@ -114,6 +116,19 @@ type TestMetadata = {
     /** Force HDR in the harness; omitted/false preserves historical SDR-only test behavior. */
     hdr?: boolean;
     /**
+     * Render this suite with the experimental fast-capture path
+     * (drawElementImage, `--experimental-fast-capture`). The golden must be
+     * regenerated with the flag on. Used by the `fast-capture` regression
+     * guard; omit for the default screenshot/BeginFrame capture.
+     */
+    experimentalFastCapture?: boolean;
+    /**
+     * Pin the browser capture path for a regression fixture. The producer's
+     * software-GPU default normally prefers screenshots, so BeginFrame-only
+     * compositor regressions must opt out explicitly to exercise that path.
+     */
+    captureMode?: "screenshot" | "beginframe";
+    /**
      * Render-time variable overrides, equivalent to `hyperframes render
      * --variables '<json>'`. Injected as `window.__hfVariables` before any
      * page script runs so the runtime helper `getVariables()` returns the
@@ -193,6 +208,12 @@ type TestResult = {
     residualRmsDb?: number;
     residualError?: string;
   };
+  streamDurationParity?: {
+    passed: boolean;
+    videoDurationSeconds: number;
+    audioDurationSeconds: number;
+    driftSeconds: number;
+  };
   renderedOutputPath?: string;
 };
 
@@ -227,7 +248,10 @@ function formatResidualSuffix(residualRmsDb: number | null, error: string | unde
   return `, residualRMS: ${residualRmsDb.toFixed(2)} dBFS`;
 }
 
-function parseArgs(argv: string[]): CliOptions {
+// Exported for unit testing (pinning `--exclude-tags` comma-parsing so the
+// values baked into `Dockerfile.test` and `packages/producer/package.json`
+// scripts keep matching the parser's contract).
+export function parseArgs(argv: string[]): CliOptions {
   const testNames: string[] = [];
   const excludeTags: string[] = [];
   let update = false;
@@ -368,6 +392,20 @@ function validateMetadata(meta: unknown): TestMetadata {
   if (rc.hdr !== undefined && typeof rc.hdr !== "boolean") {
     throw new Error("meta.json: 'renderConfig.hdr' must be a boolean (or omit for false)");
   }
+  if (rc.experimentalFastCapture !== undefined && typeof rc.experimentalFastCapture !== "boolean") {
+    throw new Error(
+      "meta.json: 'renderConfig.experimentalFastCapture' must be a boolean (or omit for false)",
+    );
+  }
+  if (
+    rc.captureMode !== undefined &&
+    rc.captureMode !== "screenshot" &&
+    rc.captureMode !== "beginframe"
+  ) {
+    throw new Error(
+      "meta.json: 'renderConfig.captureMode' must be 'screenshot' or 'beginframe' (or omitted)",
+    );
+  }
   if (
     rc.variables !== undefined &&
     (rc.variables === null || typeof rc.variables !== "object" || Array.isArray(rc.variables))
@@ -392,7 +430,7 @@ function validateMetadata(meta: unknown): TestMetadata {
   return m as TestMetadata;
 }
 
-function discoverTestSuites(
+export function discoverTestSuites(
   testsDir: string,
   filterNames: string[],
   excludeTags: string[] = [],
@@ -501,11 +539,17 @@ function copyFixtureSupportFiles(suite: TestSuite, tempRoot: string): void {
 
 // ── FFmpeg Utilities ─────────────────────────────────────────────────────────
 
-function runFfmpeg(args: string[], label: string): { stdout: Buffer; stderr: string } {
+function runFfmpeg(
+  args: string[],
+  label: string,
+  cwd?: string,
+): { stdout: Buffer; stderr: string } {
   const result = spawnSync("ffmpeg", args, {
+    cwd,
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 256 * 1024 * 1024,
     encoding: "buffer",
+    windowsHide: true,
   });
   const stderr = result.stderr.toString("utf-8");
   if (result.status !== 0) {
@@ -539,42 +583,135 @@ function extractFrameAsImage(
   );
 }
 
-function psnrAtCheckpoint(
+/** The frame a checkpoint time samples. Shared so selection and lookup agree. */
+export function frameIndexForCheckpoint(checkpointSec: number, fps: number): number {
+  return Math.max(0, Math.round(checkpointSec * fps));
+}
+
+const STATS_FILE_NAME = "psnr.log";
+
+/**
+ * PSNR for a set of frame indices, in a single ffmpeg pass.
+ *
+ * The original implementation spawned one ffmpeg per checkpoint, each
+ * selecting its frame with `select='eq(n,N)'`. That filter has no index, so
+ * ffmpeg decoded from frame 0 every time — checkpoint 99 decoded 99% of both
+ * videos to read a single frame. Across 100 checkpoints that is roughly 50
+ * full decodes of each video, and it dominated regression runtime (27% of
+ * total suite work; 60-80% on short fixtures).
+ *
+ * This keeps the original `select` semantics exactly and only collapses the
+ * spawns: both inputs are filtered to the same frame indices, chosen **by
+ * decode index, independently per input**, then compared pairwise.
+ *
+ * Selecting by index is load-bearing, not incidental. Handing the streams to
+ * `psnr` directly (`[0:v][1:v]psnr`) instead makes ffmpeg's framesync align
+ * them by presentation timestamp, and rendered output does not carry the same
+ * PTS as its golden baseline. That pairs frames which do not correspond: on
+ * style-3-prod it moved 80 of 100 checkpoints by more than 2 dB and turned
+ * three exactly-identical frames into 82/38/51 dB.
+ *
+ * `settb=1/1,setpts=N` after each `select` renumbers both selected streams to
+ * the same synthetic one-tick-per-frame timeline, so framesync pairs the Nth
+ * selected frame of one input with the Nth of the other. The timebase is
+ * pinned rather than derived (`setpts=N/FRAME_RATE/TB` is not enough) because
+ * `FRAME_RATE` is per-input: if the two videos report different rates, that
+ * form hands framesync two different timelines again and it silently emits a
+ * different number of rows than frames requested.
+ *
+ * Returns a 0-based frame index -> PSNR map. `stats_file` reports `psnr_avg`
+ * to two decimals where the old stderr parse had full float precision;
+ * thresholds are integers and fixtures pass with dB of margin, so the 0.005 dB
+ * rounding is not material.
+ */
+export function psnrAtFrames(
   renderedVideo: string,
   snapshotVideo: string,
+  frameIndices: number[],
+): Map<number, number> {
+  // Several checkpoints land on one frame when a fixture has fewer frames than
+  // checkpoints, and `select` emits such a frame once. Deduplicate so the
+  // filter output length is predictable and position-addressable.
+  const wanted = [...new Set(frameIndices)].sort((left, right) => left - right);
+  if (wanted.length === 0) return new Map();
+
+  const statsDir = mkdtempSync(join(tmpdir(), "hf-psnr-"));
+  const statsFile = join(statsDir, STATS_FILE_NAME);
+  try {
+    const selectExpr = wanted.map((frame) => `eq(n\\,${frame})`).join("+");
+    const stream = (index: number, label: string) =>
+      `[${index}:v]select='${selectExpr}',settb=1/1,setpts=N[${label}]`;
+    runFfmpeg(
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        resolve(renderedVideo),
+        "-i",
+        resolve(snapshotVideo),
+        "-filter_complex",
+        // shortest=1:repeatlast=0 makes framesync stop at the first stream to
+        // end instead of holding its last frame. Without them, an input that
+        // runs out of selected frames has its final frame repeated to pad the
+        // pairing, so ffmpeg still writes one row per requested frame and the
+        // count check below cannot tell that the tail rows compare a stale
+        // frame. Verified: 60-frame vs 30-frame inputs asking for frames
+        // [0,15,45] emit 3 rows under the defaults (row 3 comparing frame 45
+        // against a repeated frame 15, 16.65 dB) and 2 rows with these set.
+        `${stream(0, "rv")};${stream(1, "gv")};` +
+          `[rv][gv]psnr=shortest=1:repeatlast=0:stats_file=${STATS_FILE_NAME}`,
+        "-f",
+        "null",
+        "-",
+      ],
+      "Checkpoint PSNR",
+      // A bare name in cwd keeps every path out of the filtergraph and its escaping rules.
+      statsDir,
+    );
+
+    const values: number[] = [];
+    for (const line of readFileSync(statsFile, "utf-8").split("\n")) {
+      const psnrMatch = line.match(/(?:^|\s)psnr_avg:(\S+)/);
+      if (!psnrMatch) continue;
+      const raw = (psnrMatch[1] ?? "").trim().toLowerCase();
+      if (raw === "inf" || raw === "infinite") {
+        values.push(Number.POSITIVE_INFINITY);
+        continue;
+      }
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) {
+        throw new Error(`Invalid PSNR value in ffmpeg stats output: ${psnrMatch[1]}`);
+      }
+      values.push(parsed);
+    }
+
+    // A short count means an input ran out of frames, so every later pairing
+    // would be silently offset. The per-checkpoint implementation also failed
+    // loudly here; keep it that way rather than reporting PSNR for frames that
+    // were never compared.
+    if (values.length !== wanted.length) {
+      throw new Error(
+        `Expected PSNR for ${wanted.length} frames but ffmpeg reported ${values.length}. ` +
+          "The rendered output and baseline likely differ in frame count.",
+      );
+    }
+
+    return new Map(wanted.map((frame, position) => [frame, values[position] as number]));
+  } finally {
+    rmSync(statsDir, { recursive: true, force: true });
+  }
+}
+
+export function psnrAtCheckpoint(
+  psnrByFrame: Map<number, number>,
   checkpointSec: number,
   fps: number,
 ): number {
-  const frameIndex = Math.max(0, Math.round(checkpointSec * fps));
-  const filter = `[0:v]select='eq(n\\,${frameIndex})',setpts=PTS-STARTPTS[rv];[1:v]select='eq(n\\,${frameIndex})',setpts=PTS-STARTPTS[gv];[rv][gv]psnr`;
-  const args = [
-    "-hide_banner",
-    "-loglevel",
-    "info",
-    "-i",
-    renderedVideo,
-    "-i",
-    snapshotVideo,
-    "-filter_complex",
-    filter,
-    "-frames:v",
-    "1",
-    "-f",
-    "null",
-    "-",
-  ];
-  const { stderr } = runFfmpeg(args, `Frame PSNR at ${checkpointSec}s`);
-  const match = stderr.match(/average:\s*([^\s]+)/i);
-  if (!match) {
-    throw new Error(`Unable to parse PSNR output at ${checkpointSec}s`);
-  }
-  const rawValue = (match[1] ?? "").trim().toLowerCase();
-  if (rawValue === "inf" || rawValue === "infinite") {
-    return Number.POSITIVE_INFINITY;
-  }
-  const parsedValue = Number(rawValue);
-  if (!Number.isFinite(parsedValue)) {
-    throw new Error(`Invalid PSNR value at ${checkpointSec}s: ${match[1]}`);
+  const frameIndex = frameIndexForCheckpoint(checkpointSec, fps);
+  const parsedValue = psnrByFrame.get(frameIndex);
+  if (parsedValue === undefined) {
+    throw new Error(`Unable to parse PSNR output at ${checkpointSec}s (frame ${frameIndex})`);
   }
   return parsedValue;
 }
@@ -785,9 +922,56 @@ function saveFailureDetails(
 
     logPretty(`Saved audio failure details to ${failuresDir}/`, "💾");
   }
+
+  // Save stream duration parity failures
+  if (result.streamDurationParity && !result.streamDurationParity.passed) {
+    writeFileSync(
+      join(failuresDir, "stream-parity-failure.json"),
+      JSON.stringify(result.streamDurationParity, null, 2),
+      "utf-8",
+    );
+    logPretty(`Saved stream duration parity failure to ${failuresDir}/`, "💾");
+  }
+}
+
+// ── Stream Duration Parity ──────────────────────────────────────────────────
+
+export const MAX_STREAM_DRIFT_SECONDS = 0.5;
+
+export type StreamDurationParity = {
+  passed: boolean;
+  videoDurationSeconds: number;
+  audioDurationSeconds: number;
+  driftSeconds: number;
+};
+
+export async function checkStreamDurationParity(
+  videoPath: string,
+): Promise<StreamDurationParity | null> {
+  const meta = await extractMediaMetadata(videoPath);
+  if (!meta.hasAudio) return null;
+  // Read the audio stream's own duration rather than the container's
+  // format.duration. extractAudioMetadata returns format.duration which
+  // collapses to the same value as videoStreamDurationSeconds when the
+  // fallback fires — making the check a tautology on broken muxes where
+  // both streams are truncated in sync.
+  const audioMeta = await extractAudioMetadata(videoPath);
+  const videoDur = meta.videoStreamDurationSeconds;
+  const audioDur = audioMeta.streamDurationSeconds ?? audioMeta.durationSeconds;
+  const drift = Math.abs(videoDur - audioDur);
+  return {
+    passed: drift <= MAX_STREAM_DRIFT_SECONDS,
+    videoDurationSeconds: videoDur,
+    audioDurationSeconds: audioDur,
+    driftSeconds: drift,
+  };
 }
 
 // ── Test Execution ───────────────────────────────────────────────────────────
+
+export function createRegressionTempRoot(suiteId: string, parent: string = tmpdir()): string {
+  return mkdtempSync(join(parent, `hyperframes-test-${suiteId}-`));
+}
 
 async function runTestSuite(
   suite: TestSuite,
@@ -797,17 +981,7 @@ async function runTestSuite(
     mode: HarnessMode;
   },
 ): Promise<TestResult> {
-  // Use predictable temp location: /tmp/hyperframes-tests/{test-id}/
-  const testsRoot = join(tmpdir(), "hyperframes-tests");
-  if (!existsSync(testsRoot)) {
-    mkdirSync(testsRoot, { recursive: true });
-  }
-
-  const tempRoot = join(testsRoot, suite.id);
-  if (existsSync(tempRoot)) {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
-  mkdirSync(tempRoot, { recursive: true });
+  const tempRoot = createRegressionTempRoot(suite.id);
 
   const tempDownloadDir = join(tempRoot, "downloads");
   const outputFormat = suite.meta.renderConfig.format ?? "mp4";
@@ -968,18 +1142,39 @@ async function runTestSuite(
         await runDistributedSimulatedRender(distributedInput);
       }
     } else {
-      const job = createRenderJob({
-        fps: suite.meta.renderConfig.fps,
-        quality: "high", // Always use max quality for tests
-        format: outputFormat,
-        workers: suite.meta.renderConfig.workers,
-        useGpu: false,
-        debug: false,
-        hdrMode: suite.meta.renderConfig.hdr ? "force-hdr" : "force-sdr",
-        variables: suite.meta.renderConfig.variables,
-      });
+      // Opt-in fast capture (drawElementImage): drives resolveConfig via the env
+      // var, scoped to this suite's render so it never leaks to other suites.
+      const useFast = suite.meta.renderConfig.experimentalFastCapture === true;
+      const prevFast = process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE;
+      const captureMode = suite.meta.renderConfig.captureMode;
+      const prevForceScreenshot = process.env.PRODUCER_FORCE_SCREENSHOT;
+      if (useFast) process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE = "true";
+      if (captureMode) {
+        process.env.PRODUCER_FORCE_SCREENSHOT = captureMode === "screenshot" ? "true" : "false";
+      }
+      try {
+        const job = createRenderJob({
+          fps: suite.meta.renderConfig.fps,
+          quality: "high", // Always use max quality for tests
+          format: outputFormat,
+          workers: suite.meta.renderConfig.workers,
+          useGpu: false,
+          debug: false,
+          hdrMode: suite.meta.renderConfig.hdr ? "force-hdr" : "force-sdr",
+          variables: suite.meta.renderConfig.variables,
+        });
 
-      await executeRenderJob(job, tempSrcDir, renderedOutputPath);
+        await executeRenderJob(job, tempSrcDir, renderedOutputPath);
+      } finally {
+        if (useFast) {
+          if (prevFast === undefined) delete process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE;
+          else process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE = prevFast;
+        }
+        if (captureMode) {
+          if (prevForceScreenshot === undefined) delete process.env.PRODUCER_FORCE_SCREENSHOT;
+          else process.env.PRODUCER_FORCE_SCREENSHOT = prevForceScreenshot;
+        }
+      }
     }
 
     console.log(JSON.stringify({ event: "rendering_complete", suite: suite.id }));
@@ -1015,6 +1210,24 @@ async function runTestSuite(
     // Test mode: compare against snapshot
     if (!existsSync(snapshotVideoPath)) {
       throw new Error(`Snapshot not found: ${snapshotVideoPath}. Run with --update to create it.`);
+    }
+
+    if (!isPngSequence) {
+      const parity = await checkStreamDurationParity(renderedOutputPath);
+      if (parity) {
+        result.streamDurationParity = parity;
+        if (parity.passed) {
+          logPretty(
+            `Stream duration parity: PASSED (video: ${parity.videoDurationSeconds.toFixed(2)}s, audio: ${parity.audioDurationSeconds.toFixed(2)}s, drift: ${parity.driftSeconds.toFixed(3)}s)`,
+            "✓",
+          );
+        } else {
+          logPretty(
+            `Stream duration parity: FAILED (video: ${parity.videoDurationSeconds.toFixed(2)}s, audio: ${parity.audioDurationSeconds.toFixed(2)}s, drift: ${parity.driftSeconds.toFixed(3)}s > ${MAX_STREAM_DRIFT_SECONDS}s)`,
+            "✗",
+          );
+        }
+      }
     }
 
     let visualPassed: boolean;
@@ -1084,29 +1297,23 @@ async function runTestSuite(
       logPretty("Comparing visual quality (100 checkpoints)...", "🔍");
       const videoMetadata = await extractMediaMetadata(renderedOutputPath);
       const snapshotMetadata = await extractMediaMetadata(snapshotVideoPath);
-      // Sample at the common duration. Container duration can drift between
-      // rendered and snapshot when encoder/mux flags change (e.g. -avoid_negative_ts
-      // can shift the first audio sample, extending reported duration without
-      // changing video frame count). Using the rendered duration alone makes the
-      // last checkpoint land on a frame index that may not exist in the snapshot,
-      // which causes ffmpeg's PSNR filter to emit no `average:` line.
       const videoDuration = Math.min(
-        videoMetadata.durationSeconds,
-        snapshotMetadata.durationSeconds,
+        videoMetadata.videoStreamDurationSeconds,
+        snapshotMetadata.videoStreamDurationSeconds,
       );
       const fps = fpsToNumber(suite.meta.renderConfig.fps);
-      // Container duration includes audio padding past the last video frame
-      // (e.g. many-cuts: 5.654s container vs 5.6s of video). At i=99 the
-      // raw container duration maps to a frame index past nb_frames, and
-      // ffmpeg's PSNR filter emits no `average:` line for a non-existent
-      // frame. Subtract one frame interval so the last checkpoint always
-      // lands on a frame the video stream actually contains.
       const sampleDuration = Math.max(0, videoDuration - 1 / fps);
 
       const minPsnrForMode = resolveMinPsnrForMode(options.mode, suite.meta.minPsnr);
+      const checkpointTimes = Array.from({ length: 100 }, (_, i) => (sampleDuration * i) / 100);
+      const psnrByFrame = psnrAtFrames(
+        renderedOutputPath,
+        snapshotVideoPath,
+        checkpointTimes.map((time) => frameIndexForCheckpoint(time, fps)),
+      );
       for (let i = 0; i < 100; i++) {
-        const time = (sampleDuration * i) / 100;
-        const psnr = psnrAtCheckpoint(renderedOutputPath, snapshotVideoPath, time, fps);
+        const time = checkpointTimes[i] as number;
+        const psnr = psnrAtCheckpoint(psnrByFrame, time, fps);
         visualCheckpoints.push({
           time,
           psnr,
@@ -1233,7 +1440,8 @@ async function runTestSuite(
     }
 
     // Overall test passes if all checks passed
-    result.passed = result.compilation!.passed && visualPassed && audioPassed;
+    const parityPassed = result.streamDurationParity?.passed ?? true;
+    result.passed = result.compilation!.passed && visualPassed && audioPassed && parityPassed;
     result.renderedOutputPath = options.keepTemp ? renderedOutputPath : undefined;
 
     if (result.passed) {
@@ -1430,12 +1638,14 @@ async function run(): Promise<void> {
   }
 }
 
-void run().catch((error) => {
-  console.error(
-    JSON.stringify({
-      event: "test_suite_fatal",
-      message: error instanceof Error ? error.message : String(error),
-    }),
-  );
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  void run().catch((error) => {
+    console.error(
+      JSON.stringify({
+        event: "test_suite_fatal",
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    process.exitCode = 1;
+  });
+}

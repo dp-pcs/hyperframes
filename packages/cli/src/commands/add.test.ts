@@ -1,9 +1,29 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { runCommand as runCittyCommand, type CommandDef } from "citty";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RegistryItem, RegistryManifest } from "@hyperframes/core";
-import { AddError, buildSnippet, remapTarget, runAdd } from "./add.js";
+import { lintHyperframeHtml } from "@hyperframes/lint";
+import type { RunAddResult } from "./add.js";
+import addCommand, {
+  AddError,
+  buildSnippet,
+  compositionRootId,
+  describeInstallFailure,
+  parseVariableValues,
+  remapTarget,
+  runAdd,
+  tagAddJson,
+} from "./add.js";
+import { trackRegistryItemAdded } from "../telemetry/events.js";
+import { CliUsageError } from "../utils/commandResult.js";
+import { trackCommandFailures } from "../utils/command-failure-tracking.js";
+
+// Assert the emitted payload rather than the transport: `shouldTrack()` is
+// already false under test (dev mode / no PostHog key), so a real call would
+// be indistinguishable from no call at all.
+vi.mock("../telemetry/events.js", () => ({ trackRegistryItemAdded: vi.fn() }));
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -13,6 +33,10 @@ const MANIFEST: RegistryManifest = {
   homepage: "https://example.com",
   items: [
     { name: "my-block", type: "hyperframes:block" },
+    { name: "deprecated-block", type: "hyperframes:block" },
+    { name: "future-block", type: "hyperframes:block" },
+    { name: "dep-block", type: "hyperframes:block" },
+    { name: "base-component", type: "hyperframes:component" },
     { name: "my-component", type: "hyperframes:component" },
     { name: "my-example", type: "hyperframes:example" },
   ],
@@ -60,6 +84,64 @@ const COMPONENT_ITEM: RegistryItem = {
   ],
 };
 
+const DEPRECATED_BLOCK_ITEM: RegistryItem = {
+  ...BLOCK_ITEM,
+  name: "deprecated-block",
+  title: "Deprecated Block",
+  deprecated: "Use `my-block` instead.",
+  files: [
+    {
+      path: "deprecated-block.html",
+      target: "compositions/deprecated-block.html",
+      type: "hyperframes:composition",
+    },
+  ],
+};
+
+const FUTURE_BLOCK_ITEM: RegistryItem = {
+  ...BLOCK_ITEM,
+  name: "future-block",
+  title: "Future Block",
+  minCliVersion: "999.0.0",
+  files: [
+    {
+      path: "future-block.html",
+      target: "compositions/future-block.html",
+      type: "hyperframes:composition",
+    },
+  ],
+};
+
+const BASE_COMPONENT_ITEM: RegistryItem = {
+  $schema: "https://hyperframes.heygen.com/schema/registry-item.json",
+  name: "base-component",
+  type: "hyperframes:component",
+  title: "Base Component",
+  description: "Base component dependency for tests",
+  files: [
+    {
+      path: "base-component.css",
+      target: "compositions/components/base-component/base-component.css",
+      type: "hyperframes:style",
+    },
+  ],
+};
+
+// A block that declares a transitive registryDependency on base-component.
+const DEP_BLOCK_ITEM: RegistryItem = {
+  ...BLOCK_ITEM,
+  name: "dep-block",
+  title: "Dependent Block",
+  registryDependencies: ["base-component"],
+  files: [
+    {
+      path: "dep-block.html",
+      target: "compositions/dep-block.html",
+      type: "hyperframes:composition",
+    },
+  ],
+};
+
 const EXAMPLE_ITEM: RegistryItem = {
   $schema: "https://hyperframes.heygen.com/schema/registry-item.json",
   name: "my-example",
@@ -73,8 +155,20 @@ const EXAMPLE_ITEM: RegistryItem = {
 
 const ITEM_BY_NAME: Record<string, RegistryItem> = {
   "my-block": BLOCK_ITEM,
+  "deprecated-block": DEPRECATED_BLOCK_ITEM,
+  "future-block": FUTURE_BLOCK_ITEM,
+  "dep-block": DEP_BLOCK_ITEM,
+  "base-component": BASE_COMPONENT_ITEM,
   "my-component": COMPONENT_ITEM,
   "my-example": EXAMPLE_ITEM,
+};
+
+const DEP_BLOCK_HTML = `<div data-composition-variables='[{ "id": "maths", "type": "boolean", "label": "Maths", "default": false }]'></div>`;
+
+const FILE_BODIES: Record<string, string> = {
+  "dep-block.html": DEP_BLOCK_HTML,
+  "deprecated-block.html": `<div data-composition-id="deprecated-block"></div>`,
+  "my-block.html": `<div data-composition-id="my-block-root" data-width="1080" data-height="1350"></div>`,
 };
 
 function mockFetch(): void {
@@ -93,7 +187,7 @@ function mockFetch(): void {
       // File fetch — match `/<type-dir>/<name>/<rest>` and serve synthetic content.
       const f = /\/(examples|blocks|components)\/([^/]+)\/(.+)$/.exec(url);
       if (f) {
-        return new Response(`/* ${f[3]} */\n`, { status: 200 });
+        return new Response(FILE_BODIES[f[3]!] ?? `/* ${f[3]} */\n`, { status: 200 });
       }
       return new Response("not found", { status: 404 });
     }),
@@ -106,6 +200,27 @@ function tmp(): string {
 
 function uniqueBase(): string {
   return `https://test.invalid/${crypto.randomUUID()}`;
+}
+
+const DEFAULT_TEST_PATHS = {
+  blocks: "compositions",
+  components: "compositions/components",
+  assets: "assets",
+};
+
+function writeRegistryConfig(
+  dir: string,
+  paths: typeof DEFAULT_TEST_PATHS = DEFAULT_TEST_PATHS,
+): void {
+  writeFileSync(
+    join(dir, "hyperframes.json"),
+    JSON.stringify({
+      $schema: "https://hyperframes.heygen.com/schema/hyperframes.json",
+      registry: uniqueBase(),
+      paths,
+    }),
+    "utf-8",
+  );
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -150,6 +265,26 @@ describe("add command pure helpers", () => {
       expect(snip).toContain('data-duration="6"');
     });
 
+    it("reads a composition's root id, inside its <template> when it has one", () => {
+      expect(compositionRootId(`<div data-composition-id="plain" data-width="1"></div>`)).toBe(
+        "plain",
+      );
+      expect(
+        compositionRootId(
+          `<html><head><template id="t"><div data-composition-id="templated"></div></template></head><body></body></html>`,
+        ),
+      ).toBe("templated");
+      expect(compositionRootId(`<div>no root</div>`)).toBeUndefined();
+    });
+
+    it("gives the block host the composition id that check requires", async () => {
+      const snip = buildSnippet(BLOCK_ITEM, "compositions/my-block.html", null, "my-block-root");
+      const html = `<!doctype html><html><body><div data-composition-id="root" data-width="1080" data-height="1350">${snip}</div></body></html>`;
+      const { findings } = await lintHyperframeHtml(html);
+      expect(findings.map((f) => f.code)).not.toContain("host_missing_composition_id");
+      expect(snip).toContain('data-composition-id="my-block-root"');
+    });
+
     it("emits a paste hint for components", () => {
       const snip = buildSnippet(COMPONENT_ITEM, "src/fx/my-component/my-component.html");
       expect(snip).toContain("paste from");
@@ -163,7 +298,10 @@ describe("add command pure helpers", () => {
 });
 
 describe("runAdd (integration, mocked registry)", () => {
-  beforeEach(() => mockFetch());
+  beforeEach(() => {
+    vi.mocked(trackRegistryItemAdded).mockClear();
+    mockFetch();
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -172,24 +310,64 @@ describe("runAdd (integration, mocked registry)", () => {
     const dir = tmp();
     try {
       // Write hyperframes.json so runAdd uses our unique baseUrl.
-      const baseUrl = uniqueBase();
-      const cfg = {
-        $schema: "https://hyperframes.heygen.com/schema/hyperframes.json",
-        registry: baseUrl,
-        paths: { blocks: "compositions", components: "compositions/components", assets: "assets" },
-      };
-      writeFileSync(join(dir, "hyperframes.json"), JSON.stringify(cfg), "utf-8");
+      writeRegistryConfig(dir);
 
       const result = await runAdd({ name: "my-block", projectDir: dir, skipClipboard: true });
       expect(result.ok).toBe(true);
       expect(result.name).toBe("my-block");
       expect(result.type).toBe("hyperframes:block");
       expect(result.written).toHaveLength(1);
+      expect(result.installed).toEqual(["my-block"]);
+      expect(result.warnings).toEqual([]);
       expect(existsSync(join(dir, "compositions/my-block.html"))).toBe(true);
       const installed = readFileSync(join(dir, "compositions/my-block.html"), "utf-8");
       expect(installed).toContain("<!-- hyperframes-registry-item: my-block -->");
-      expect(installed).toContain("my-block.html");
+      expect(installed).toContain('data-composition-id="my-block-root"');
       expect(result.snippet).toContain("compositions/my-block.html");
+      expect(result.snippet).toContain('data-composition-id="my-block-root"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a warning for deprecated registry items while still installing", async () => {
+    const dir = tmp();
+    try {
+      writeRegistryConfig(dir);
+
+      const result = await runAdd({
+        name: "deprecated-block",
+        projectDir: dir,
+        skipClipboard: true,
+      });
+      expect(result.warnings).toEqual([
+        'Registry item "deprecated-block" is deprecated: Use `my-block` instead.',
+      ]);
+      expect(existsSync(join(dir, "compositions/deprecated-block.html"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks registry items that require a newer CLI before writing files", async () => {
+    const dir = tmp();
+    try {
+      writeRegistryConfig(dir);
+
+      await expect(
+        runAdd({
+          name: "future-block",
+          projectDir: dir,
+          skipClipboard: true,
+          cliVersion: "0.6.79",
+        }),
+      ).rejects.toMatchObject({
+        code: "incompatible-cli",
+      });
+      expect(existsSync(join(dir, "compositions/future-block.html"))).toBe(false);
+      // Nothing was written, so nothing may be counted: an install count that
+      // also counts refused installs is not a download count.
+      expect(trackRegistryItemAdded).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -198,13 +376,7 @@ describe("runAdd (integration, mocked registry)", () => {
   it("remaps component snippet/style targets while leaving asset targets stable", async () => {
     const dir = tmp();
     try {
-      const baseUrl = uniqueBase();
-      const cfg = {
-        $schema: "https://hyperframes.heygen.com/schema/hyperframes.json",
-        registry: baseUrl,
-        paths: { blocks: "compositions", components: "src/fx", assets: "assets" },
-      };
-      writeFileSync(join(dir, "hyperframes.json"), JSON.stringify(cfg), "utf-8");
+      writeRegistryConfig(dir, { blocks: "compositions", components: "src/fx", assets: "assets" });
 
       const result = await runAdd({
         name: "my-component",
@@ -221,22 +393,75 @@ describe("runAdd (integration, mocked registry)", () => {
     }
   });
 
+  it("refuses a wrong-typed --vars before writing any item in the plan", async () => {
+    const dir = tmp();
+    try {
+      writeRegistryConfig(dir);
+      await expect(
+        runAdd({ name: "dep-block", projectDir: dir, skipClipboard: true, vars: '{"maths":1}' }),
+      ).rejects.toThrow(/maths: expected boolean, got number/);
+      expect(existsSync(join(dir, "compositions/components/base-component"))).toBe(false);
+      expect(existsSync(join(dir, "hyperframes.lock.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs transitive registryDependencies before the requested item", async () => {
+    const dir = tmp();
+    try {
+      writeRegistryConfig(dir);
+
+      const result = await runAdd({ name: "dep-block", projectDir: dir, skipClipboard: true });
+      expect(result.name).toBe("dep-block");
+      // Dependency first, requested item last.
+      expect(result.installed).toEqual(["base-component", "dep-block"]);
+      expect(result.written).toHaveLength(2);
+      expect(
+        existsSync(join(dir, "compositions/components/base-component/base-component.css")),
+      ).toBe(true);
+      expect(existsSync(join(dir, "compositions/dep-block.html"))).toBe(true);
+      // Snippet points at the requested block, not the dependency.
+      expect(result.snippet).toContain("compositions/dep-block.html");
+      expect(result.warnings).toEqual([
+        expect.stringContaining("compositions/dep-block.html declares no data-composition-id"),
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports every installed item, marking only the requested one", async () => {
+    const dir = tmp();
+    try {
+      writeRegistryConfig(dir);
+
+      await runAdd({ name: "dep-block", projectDir: dir, skipClipboard: true });
+
+      // A dependency dragged in behind the request must not read as a vote for
+      // itself, or a popular dependency outranks everything that depends on it.
+      expect(trackRegistryItemAdded).toHaveBeenCalledTimes(2);
+      expect(trackRegistryItemAdded).toHaveBeenCalledWith({
+        item: "base-component",
+        itemType: "hyperframes:component",
+        requested: false,
+        source: "cli",
+      });
+      expect(trackRegistryItemAdded).toHaveBeenCalledWith({
+        item: "dep-block",
+        itemType: "hyperframes:block",
+        requested: true,
+        source: "cli",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("throws AddError with code 'example-type' when asked to add an example", async () => {
     const dir = tmp();
     try {
-      const baseUrl = uniqueBase();
-      writeFileSync(
-        join(dir, "hyperframes.json"),
-        JSON.stringify({
-          registry: baseUrl,
-          paths: {
-            blocks: "compositions",
-            components: "compositions/components",
-            assets: "assets",
-          },
-        }),
-        "utf-8",
-      );
+      writeRegistryConfig(dir);
 
       await expect(
         runAdd({ name: "my-example", projectDir: dir, skipClipboard: true }),
@@ -251,19 +476,7 @@ describe("runAdd (integration, mocked registry)", () => {
   it("throws AddError with code 'unknown-item' for a missing name", async () => {
     const dir = tmp();
     try {
-      const baseUrl = uniqueBase();
-      writeFileSync(
-        join(dir, "hyperframes.json"),
-        JSON.stringify({
-          registry: baseUrl,
-          paths: {
-            blocks: "compositions",
-            components: "compositions/components",
-            assets: "assets",
-          },
-        }),
-        "utf-8",
-      );
+      writeRegistryConfig(dir);
 
       await expect(
         runAdd({ name: "nope", projectDir: dir, skipClipboard: true }),
@@ -271,5 +484,140 @@ describe("runAdd (integration, mocked registry)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("variable values in the snippet", () => {
+  const block = {
+    name: "split-flap-board",
+    type: "hyperframes:block",
+    duration: 3.5,
+    dimensions: { width: 1920, height: 1080 },
+  } as unknown as RegistryItem;
+
+  it("leaves the snippet alone when no values are passed", () => {
+    const snippet = buildSnippet(block, "compositions/split-flap-board.html");
+    expect(snippet).not.toContain("data-variable-values");
+  });
+
+  it("carries values tuned on the catalog page", () => {
+    const snippet = buildSnippet(block, "compositions/split-flap-board.html", {
+      boardText: "GATE 42",
+      cellCount: 16,
+    });
+    expect(snippet).toContain(`data-variable-values='{"boardText":"GATE 42","cellCount":16}'`);
+  });
+
+  it("escapes a single quote rather than letting it close the attribute", () => {
+    const snippet = buildSnippet(block, "x.html", { boardText: "IT'S BOARDING" });
+    expect(snippet).toContain("&#39;");
+    expect(snippet.match(/data-variable-values='/g)?.length).toBe(1);
+  });
+
+  it("treats an empty object as nothing to say", () => {
+    expect(buildSnippet(block, "x.html", {})).not.toContain("data-variable-values");
+  });
+
+  it("rejects --vars that is not a JSON object", () => {
+    expect(() => parseVariableValues("not json")).toThrow(/JSON object/);
+    expect(() => parseVariableValues("[1,2]")).toThrow(/JSON object/);
+    expect(parseVariableValues(undefined)).toBeNull();
+  });
+});
+
+describe("add command run() — extra positional arguments", () => {
+  let dir: string;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = tmp();
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    vi.unstubAllGlobals();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function runWrapped(rawArgs: string[]): Promise<void> {
+    const cmd = await trackCommandFailures(() => Promise.resolve(addCommand as CommandDef))();
+    await runCittyCommand(cmd, { rawArgs });
+  }
+
+  it("rejects `add a --dir <dir> b c` through the CLI wrapper, before any registry call", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(runWrapped(["a", "--dir", dir, "b", "c"])).rejects.toThrow(CliUsageError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain(
+      "Unexpected extra arguments for hyperframes add: b, c",
+    );
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("Run add once per item");
+  });
+
+  it("does not fire on a normal single-item invocation", async () => {
+    mockFetch();
+    writeRegistryConfig(dir);
+
+    await expect(
+      runWrapped(["my-block", "--dir", dir, "--no-clipboard", "--json"]),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("describeInstallFailure", () => {
+  it("explains a bare transport failure instead of echoing it", () => {
+    // What the user actually sees after copying a command off the catalog page.
+    // Item FILES are not cached, so a blip surfaces as node's `fetch failed`
+    // with no URL and no cause, and reads like the command was wrong.
+    const message = describeInstallFailure(new Error("fetch failed"));
+
+    expect(message).toContain("could not download the item's files");
+    expect(message).toContain("rather than a bad command");
+    expect(message).toContain("HTTPS_PROXY");
+  });
+
+  it("names the project's own registry when it is not the public one", () => {
+    // The reported failure: hyperframes.json pointed at a private host with a
+    // self-signed certificate. Telling that reader to check their connection
+    // sends them to debug the one thing that was working.
+    const message = describeInstallFailure(
+      new Error("fetch failed"),
+      "https://private.example/registry",
+    );
+
+    expect(message).toContain("https://private.example/registry");
+    expect(message).toContain("not the public registry");
+  });
+
+  it("stays quiet about the registry when it is the default one", () => {
+    const message = describeInstallFailure(
+      new Error("fetch failed"),
+      "https://raw.githubusercontent.com/heygen-com/hyperframes/main/registry",
+    );
+
+    expect(message).not.toContain("not the public registry");
+  });
+
+  it("leaves a non-transport failure exactly as it was", () => {
+    // An unsafe target or a malformed item is the caller's problem to read; a
+    // connectivity lecture there would send them to fix the wrong thing.
+    const message = describeInstallFailure(new Error('Unsafe target "../x"'));
+
+    expect(message).toBe('Install failed: Unsafe target "../x"');
+  });
+});
+
+describe("tagAddJson", () => {
+  it("carries every installed item's warnings", () => {
+    const result = (name: string, warnings: string[]) => ({ name, warnings }) as RunAddResult;
+    expect(tagAddJson("lower-thirds", [result("a", []), result("b", ["no id"])])).toEqual({
+      ok: true,
+      tag: "lower-thirds",
+      installed: ["a", "b"],
+      warnings: ["b: no id"],
+    });
   });
 });

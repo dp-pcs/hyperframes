@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -10,9 +20,15 @@ import {
   cacheEntryDirName,
   computeCacheKey,
   ensureCacheEntryDir,
+  gcExtractionCache,
   lookupCacheEntry,
   markCacheEntryComplete,
+  partialCacheEntryDir,
+  publishCacheEntry,
+  readContentSha256,
   readKeyStat,
+  rehydrateCacheEntry,
+  touchCacheDir,
   type CacheKeyInput,
 } from "./extractionCache.js";
 
@@ -25,15 +41,34 @@ const keyFor = (videoPath: string, overrides: Partial<CacheKeyInput> = {}): Cach
     size: stat.size,
     mediaStart: 0,
     duration: 3,
-    fps: 30,
+    fps: "30",
     format: "jpg",
     ...overrides,
   };
 };
 
+function makeCacheRoot(): { tmpRoot: string; sourceFile: string } {
+  const tmpRoot = mkdtempSync(join(tmpdir(), "hf-extract-cache-test-"));
+  const sourceFile = join(tmpRoot, "clip.mp4");
+  writeFileSync(sourceFile, "fake-video-bytes", "utf-8");
+  return { tmpRoot, sourceFile };
+}
+
+function removeCacheRoot(tmpRoot: string): void {
+  if (existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+/** Create and populate a partial dir for `entry` with one frame file. */
+function seedPartialDir(entry: { dir: string; keyHash: string }, frameContent: string): string {
+  const partialDir = partialCacheEntryDir(entry);
+  mkdirSync(partialDir, { recursive: true });
+  writeFileSync(join(partialDir, "frame_00001.jpg"), frameContent, "utf-8");
+  return partialDir;
+}
+
 describe("extractionCache constants", () => {
-  it("exposes the v2 schema prefix", () => {
-    expect(SCHEMA_PREFIX).toBe("hfcache-v2-");
+  it("exposes the v7 schema prefix", () => {
+    expect(SCHEMA_PREFIX).toBe("hfcache-v7-");
   });
 
   it("exposes the frame filename prefix shared with the extractor", () => {
@@ -45,18 +80,52 @@ describe("extractionCache constants", () => {
   });
 });
 
+describe("rehydrateCacheEntry frame identity", () => {
+  it("fails loudly when a complete cache has a frame-number gap", () => {
+    const { tmpRoot } = makeCacheRoot();
+    try {
+      writeFileSync(join(tmpRoot, "frame_00001.jpg"), "one");
+      writeFileSync(join(tmpRoot, "frame_00003.jpg"), "three");
+
+      expect(() =>
+        rehydrateCacheEntry(
+          { dir: tmpRoot, keyHash: "a".repeat(64) },
+          {
+            videoId: "video-gap",
+            srcPath: "/video.mp4",
+            fps: 30,
+            format: "jpg",
+            metadata: {
+              durationSeconds: 1,
+              videoStreamDurationSeconds: 1,
+              width: 1920,
+              height: 1080,
+              fps: 30,
+              videoCodec: "h264",
+              hasAudio: false,
+              isVFR: false,
+              hasAlpha: false,
+              colorSpace: null,
+            },
+          },
+        ),
+      ).toThrow(/missing.*frame index 1/i);
+    } finally {
+      removeCacheRoot(tmpRoot);
+    }
+  });
+});
+
 describe("computeCacheKey", () => {
   let tmpRoot: string;
   let sourceFile: string;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "hf-extract-cache-test-"));
-    sourceFile = join(tmpRoot, "clip.mp4");
-    writeFileSync(sourceFile, "fake-video-bytes", "utf-8");
+    ({ tmpRoot, sourceFile } = makeCacheRoot());
   });
 
   afterEach(() => {
-    if (existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+    removeCacheRoot(tmpRoot);
   });
 
   const base = (videoPath: string): CacheKeyInput => keyFor(videoPath);
@@ -70,6 +139,34 @@ describe("computeCacheKey", () => {
   it("produces a 64-char hex SHA-256 digest", () => {
     const key = computeCacheKey(base(sourceFile));
     expect(key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("keys a path-keyed source exactly as before content keys existed", () => {
+    const input = base(sourceFile);
+    const legacyBlob = JSON.stringify({
+      p: input.videoPath,
+      m: input.mtimeMs,
+      s: input.size,
+      ms: 0,
+      d: 3,
+      f: "30",
+      fmt: "jpg",
+    });
+    expect(computeCacheKey(input)).toBe(createHash("sha256").update(legacyBlob).digest("hex"));
+  });
+
+  it("keys a content-addressed source by its bytes, not its path or mtime", () => {
+    const moved = join(tmpRoot, "moved.mp4");
+    writeFileSync(moved, "fake-video-bytes", "utf-8");
+    const original = computeCacheKey({ ...base(sourceFile), contentSha256: "a1" });
+    expect(computeCacheKey({ ...base(moved), mtimeMs: 1, contentSha256: "a1" })).toBe(original);
+    expect(computeCacheKey({ ...base(sourceFile), contentSha256: "b2" })).not.toBe(original);
+  });
+
+  it("hashes a file's bytes for its content key, or skips the cache when unreadable", async () => {
+    const expected = createHash("sha256").update("fake-video-bytes").digest("hex");
+    expect(await readContentSha256(sourceFile)).toBe(expected);
+    expect(await readContentSha256(join(tmpRoot, "missing.mp4"))).toBeNull();
   });
 
   it("changes when path changes (moved files re-extract)", () => {
@@ -94,14 +191,34 @@ describe("computeCacheKey", () => {
 
   it("changes when fps changes (different frame count invalidates key)", () => {
     const a = computeCacheKey(base(sourceFile));
-    const b = computeCacheKey({ ...base(sourceFile), fps: 60 });
+    const b = computeCacheKey({ ...base(sourceFile), fps: "60" });
     expect(a).not.toBe(b);
+  });
+
+  it("keeps exact rational rates distinct from their JavaScript decimal", () => {
+    const rational = computeCacheKey({ ...base(sourceFile), fps: "30000/1001" });
+    const decimal = computeCacheKey({ ...base(sourceFile), fps: String(30000 / 1001) });
+    expect(rational).not.toBe(decimal);
   });
 
   it("changes when format changes", () => {
     const a = computeCacheKey(base(sourceFile));
     const b = computeCacheKey({ ...base(sourceFile), format: "png" });
     expect(a).not.toBe(b);
+  });
+
+  it("changes when a source transform is applied", () => {
+    const plain = computeCacheKey(base(sourceFile));
+    const transformedInput = { ...base(sourceFile), transform: "sdr2hdr-pq" };
+    const transformed = computeCacheKey(transformedInput);
+    expect(transformed).not.toBe(plain);
+  });
+
+  it("keeps undefined transform byte-compatible with omitted transform", () => {
+    const omitted = computeCacheKey(base(sourceFile));
+    const input = { ...base(sourceFile), transform: undefined };
+    const explicitUndefined = computeCacheKey(input);
+    expect(explicitUndefined).toBe(omitted);
   });
 
   it("normalizes non-finite duration so Infinity doesn't produce unstable keys", () => {
@@ -148,16 +265,39 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
   let sourceFile: string;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "hf-extract-cache-test-"));
-    sourceFile = join(tmpRoot, "clip.mp4");
-    writeFileSync(sourceFile, "fake-video-bytes", "utf-8");
+    ({ tmpRoot, sourceFile } = makeCacheRoot());
   });
 
   afterEach(() => {
-    if (existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+    removeCacheRoot(tmpRoot);
   });
 
   const base = (videoPath: string): CacheKeyInput => keyFor(videoPath);
+
+  it("does not reuse a complete entry from the v3 numeric-fps namespace", () => {
+    const input = base(sourceFile);
+    const keyHash = computeCacheKey(input);
+    const staleV3Dir = join(tmpRoot, `hfcache-v3-${keyHash.slice(0, 16)}`);
+    mkdirSync(staleV3Dir, { recursive: true });
+    writeFileSync(join(staleV3Dir, COMPLETE_SENTINEL), "", "utf-8");
+
+    const lookup = lookupCacheEntry(tmpRoot, input);
+    expect(lookup.hit).toBe(false);
+    expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
+  });
+
+  it("does not reuse a complete v6 entry, whose VFR frames were sampled by packet duration", () => {
+    const input = base(sourceFile);
+    const keyHash = computeCacheKey(input);
+    const staleV6Dir = join(tmpRoot, `hfcache-v6-${keyHash.slice(0, 16)}`);
+    mkdirSync(staleV6Dir, { recursive: true });
+    writeFileSync(join(staleV6Dir, "frame_00001.jpg"), "old", "utf-8");
+    writeFileSync(join(staleV6Dir, COMPLETE_SENTINEL), "", "utf-8");
+
+    const lookup = lookupCacheEntry(tmpRoot, input);
+    expect(lookup.hit).toBe(false);
+    expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
+  });
 
   it("misses on an empty cache root", () => {
     const lookup = lookupCacheEntry(tmpRoot, base(sourceFile));
@@ -168,11 +308,36 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
   it("hits after ensureCacheEntryDir + markCacheEntryComplete", () => {
     const first = lookupCacheEntry(tmpRoot, base(sourceFile));
     ensureCacheEntryDir(first.entry);
+    writeFileSync(join(first.entry.dir, "frame_00001.jpg"), "x", "utf-8");
     markCacheEntryComplete(first.entry);
 
     const second = lookupCacheEntry(tmpRoot, base(sourceFile));
     expect(second.hit).toBe(true);
     expect(second.entry.dir).toBe(first.entry.dir);
+  });
+
+  it("treats a sentineled entry with no frames as a miss", () => {
+    const first = lookupCacheEntry(tmpRoot, base(sourceFile));
+    ensureCacheEntryDir(first.entry);
+    writeFileSync(join(first.entry.dir, "frame_00001.jpg"), "x", "utf-8");
+    markCacheEntryComplete(first.entry);
+    expect(lookupCacheEntry(tmpRoot, base(sourceFile)).hit).toBe(true);
+
+    // Any per-file cleanup can empty the directory while leaving the sentinel.
+    // Serving that as a hit rehydrates zero frames, so every later render of
+    // the project fails identically at the coverage gate.
+    rmSync(join(first.entry.dir, "frame_00001.jpg"));
+
+    expect(lookupCacheEntry(tmpRoot, base(sourceFile)).hit).toBe(false);
+  });
+
+  it("counts frames of any format when deciding a hit", () => {
+    const first = lookupCacheEntry(tmpRoot, base(sourceFile));
+    ensureCacheEntryDir(first.entry);
+    writeFileSync(join(first.entry.dir, "frame_00001.png"), "x", "utf-8");
+    markCacheEntryComplete(first.entry);
+
+    expect(lookupCacheEntry(tmpRoot, base(sourceFile)).hit).toBe(true);
   });
 
   it("treats an in-progress dir without the sentinel as a miss", () => {
@@ -195,5 +360,189 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
     const a = lookupCacheEntry(tmpRoot, base(sourceFile));
     const b = lookupCacheEntry(tmpRoot, base(sourceFile));
     expect(a.entry.dir).toBe(b.entry.dir);
+  });
+});
+
+describe("publishCacheEntry", () => {
+  let tmpRoot: string;
+  let sourceFile: string;
+
+  beforeEach(() => {
+    ({ tmpRoot, sourceFile } = makeCacheRoot());
+  });
+
+  afterEach(() => {
+    removeCacheRoot(tmpRoot);
+  });
+
+  function entry() {
+    return lookupCacheEntry(tmpRoot, keyFor(sourceFile)).entry;
+  }
+
+  it("publishes a partial directory atomically with the complete sentinel inside", () => {
+    const cacheEntry = entry();
+    const partialDir = seedPartialDir(cacheEntry, "frame");
+
+    const result = publishCacheEntry(cacheEntry, partialDir);
+
+    expect(result).toEqual({ dir: cacheEntry.dir, published: true });
+    expect(existsSync(partialDir)).toBe(false);
+    expect(existsSync(join(cacheEntry.dir, "frame_00001.jpg"))).toBe(true);
+    expect(existsSync(join(cacheEntry.dir, COMPLETE_SENTINEL))).toBe(true);
+  });
+
+  it("serves a complete winner when another writer publishes the same entry first", () => {
+    const cacheEntry = entry();
+    mkdirSync(cacheEntry.dir, { recursive: true });
+    writeFileSync(join(cacheEntry.dir, "frame_00001.jpg"), "winner", "utf-8");
+    markCacheEntryComplete(cacheEntry);
+
+    const partialDir = seedPartialDir(cacheEntry, "loser");
+
+    const result = publishCacheEntry(cacheEntry, partialDir);
+
+    expect(result).toEqual({ dir: cacheEntry.dir, published: true });
+    expect(existsSync(partialDir)).toBe(false);
+    expect(existsSync(join(cacheEntry.dir, COMPLETE_SENTINEL))).toBe(true);
+    expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("winner".length);
+  });
+
+  it("replaces a stale unsentineled final directory and retries publish once", () => {
+    const cacheEntry = entry();
+    mkdirSync(cacheEntry.dir, { recursive: true });
+    writeFileSync(join(cacheEntry.dir, "frame_00001.jpg"), "stale", "utf-8");
+
+    const partialDir = seedPartialDir(cacheEntry, "fresh");
+
+    const result = publishCacheEntry(cacheEntry, partialDir);
+
+    expect(result).toEqual({ dir: cacheEntry.dir, published: true });
+    expect(existsSync(partialDir)).toBe(false);
+    expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("fresh".length);
+    expect(existsSync(join(cacheEntry.dir, COMPLETE_SENTINEL))).toBe(true);
+  });
+});
+
+describe("gcExtractionCache", () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "hf-extract-cache-gc-test-"));
+  });
+
+  afterEach(() => {
+    if (existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function makeEntry(name: string, bytes: number, ageMs: number): string {
+    const dir = join(tmpRoot, `${SCHEMA_PREFIX}${name}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "frame_00001.jpg"), "x".repeat(bytes), "utf-8");
+    markCacheEntryComplete({ dir, keyHash: name.padEnd(64, "0") });
+    const when = new Date(Date.now() - ageMs);
+    utimesSync(join(dir, COMPLETE_SENTINEL), when, when);
+    return dir;
+  }
+
+  it("evicts superseded-generation entries (hfcache-v2-*) under the size cap", () => {
+    const oldGen = join(tmpRoot, "hfcache-v2-0123456789abcdef");
+    mkdirSync(oldGen, { recursive: true });
+    writeFileSync(join(oldGen, "frame_00001.jpg"), "x".repeat(2048), "utf-8");
+    writeFileSync(join(oldGen, ".hf-complete"), "", "utf-8");
+    const aged = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(join(oldGen, ".hf-complete"), aged, aged);
+    utimesSync(oldGen, aged, aged);
+
+    const stats = gcExtractionCache(tmpRoot, { maxBytes: 1024, minAgeMs: 60 * 60 * 1000 });
+
+    expect(existsSync(oldGen)).toBe(false);
+    expect(stats.evictedEntries).toBe(1);
+  });
+
+  it("counts the same evictions in a dry run and removes nothing", () => {
+    const old = makeEntry("old", 60, 120_000);
+    const young = makeEntry("young", 60, 1_000);
+    const options = { maxBytes: 0, minAgeMs: 60_000 };
+
+    const planned = gcExtractionCache(tmpRoot, { ...options, dryRun: true });
+    expect(existsSync(old)).toBe(true);
+    expect(gcExtractionCache(tmpRoot, options)).toEqual(planned);
+    expect(planned.evictedEntries).toBe(1);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(young)).toBe(true);
+  });
+
+  it("evicts oldest complete entries first until under maxBytes while respecting minAge", () => {
+    const oldest = makeEntry("oldest", 60, 120_000);
+    const middle = makeEntry("middle", 60, 90_000);
+    const young = makeEntry("young", 60, 1_000);
+
+    gcExtractionCache(tmpRoot, { maxBytes: 100, minAgeMs: 60_000 });
+
+    expect(existsSync(oldest)).toBe(false);
+    expect(existsSync(middle)).toBe(false);
+    expect(existsSync(young)).toBe(true);
+  });
+
+  it("removes aged partial directories", () => {
+    const agedPartial = join(tmpRoot, `${SCHEMA_PREFIX}abc.partial-1234-deadbeef`);
+    const freshPartial = join(tmpRoot, `${SCHEMA_PREFIX}def.partial-1234-feedface`);
+    mkdirSync(agedPartial, { recursive: true });
+    mkdirSync(freshPartial, { recursive: true });
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(agedPartial, old, old);
+
+    gcExtractionCache(tmpRoot, { maxBytes: 1_000_000, minAgeMs: 60_000 });
+
+    expect(existsSync(agedPartial)).toBe(false);
+    expect(existsSync(freshPartial)).toBe(true);
+  });
+
+  // A render still writing into its own (unpublished) partial dir depends on
+  // it exactly like a symlinked complete entry does. The aged-partial check
+  // reads the DIRECTORY's own mtime, not any sentinel — touchCacheDir must
+  // renew that too, or a long-lived partial dir is just as vulnerable to a
+  // concurrent GC sweep as an untouched complete entry.
+  it("touchCacheDir renews a partial directory's own mtime so a live writer survives the aged-partial sweep", () => {
+    const dependedOnPartial = join(tmpRoot, `${SCHEMA_PREFIX}ghi.partial-1234-cafef00d`);
+    mkdirSync(dependedOnPartial, { recursive: true });
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(dependedOnPartial, old, old);
+
+    touchCacheDir(dependedOnPartial);
+    gcExtractionCache(tmpRoot, { maxBytes: 1_000_000, minAgeMs: 60_000 });
+
+    expect(existsSync(dependedOnPartial)).toBe(true);
+  });
+
+  it("ignores non-cache-prefix directories under the same root", () => {
+    const animatedGif = join(tmpRoot, "animated-gif");
+    mkdirSync(animatedGif, { recursive: true });
+    writeFileSync(join(animatedGif, "frame.png"), "keep", "utf-8");
+    makeEntry("old", 200, 120_000);
+
+    gcExtractionCache(tmpRoot, { maxBytes: 1, minAgeMs: 60_000 });
+
+    expect(existsSync(animatedGif)).toBe(true);
+    expect(readdirSync(animatedGif)).toEqual(["frame.png"]);
+  });
+
+  it("never throws when the cache root is missing", () => {
+    expect(() =>
+      gcExtractionCache(join(tmpRoot, "missing"), { maxBytes: 1, minAgeMs: 60_000 }),
+    ).not.toThrow();
+  });
+
+  // A render can keep reading an entry long after the one-time touch its
+  // cache-hit lookup performed. touchCacheDir is how a live reader proves the
+  // entry is still in use — without it, an in-use entry idle past minAge is
+  // indistinguishable from an abandoned one and gets swept like `oldest` above.
+  it("touchCacheDir renews an entry's LRU clock so a live dependent survives the sweep", () => {
+    const dependedOnDir = makeEntry("depended-on", 60, 120_000);
+
+    touchCacheDir(dependedOnDir);
+    gcExtractionCache(tmpRoot, { maxBytes: 1, minAgeMs: 60_000 });
+
+    expect(existsSync(dependedOnDir)).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
+import { parseHTML } from "linkedom";
 
 export interface Word {
   /** Stable identifier for referencing this word in overrides and compositions.
@@ -9,6 +10,20 @@ export interface Word {
   text: string;
   start: number;
   end: number;
+}
+
+export interface Cue {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface WordsToCuesOptions {
+  maxChars?: number;
+  maxGap?: number;
+  /** Treat each entry as a finished cue (skip word-level grouping). Defaults to
+   *  auto-detection: true when any entry contains internal whitespace. */
+  preGrouped?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -34,7 +49,10 @@ function detectJsonFormat(raw: unknown): TranscriptFormat {
     if (obj.transcription && Array.isArray(obj.transcription)) return "whisper-cpp";
     if (obj.words && Array.isArray(obj.words)) return "openai";
   }
-  if (Array.isArray(raw) && raw[0]?.text !== undefined && raw[0]?.start !== undefined) {
+  if (
+    Array.isArray(raw) &&
+    raw.slice(0, 1).every((w) => w?.text !== undefined && w?.start !== undefined)
+  ) {
     return "words-json";
   }
   throw new Error(
@@ -172,7 +190,7 @@ function parseOpenAI(data: Record<string, unknown>): Word[] {
 function parseSrt(content: string): Word[] {
   // SRT doesn't have word-level timestamps — parse as phrase-level entries.
   // Each cue becomes one "word" entry (the full phrase).
-  const blocks = content.trim().split(/\n\n+/);
+  const blocks = content.replace(/\r\n?/g, "\n").trim().split(/\n\n+/);
   const words: Word[] = [];
 
   for (const block of blocks) {
@@ -200,9 +218,16 @@ function parseSrt(content: string): Word[] {
   return words;
 }
 
+function decodeVttText(text: string): string {
+  if (!text.includes("&")) return text;
+  const { document } = parseHTML("<html><body></body></html>");
+  const element = document.createElement("span");
+  element.innerHTML = text.replace(/</g, "&lt;");
+  return element.textContent ?? "";
+}
+
 function parseVtt(content: string): Word[] {
-  // Strip the WEBVTT header and any metadata blocks
-  const body = content.replace(/^WEBVTT[^\n]*\n/, "").replace(/^[A-Z-]+:.*\n/gm, "");
+  const body = content.replace(/\r\n?/g, "\n").replace(/^WEBVTT[^\n]*\n/, "");
   // VTT is structurally similar to SRT (without numeric indices)
   const blocks = body.trim().split(/\n\n+/);
   const words: Word[] = [];
@@ -223,7 +248,7 @@ function parseVtt(content: string): Word[] {
     if (!text) continue;
 
     words.push({
-      text,
+      text: decodeVttText(text),
       start: parseVttTimestamp(startStr),
       end: parseVttTimestamp(endStr),
     });
@@ -249,8 +274,9 @@ function parseSrtTimestamp(ts: string): number {
 
 /** Parse VTT timestamp: 00:01:23.456 or 01:23.456 → seconds */
 function parseVttTimestamp(ts: string): number {
-  const parts = ts.split(":");
-  if (parts.length === 3) return parseSrtTimestamp(ts);
+  const timestamp = ts.split(/[ \t]+/, 1)[0] ?? "";
+  const parts = timestamp.split(":");
+  if (parts.length === 3) return parseSrtTimestamp(timestamp);
   // MM:SS.mmm
   if (parts.length === 2) {
     const [min, secMs] = parts;
@@ -262,8 +288,201 @@ function parseVttTimestamp(ts: string): number {
   return 0;
 }
 
+/** Format SRT timestamp: seconds → 00:01:23,456 */
+function formatSrtTimestamp(seconds: number): string {
+  const { hours, minutes, wholeSeconds, milliseconds } = timestampParts(seconds);
+  return `${pad2(hours)}:${pad2(minutes)}:${pad2(wholeSeconds)},${pad3(milliseconds)}`;
+}
+
+/** Format VTT timestamp: seconds → 00:01:23.456 */
+function formatVttTimestamp(seconds: number): string {
+  const { hours, minutes, wholeSeconds, milliseconds } = timestampParts(seconds);
+  return `${pad2(hours)}:${pad2(minutes)}:${pad2(wholeSeconds)}.${pad3(milliseconds)}`;
+}
+
 function round3(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+function timestampParts(seconds: number): {
+  hours: number;
+  minutes: number;
+  wholeSeconds: number;
+  milliseconds: number;
+} {
+  const safeSeconds = Number.isFinite(seconds) ? seconds : 0;
+  const totalMs = Math.max(0, Math.round(safeSeconds * 1000));
+  const milliseconds = totalMs % 1000;
+  const totalSeconds = (totalMs - milliseconds) / 1000;
+  const wholeSeconds = totalSeconds % 60;
+  const totalMinutes = (totalSeconds - wholeSeconds) / 60;
+  const minutes = totalMinutes % 60;
+  const hours = (totalMinutes - minutes) / 60;
+  return { hours, minutes, wholeSeconds, milliseconds };
+}
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, "0");
+}
+
+function pad3(n: number): string {
+  return n.toString().padStart(3, "0");
+}
+
+function endsSentence(text: string): boolean {
+  return /[.!?][)"'\]}]*$/.test(text);
+}
+
+function pushCue(cues: Cue[], cue: Cue | undefined): void {
+  if (!cue) return;
+  const text = cue.text.trim();
+  if (!text) return;
+  cues.push({ text, start: round3(cue.start), end: round3(cue.end) });
+}
+
+/** Whether `word` should start a new cue rather than extend `current`. */
+function breaksCue(
+  current: Cue,
+  word: Word,
+  text: string,
+  maxChars: number,
+  maxGap: number,
+): boolean {
+  const nextLength = current.text.length + 1 + text.length;
+  const gap = word.start - current.end;
+  return nextLength > maxChars || gap > maxGap;
+}
+
+/** Map each entry to its own cue (used when entries are already phrase-level). */
+function entriesToCues(words: Word[]): Cue[] {
+  const cues: Cue[] = [];
+  for (const word of words) {
+    pushCue(cues, { text: word.text, start: word.start, end: word.end });
+  }
+  return cues;
+}
+
+// Han + Hiragana + Katakana + CJK symbols/fullwidth. These scripts are written
+// without spaces between tokens, so whisper's per-token output must be joined
+// without a separator. Hangul (Korean) is intentionally excluded — it does use
+// inter-word spaces.
+const CJK_CHAR = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+// Scripts written without inter-word spaces: the CJK ranges above plus Thai,
+// Lao, Myanmar and Khmer. Used only to decide whether entries are already
+// phrase-level — the whitespace test below cannot answer that for these
+// scripts. Hangul is excluded for the same reason as in CJK_CHAR.
+const SPACELESS_SCRIPT_CHAR = /[฀-๿຀-໿က-႟ក-៿　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+// Whisper emits word-level tokens for spaceless scripts one or two characters
+// at a time, while a phrase-level cue runs to several times that. Four is
+// comfortably above the token case and below any real caption.
+const SPACELESS_PHRASE_MIN_CHARS = 4;
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length === 0) return 0;
+  if (sorted.length % 2 === 1) return sorted[mid] ?? 0;
+  return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
+}
+
+/**
+ * Whether the entries are already grouped into phrases.
+ *
+ * Any entry containing internal whitespace is a multi-word phrase, which
+ * settles it for space-separated scripts. Chinese, Japanese, Thai and the
+ * other spaceless scripts never satisfy that test, so their phrase-level
+ * transcripts used to be re-grouped into a single cue covering the whole
+ * clip. For those, fall back to entry length instead.
+ *
+ * The median, rather than `some` or `every`, keeps one long token from
+ * declaring word-level input pre-grouped and a couple of short cues (a bare
+ * yes or no) from declaring a real transcript word-level.
+ */
+function inferPreGrouped(words: Word[]): boolean {
+  if (words.some((w) => /\s/.test(w.text.trim()))) return true;
+
+  const spaceless = words.filter((w) => SPACELESS_SCRIPT_CHAR.test(w.text));
+  if (spaceless.length === 0) return false;
+
+  return median(spaceless.map((w) => w.text.trim().length)) >= SPACELESS_PHRASE_MIN_CHARS;
+}
+
+/** Join two adjacent tokens, omitting the space across a CJK boundary. */
+function joinTokens(left: string, right: string): string {
+  const a = left.at(-1) ?? "";
+  const b = right[0] ?? "";
+  const sep = CJK_CHAR.test(a) || CJK_CHAR.test(b) ? "" : " ";
+  return `${left}${sep}${right}`;
+}
+
+export function wordsToCues(words: Word[], opts: WordsToCuesOptions = {}): Cue[] {
+  // Phrase-level transcripts (imported .srt/.vtt cues) must keep their existing
+  // cue boundaries — re-grouping would merge distinct captions and lose timing.
+  // The caller can force this via `preGrouped`; otherwise infer it from the
+  // data — internal whitespace for space-separated scripts, entry length for
+  // the scripts that have no inter-word spaces to look for.
+  const preGrouped = opts.preGrouped ?? inferPreGrouped(words);
+  if (preGrouped) return entriesToCues(words);
+
+  const maxChars = opts.maxChars ?? 42;
+  const maxGap = opts.maxGap ?? 0.8;
+  const cues: Cue[] = [];
+  let current: Cue | undefined;
+
+  const flush = (): void => {
+    pushCue(cues, current);
+    current = undefined;
+  };
+
+  for (const word of words) {
+    const text = word.text.trim();
+    if (!text) continue;
+
+    if (current && !breaksCue(current, word, text, maxChars, maxGap)) {
+      current.text = joinTokens(current.text, text);
+      current.end = word.end;
+    } else {
+      flush();
+      current = { text, start: word.start, end: word.end };
+    }
+
+    if (endsSentence(text)) flush();
+  }
+
+  flush();
+  return cues;
+}
+
+export function formatSrt(words: Word[], opts?: WordsToCuesOptions): string {
+  const cues = wordsToCues(words, opts);
+  if (cues.length === 0) return "";
+
+  return (
+    cues
+      .map(
+        (cue, i) =>
+          `${i + 1}\n${formatSrtTimestamp(cue.start)} --> ${formatSrtTimestamp(cue.end)}\n${cue.text}`,
+      )
+      .join("\n\n") + "\n"
+  );
+}
+
+export function formatVtt(words: Word[], opts?: WordsToCuesOptions): string {
+  const cues = wordsToCues(words, opts);
+  if (cues.length === 0) return "WEBVTT\n\n";
+
+  return (
+    "WEBVTT\n\n" +
+    cues
+      .map(
+        (cue) =>
+          `${formatVttTimestamp(cue.start)} --> ${formatVttTimestamp(cue.end)}\n${cue.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`,
+      )
+      .join("\n\n") +
+    "\n"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -297,36 +516,32 @@ export function loadTranscript(filePath: string): { words: Word[]; format: Trans
   const parsed = JSON.parse(content);
   const format = detectJsonFormat(parsed);
 
-  const words =
+  // JSON parsers never set id — assign w{index} like the srt/vtt branches above
+  // so caption overrides always have a stable key. `||` (not `??`) also repairs
+  // the empty-string ids older CLIs wrote to words-json transcript files.
+  const words = (
     format === "whisper-cpp"
       ? parseWhisperCpp(parsed)
       : format === "openai"
         ? parseOpenAI(parsed)
         : (parsed as Word[]).map((w) => ({
-            id: w.id ?? "",
+            id: w.id,
             text: w.text.trim(),
             start: round3(w.start),
             end: round3(w.end),
-          }));
+          }))
+  ).map((w, i) => ({ ...w, id: w.id || `w${i}` }));
 
   return { words, format };
-}
-
-/**
- * Remove words that fall before the detected speech onset.
- * Whisper can hallucinate words over non-speech sections at the start of audio.
- */
-export function stripBeforeOnset(words: Word[], onsetSeconds: number): Word[] {
-  // 0.5s tolerance: keep words whose timestamps straddle the onset boundary,
-  // since whisper may assign a slightly early start to the first spoken word.
-  return words.filter((w) => w.start >= onsetSeconds - 0.5);
 }
 
 export function patchCaptionHtml(dir: string, words: Word[]): void {
   if (words.length === 0) return;
 
   // Indent to 10 spaces to match typical composition script indentation
-  const wordsJson = JSON.stringify(words, null, 2).replace(/\n/g, "\n          ");
+  const wordsJson = JSON.stringify(words, null, 2)
+    .replace(/</g, "\\u003c")
+    .replace(/\n/g, "\n          ");
 
   let htmlFiles: string[];
   try {
@@ -349,7 +564,7 @@ export function patchCaptionHtml(dir: string, words: Word[]): void {
     const match = scriptMatch ?? transcriptMatch;
     if (match) {
       const varName = scriptMatch ? "script" : "TRANSCRIPT";
-      content = content.replace(match[0], `const ${varName} = ${wordsJson};`);
+      content = content.replace(match[0], () => `const ${varName} = ${wordsJson};`);
       writeFileSync(file, content, "utf-8");
     }
   }

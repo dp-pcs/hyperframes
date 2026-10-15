@@ -6,12 +6,16 @@ import {
   STUDIO_ROTATION_PROP,
   STUDIO_PATH_OFFSET_ATTR,
   STUDIO_MANUAL_EDIT_GESTURE_ATTR,
+  STUDIO_EDIT_MOMENT_ATTR,
+  type EditMoment,
   STUDIO_BOX_SIZE_ATTR,
   STUDIO_ROTATION_ATTR,
   STUDIO_ORIGINAL_TRANSLATE_ATTR,
   STUDIO_ORIGINAL_INLINE_TRANSLATE_ATTR,
   STUDIO_ORIGINAL_WIDTH_ATTR,
   STUDIO_ORIGINAL_HEIGHT_ATTR,
+  STUDIO_ORIGINAL_BOX_WIDTH_ATTR,
+  STUDIO_ORIGINAL_BOX_HEIGHT_ATTR,
   STUDIO_ORIGINAL_MIN_WIDTH_ATTR,
   STUDIO_ORIGINAL_MIN_HEIGHT_ATTR,
   STUDIO_ORIGINAL_MAX_WIDTH_ATTR,
@@ -30,31 +34,90 @@ import {
   STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR,
   STUDIO_ROTATION_TRANSFORM_ORIGIN,
 } from "./manualEditsTypes";
-import { roundRotationAngle } from "./manualEditsParsing";
-import {
-  STUDIO_MOTION_ATTR,
-  STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR,
-  STUDIO_MOTION_ORIGINAL_OPACITY_ATTR,
-  STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR,
-} from "./studioMotionTypes";
-import { applyStudioMotionFromDom } from "./studioMotion";
+import { gsapWritesChannels } from "../../hooks/gsapRuntimeKeyframes";
+import { splitTopLevelWhitespace } from "./manualEditsStyleHelpers";
+import { roundTo3, roundToLayoutSize } from "../../utils/rounding";
+import { BOX_SIZE_STYLE_PROPS } from "./manualEditsDomPatches";
 
 /* ── Gesture tracking ─────────────────────────────────────────────── */
 let studioManualEditGestureId = 0;
 
-export function beginStudioManualEditGesture(element: HTMLElement): string {
+export type StudioGestureDraws = "move" | "resize" | "rotate" | "edit";
+const MOVE_DRAWS = ["translate", STUDIO_OFFSET_X_PROP, STUDIO_OFFSET_Y_PROP];
+const GESTURE_DRAWS: Record<StudioGestureDraws, readonly string[]> = {
+  move: MOVE_DRAWS,
+  resize: [...MOVE_DRAWS, STUDIO_WIDTH_PROP, STUDIO_HEIGHT_PROP, ...BOX_SIZE_STYLE_PROPS],
+  rotate: ["rotate", "transform", "transform-origin", "display", STUDIO_ROTATION_PROP],
+  edit: [],
+};
+
+export function beginStudioManualEditGesture(
+  element: HTMLElement,
+  draws: StudioGestureDraws,
+  at?: EditMoment,
+): string {
   studioManualEditGestureId += 1;
-  const token = `gesture-${studioManualEditGestureId}`;
+  const token = `gesture-${studioManualEditGestureId}:${draws}`;
   element.setAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR, token);
+  if (at) element.setAttribute(STUDIO_EDIT_MOMENT_ATTR, JSON.stringify(at));
+  else element.removeAttribute(STUDIO_EDIT_MOMENT_ATTR);
   return token;
 }
 
+const GESTURE_ENDED = "hf-manual-edit-gesture-ended";
+
 export function endStudioManualEditGesture(element: HTMLElement, token?: string): void {
   if (token && element.getAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR) !== token) return;
+  if (!element.hasAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR)) return;
   element.removeAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR);
+  element.removeAttribute(STUDIO_EDIT_MOMENT_ATTR);
+  const doc = element.ownerDocument;
+  doc.dispatchEvent(new (doc.defaultView?.Event ?? Event)(GESTURE_ENDED));
 }
 
-export function isStudioManualEditGestureActive(element: HTMLElement): boolean {
+export function isStudioManualEditGestureLiveIn(doc: Document): boolean {
+  return doc.querySelector(`[${STUDIO_MANUAL_EDIT_GESTURE_ATTR}]`) !== null;
+}
+
+/** Runs `run` once the last gesture in `doc` ends; the returned function stops waiting. */
+export function afterStudioManualEditGestures(doc: Document, run: () => void): () => void {
+  const onEnded = () => {
+    if (isStudioManualEditGestureLiveIn(doc)) return;
+    stop();
+    run();
+  };
+  const stop = () => doc.removeEventListener(GESTURE_ENDED, onEnded);
+  doc.addEventListener(GESTURE_ENDED, onEnded);
+  return stop;
+}
+
+const gestureSaves = new WeakMap<Document, number>();
+
+export function studioManualEditSavesIn(doc: Document): number {
+  return gestureSaves.get(doc) ?? 0;
+}
+
+export function countStudioPreviewChange(doc: Document): void {
+  gestureSaves.set(doc, studioManualEditSavesIn(doc) + 1);
+}
+
+/** Runs a gesture's save, counted as it starts and as it settles: a reload requested before shows the old file. */
+export function countStudioManualEditSave<R>(element: HTMLElement, save: () => R): R {
+  const doc = element.ownerDocument;
+  const count = () => countStudioPreviewChange(doc);
+  count();
+  const result = save();
+  void Promise.resolve(result).then(count, count);
+  return result;
+}
+
+export function studioGestureDraws(element: Element): readonly string[] | null {
+  const token = element.getAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR);
+  if (token === null) return null;
+  return GESTURE_DRAWS[token.split(":")[1] as StudioGestureDraws] ?? [];
+}
+
+function isStudioManualEditGestureActive(element: HTMLElement): boolean {
   return element.hasAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR);
 }
 
@@ -73,6 +136,13 @@ export function readStudioPathOffset(element: HTMLElement): { x: number; y: numb
     x: readPxCustomProperty(element, STUDIO_OFFSET_X_PROP),
     y: readPxCustomProperty(element, STUDIO_OFFSET_Y_PROP),
   };
+}
+
+// GSAP can leave dormant offset vars behind; only the live var-translate counts.
+export function readAppliedStudioPathOffset(element: HTMLElement): { x: number; y: number } {
+  return (element.style.translate || "").includes(STUDIO_OFFSET_X_PROP)
+    ? readStudioPathOffset(element)
+    : { x: 0, y: 0 };
 }
 
 export function readStudioBoxSize(element: HTMLElement): { width: number; height: number } {
@@ -154,24 +224,6 @@ export function restoreInlineDisplay(element: HTMLElement): void {
 }
 
 /* ── Translate helpers ────────────────────────────────────────────── */
-function splitTopLevelWhitespace(value: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let current = "";
-  for (const char of value.trim()) {
-    if (char === "(") depth += 1;
-    if (char === ")") depth = Math.max(0, depth - 1);
-    if (/\s/.test(char) && depth === 0) {
-      if (current) parts.push(current);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  if (current) parts.push(current);
-  return parts;
-}
-
 function composeTranslateValue(element: HTMLElement, x: string, y: string): string {
   const original = element.getAttribute(STUDIO_ORIGINAL_TRANSLATE_ATTR)?.trim();
   if (!original || original === "none") return `${x} ${y}`;
@@ -211,35 +263,94 @@ function writeStudioPathOffsetVars(
 ): void {
   prepareStudioPathOffsetBase(element, options.updateBase ?? true);
   element.setAttribute(STUDIO_PATH_OFFSET_ATTR, "true");
-  element.style.setProperty(STUDIO_OFFSET_X_PROP, `${Math.round(offset.x)}px`);
-  element.style.setProperty(STUDIO_OFFSET_Y_PROP, `${Math.round(offset.y)}px`);
+  element.style.setProperty(STUDIO_OFFSET_X_PROP, `${roundTo3(offset.x)}px`);
+  element.style.setProperty(STUDIO_OFFSET_Y_PROP, `${roundTo3(offset.y)}px`);
 }
 
 /* ── Path offset apply ────────────────────────────────────────────── */
 
 // GSAP 3.x reads the resolved CSS `translate` individual property at initialization and bakes it
 // into element.style.transform (as a matrix) on every seek. When the studio's reapply hook also
-// writes `translate`, both properties compose additively, doubling the visual offset. This helper
-// zeroes out only the translate component (m41/m42) so the `translate` prop isn't double-counted.
+// writes `translate`, both properties compose additively, doubling the visual offset.
+//
+// This helper subtracts only the baked studio offset from m41/m42, preserving any GSAP animation
+// contribution (e.g. a tween animating y: -20). The studio offset is read from the CSS custom
+// properties which tell us exactly how much was baked from the CSS translate.
+function isIdentityAfterTranslateStrip(m: DOMMatrix): boolean {
+  return m.is2D && m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1;
+}
+
+// fallow-ignore-next-line complexity
 function stripGsapTranslateFromTransform(element: HTMLElement): void {
+  if (element.hasAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR)) return;
   const transform = element.style.getPropertyValue("transform");
   if (!transform || transform === "none") return;
-  const win = element.ownerDocument.defaultView as (Window & typeof globalThis) | null;
-  const DOMMatrixCtor = (win as unknown as { DOMMatrix?: typeof DOMMatrix })?.DOMMatrix;
+  const DOMMatrixCtor = (element.ownerDocument.defaultView as (Window & typeof globalThis) | null)
+    ?.DOMMatrix;
   if (!DOMMatrixCtor) return;
   try {
     const m = new DOMMatrixCtor(transform);
     if (m.m41 === 0 && m.m42 === 0) return;
-    m.m41 = 0;
-    m.m42 = 0;
-    if (m.is2D && m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1) {
+    const offsetX = readPxCustomProperty(element, STUDIO_OFFSET_X_PROP);
+    const offsetY = readPxCustomProperty(element, STUDIO_OFFSET_Y_PROP);
+    const angle = Math.atan2(m.b, m.a);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    m.m41 -= offsetX * cos - offsetY * sin;
+    m.m42 -= offsetX * sin + offsetY * cos;
+    if (Math.abs(m.m41) < 0.01 && Math.abs(m.m42) < 0.01 && isIdentityAfterTranslateStrip(m)) {
       element.style.removeProperty("transform");
     } else {
       element.style.setProperty("transform", m.toString());
     }
   } catch {
-    // non-parseable transform or DOMMatrix unavailable — leave as-is
+    /* non-parseable transform — leave as-is */
   }
+}
+
+// GSAP owns the element's `transform` (it bakes x/y into a matrix and writes
+// `translate: none` every tick). Folding the drag offset into a CSS `translate`
+// — as the non-GSAP path does — composes ON TOP of GSAP's transform, and the
+// subsequent strip/reapply math compounds into a runaway matrix that flings the
+// element off-canvas. So for GSAP-animated elements we keep `translate: none`
+// and push the offset straight into GSAP's x/y via gsap.set; the var() offset an
+// older Studio saved stays in the file, and GSAP re-reads it at init on reload.
+// Returns true when handled as GSAP (caller must skip the CSS path).
+// fallow-ignore-next-line complexity
+function applyStudioPathOffsetViaGsap(
+  element: HTMLElement,
+  offset: { x: number; y: number },
+): boolean {
+  if (!gsapWritesChannels(element, ["x", "y"])) return false;
+  element.style.setProperty("translate", "none");
+  const win = element.ownerDocument.defaultView as
+    | (Window & {
+        gsap?: {
+          set: (el: Element, vars: Record<string, unknown>) => void;
+          getProperty: (el: Element, prop: string) => number;
+        };
+      })
+    | null;
+  if (win?.gsap) {
+    const baseX = Number.parseFloat(element.getAttribute("data-hf-drag-gsap-base-x") ?? "");
+    const baseY = Number.parseFloat(element.getAttribute("data-hf-drag-gsap-base-y") ?? "");
+    const origX = Number.parseFloat(element.getAttribute("data-hf-drag-initial-offset-x") ?? "");
+    const origY = Number.parseFloat(element.getAttribute("data-hf-drag-initial-offset-y") ?? "");
+    const gsapBaseX = Number.isFinite(baseX)
+      ? baseX
+      : (win.gsap.getProperty(element, "x") as number);
+    const gsapBaseY = Number.isFinite(baseY)
+      ? baseY
+      : (win.gsap.getProperty(element, "y") as number);
+    if (!Number.isFinite(baseX))
+      element.setAttribute("data-hf-drag-gsap-base-x", String(gsapBaseX));
+    if (!Number.isFinite(baseY))
+      element.setAttribute("data-hf-drag-gsap-base-y", String(gsapBaseY));
+    const deltaX = offset.x - (Number.isFinite(origX) ? origX : 0);
+    const deltaY = offset.y - (Number.isFinite(origY) ? origY : 0);
+    win.gsap.set(element, { x: gsapBaseX + deltaX, y: gsapBaseY + deltaY });
+  }
+  return true;
 }
 
 export function applyStudioPathOffset(
@@ -249,6 +360,10 @@ export function applyStudioPathOffset(
 ): void {
   promoteInlineForTransform(element);
   writeStudioPathOffsetVars(element, offset, { updateBase: options.updateBase ?? true });
+  // GSAP elements: route through gsap.set, NOT a CSS translate (would corrupt the
+  // matrix). Symmetrical with applyStudioPathOffsetDraft — the commit path used to
+  // skip this branch, which is what flung dragged GSAP elements off-canvas.
+  if (applyStudioPathOffsetViaGsap(element, offset)) return;
   element.style.setProperty(
     "translate",
     composeTranslateValue(
@@ -266,9 +381,11 @@ export function applyStudioPathOffsetDraft(
 ): void {
   promoteInlineForTransform(element);
   writeStudioPathOffsetVars(element, offset, { updateBase: false });
+  if (applyStudioPathOffsetViaGsap(element, offset)) return;
+  // Non-GSAP elements: use CSS translate as before.
   element.style.setProperty(
     "translate",
-    composeTranslateValue(element, `${Math.round(offset.x)}px`, `${Math.round(offset.y)}px`),
+    composeTranslateValue(element, `${roundTo3(offset.x)}px`, `${roundTo3(offset.y)}px`),
   );
   stripGsapTranslateFromTransform(element);
 }
@@ -285,7 +402,7 @@ function readParentFlexBasisPixels(
   if (display !== "flex" && display !== "inline-flex") return null;
 
   const direction = readStyleOrComputed(parent, "flex-direction").trim();
-  return Math.round(Math.max(1, direction.startsWith("column") ? size.height : size.width));
+  return direction.startsWith("column") ? size.height : size.width;
 }
 
 function restoreStaleStudioScaleResize(element: HTMLElement): void {
@@ -304,6 +421,18 @@ function writeStudioBoxSizeVars(
   element: HTMLElement,
   size: { width: number; height: number },
 ): void {
+  // Keep the measurement on its own migration-safe guard. Elements drafted by
+  // an older Studio can already carry the box-size marker without these newer
+  // attributes; the next resize still reaches this function before its width
+  // and height are overwritten, so this is the last honest layout box to save.
+  // Offset sizes are layout values, so a running scale animation does not
+  // distort them.
+  if (!element.hasAttribute(STUDIO_ORIGINAL_BOX_WIDTH_ATTR)) {
+    element.setAttribute(STUDIO_ORIGINAL_BOX_WIDTH_ATTR, String(element.offsetWidth));
+  }
+  if (!element.hasAttribute(STUDIO_ORIGINAL_BOX_HEIGHT_ATTR)) {
+    element.setAttribute(STUDIO_ORIGINAL_BOX_HEIGHT_ATTR, String(element.offsetHeight));
+  }
   if (!element.hasAttribute(STUDIO_BOX_SIZE_ATTR)) {
     element.setAttribute(STUDIO_ORIGINAL_WIDTH_ATTR, element.style.getPropertyValue("width"));
     element.setAttribute(STUDIO_ORIGINAL_HEIGHT_ATTR, element.style.getPropertyValue("height"));
@@ -348,22 +477,21 @@ function writeStudioBoxSizeVars(
   }
 
   element.setAttribute(STUDIO_BOX_SIZE_ATTR, "true");
-  element.style.setProperty(STUDIO_WIDTH_PROP, `${Math.round(Math.max(1, size.width))}px`);
-  element.style.setProperty(STUDIO_HEIGHT_PROP, `${Math.round(Math.max(1, size.height))}px`);
+  element.style.setProperty(STUDIO_WIDTH_PROP, `${size.width}px`);
+  element.style.setProperty(STUDIO_HEIGHT_PROP, `${size.height}px`);
 }
 
 function applyStudioBoxSizeDimensions(
   element: HTMLElement,
-  size: { width: number; height: number },
-): void {
+  wantedSize: { width: number; height: number },
+): { width: number; height: number } {
+  const size = roundToLayoutSize(wantedSize);
   writeStudioBoxSizeVars(element, size);
   restoreStaleStudioScaleResize(element);
 
-  const width = Math.round(Math.max(1, size.width));
-  const height = Math.round(Math.max(1, size.height));
   element.style.setProperty("box-sizing", "border-box");
-  element.style.setProperty("width", `${width}px`);
-  element.style.setProperty("height", `${height}px`);
+  element.style.setProperty("width", `${size.width}px`);
+  element.style.setProperty("height", `${size.height}px`);
   element.style.setProperty("min-width", "0px");
   element.style.setProperty("min-height", "0px");
   element.style.setProperty("max-width", "none");
@@ -378,6 +506,7 @@ function applyStudioBoxSizeDimensions(
   if (computedDisplay === "inline") {
     element.style.setProperty("display", "inline-block");
   }
+  return size;
 }
 
 export function applyStudioBoxSize(
@@ -388,12 +517,28 @@ export function applyStudioBoxSize(
   applyStudioBoxSizeDimensions(element, size);
 }
 
+// The element's box before a resize draft first changed it; gone once the resize saves or is restored.
+const boxSizeDraftBases = new WeakMap<HTMLElement, { width: number; height: number }>();
+
+export function readStudioBoxSizeDraftBase(
+  element: HTMLElement,
+): { width: number; height: number } | null {
+  return boxSizeDraftBases.get(element) ?? null;
+}
+
+export function forgetStudioBoxSizeDraftBase(element: HTMLElement): void {
+  boxSizeDraftBases.delete(element);
+}
+
 export function applyStudioBoxSizeDraft(
   element: HTMLElement,
   size: { width: number; height: number },
-): void {
+): { width: number; height: number } {
+  if (!boxSizeDraftBases.has(element)) {
+    boxSizeDraftBases.set(element, { width: element.offsetWidth, height: element.offsetHeight });
+  }
   promoteInlineForTransform(element);
-  applyStudioBoxSizeDimensions(element, size);
+  return applyStudioBoxSizeDimensions(element, size);
 }
 
 /* ── Rotation apply ───────────────────────────────────────────────── */
@@ -440,7 +585,7 @@ function writeStudioRotationVars(
 ): void {
   prepareStudioRotationBase(element, options.updateBase ?? true);
   element.setAttribute(STUDIO_ROTATION_ATTR, "true");
-  element.style.setProperty(STUDIO_ROTATION_PROP, `${roundRotationAngle(rotation.angle)}deg`);
+  element.style.setProperty(STUDIO_ROTATION_PROP, `${roundTo3(rotation.angle)}deg`);
   element.style.setProperty("transform-origin", STUDIO_ROTATION_TRANSFORM_ORIGIN);
 }
 
@@ -452,394 +597,4 @@ export function applyStudioRotation(element: HTMLElement, rotation: { angle: num
     "rotate",
     composeStudioRotationValue(element, `var(${STUDIO_ROTATION_PROP}, 0deg)`),
   );
-}
-
-export function applyStudioRotationDraft(element: HTMLElement, rotation: { angle: number }): void {
-  promoteInlineForTransform(element);
-  writeStudioRotationVars(element, rotation, { updateBase: false });
-  element.setAttribute(STUDIO_ROTATION_DRAFT_ATTR, "true");
-  element.style.setProperty(
-    "rotate",
-    composeStudioRotationValue(element, `${roundRotationAngle(rotation.angle)}deg`),
-  );
-}
-
-/* ── HTML patch builders ──────────────────────────────────────────── */
-import type { PatchOperation } from "../../utils/sourcePatcher";
-
-export function buildPathOffsetPatches(element: HTMLElement): PatchOperation[] {
-  const x = element.style.getPropertyValue(STUDIO_OFFSET_X_PROP);
-  const y = element.style.getPropertyValue(STUDIO_OFFSET_Y_PROP);
-  const translate = element.style.getPropertyValue("translate");
-  const originalTranslate = element.getAttribute(STUDIO_ORIGINAL_TRANSLATE_ATTR);
-  const originalInlineTranslate = element.getAttribute(STUDIO_ORIGINAL_INLINE_TRANSLATE_ATTR);
-  const displayVal = element.style.getPropertyValue("display");
-  const transformDisplayAttr = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-  const ops: PatchOperation[] = [];
-  if (x) ops.push({ type: "inline-style", property: STUDIO_OFFSET_X_PROP, value: x });
-  if (y) ops.push({ type: "inline-style", property: STUDIO_OFFSET_Y_PROP, value: y });
-  if (translate) ops.push({ type: "inline-style", property: "translate", value: translate });
-  ops.push({ type: "attribute", property: STUDIO_PATH_OFFSET_ATTR, value: "true" });
-  if (originalTranslate !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_TRANSLATE_ATTR,
-      value: originalTranslate,
-    });
-  if (originalInlineTranslate !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_INLINE_TRANSLATE_ATTR,
-      value: originalInlineTranslate,
-    });
-  if (displayVal) ops.push({ type: "inline-style", property: "display", value: displayVal });
-  if (transformDisplayAttr !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR,
-      value: transformDisplayAttr,
-    });
-  return ops;
-}
-
-export function buildClearPathOffsetPatches(element: HTMLElement): PatchOperation[] {
-  const originalInlineTranslate = element.getAttribute(STUDIO_ORIGINAL_INLINE_TRANSLATE_ATTR);
-  const ops: PatchOperation[] = [
-    { type: "inline-style", property: STUDIO_OFFSET_X_PROP, value: null },
-    { type: "inline-style", property: STUDIO_OFFSET_Y_PROP, value: null },
-    {
-      type: "inline-style",
-      property: "translate",
-      value: originalInlineTranslate || null,
-    },
-    { type: "attribute", property: STUDIO_PATH_OFFSET_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ORIGINAL_TRANSLATE_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ORIGINAL_INLINE_TRANSLATE_ATTR, value: null },
-  ];
-  const origDisplay = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-  if (origDisplay !== null) {
-    ops.push({ type: "inline-style", property: "display", value: origDisplay || null });
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR, value: null });
-  }
-  return ops;
-}
-
-export function buildBoxSizePatches(element: HTMLElement): PatchOperation[] {
-  const ops: PatchOperation[] = [];
-
-  const studioWidth = element.style.getPropertyValue(STUDIO_WIDTH_PROP);
-  const studioHeight = element.style.getPropertyValue(STUDIO_HEIGHT_PROP);
-  if (studioWidth)
-    ops.push({ type: "inline-style", property: STUDIO_WIDTH_PROP, value: studioWidth });
-  if (studioHeight)
-    ops.push({ type: "inline-style", property: STUDIO_HEIGHT_PROP, value: studioHeight });
-
-  const width = element.style.getPropertyValue("width");
-  const height = element.style.getPropertyValue("height");
-  const minWidth = element.style.getPropertyValue("min-width");
-  const minHeight = element.style.getPropertyValue("min-height");
-  const maxWidth = element.style.getPropertyValue("max-width");
-  const maxHeight = element.style.getPropertyValue("max-height");
-  const flexBasis = element.style.getPropertyValue("flex-basis");
-  const flexGrow = element.style.getPropertyValue("flex-grow");
-  const flexShrink = element.style.getPropertyValue("flex-shrink");
-  const boxSizing = element.style.getPropertyValue("box-sizing");
-  const scale = element.style.getPropertyValue("scale");
-  const transformOrigin = element.style.getPropertyValue("transform-origin");
-  const displayVal = element.style.getPropertyValue("display");
-
-  if (width) ops.push({ type: "inline-style", property: "width", value: width });
-  if (height) ops.push({ type: "inline-style", property: "height", value: height });
-  if (minWidth) ops.push({ type: "inline-style", property: "min-width", value: minWidth });
-  if (minHeight) ops.push({ type: "inline-style", property: "min-height", value: minHeight });
-  if (maxWidth) ops.push({ type: "inline-style", property: "max-width", value: maxWidth });
-  if (maxHeight) ops.push({ type: "inline-style", property: "max-height", value: maxHeight });
-  if (flexBasis) ops.push({ type: "inline-style", property: "flex-basis", value: flexBasis });
-  if (flexGrow) ops.push({ type: "inline-style", property: "flex-grow", value: flexGrow });
-  if (flexShrink) ops.push({ type: "inline-style", property: "flex-shrink", value: flexShrink });
-  if (boxSizing) ops.push({ type: "inline-style", property: "box-sizing", value: boxSizing });
-  if (scale) ops.push({ type: "inline-style", property: "scale", value: scale });
-  if (transformOrigin)
-    ops.push({ type: "inline-style", property: "transform-origin", value: transformOrigin });
-  if (displayVal) ops.push({ type: "inline-style", property: "display", value: displayVal });
-
-  ops.push({ type: "attribute", property: STUDIO_BOX_SIZE_ATTR, value: "true" });
-
-  const origWidth = element.getAttribute(STUDIO_ORIGINAL_WIDTH_ATTR);
-  const origHeight = element.getAttribute(STUDIO_ORIGINAL_HEIGHT_ATTR);
-  const origMinWidth = element.getAttribute(STUDIO_ORIGINAL_MIN_WIDTH_ATTR);
-  const origMinHeight = element.getAttribute(STUDIO_ORIGINAL_MIN_HEIGHT_ATTR);
-  const origMaxWidth = element.getAttribute(STUDIO_ORIGINAL_MAX_WIDTH_ATTR);
-  const origMaxHeight = element.getAttribute(STUDIO_ORIGINAL_MAX_HEIGHT_ATTR);
-  const origFlexBasis = element.getAttribute(STUDIO_ORIGINAL_FLEX_BASIS_ATTR);
-  const origFlexGrow = element.getAttribute(STUDIO_ORIGINAL_FLEX_GROW_ATTR);
-  const origFlexShrink = element.getAttribute(STUDIO_ORIGINAL_FLEX_SHRINK_ATTR);
-  const origBoxSizing = element.getAttribute(STUDIO_ORIGINAL_BOX_SIZING_ATTR);
-  const origScale = element.getAttribute(STUDIO_ORIGINAL_SCALE_ATTR);
-  const origTransformOrigin = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_ORIGIN_ATTR);
-  const origDisplay = element.getAttribute(STUDIO_ORIGINAL_DISPLAY_ATTR);
-  const origTransformDisplay = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-
-  if (origWidth !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_WIDTH_ATTR, value: origWidth });
-  if (origHeight !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_HEIGHT_ATTR, value: origHeight });
-  if (origMinWidth !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_MIN_WIDTH_ATTR, value: origMinWidth });
-  if (origMinHeight !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_MIN_HEIGHT_ATTR,
-      value: origMinHeight,
-    });
-  if (origMaxWidth !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_MAX_WIDTH_ATTR, value: origMaxWidth });
-  if (origMaxHeight !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_MAX_HEIGHT_ATTR,
-      value: origMaxHeight,
-    });
-  if (origFlexBasis !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_FLEX_BASIS_ATTR,
-      value: origFlexBasis,
-    });
-  if (origFlexGrow !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_FLEX_GROW_ATTR, value: origFlexGrow });
-  if (origFlexShrink !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_FLEX_SHRINK_ATTR,
-      value: origFlexShrink,
-    });
-  if (origBoxSizing !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_BOX_SIZING_ATTR,
-      value: origBoxSizing,
-    });
-  if (origScale !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_SCALE_ATTR, value: origScale });
-  if (origTransformOrigin !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_TRANSFORM_ORIGIN_ATTR,
-      value: origTransformOrigin,
-    });
-  if (origDisplay !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_DISPLAY_ATTR, value: origDisplay });
-  if (origTransformDisplay !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR,
-      value: origTransformDisplay,
-    });
-
-  return ops;
-}
-
-export function buildClearBoxSizePatches(element: HTMLElement): PatchOperation[] {
-  const ops: PatchOperation[] = [
-    { type: "inline-style", property: STUDIO_WIDTH_PROP, value: null },
-    { type: "inline-style", property: STUDIO_HEIGHT_PROP, value: null },
-    { type: "attribute", property: STUDIO_BOX_SIZE_ATTR, value: null },
-  ];
-
-  const origAttrs: Array<[string, string]> = [
-    [STUDIO_ORIGINAL_WIDTH_ATTR, "width"],
-    [STUDIO_ORIGINAL_HEIGHT_ATTR, "height"],
-    [STUDIO_ORIGINAL_MIN_WIDTH_ATTR, "min-width"],
-    [STUDIO_ORIGINAL_MIN_HEIGHT_ATTR, "min-height"],
-    [STUDIO_ORIGINAL_MAX_WIDTH_ATTR, "max-width"],
-    [STUDIO_ORIGINAL_MAX_HEIGHT_ATTR, "max-height"],
-    [STUDIO_ORIGINAL_FLEX_BASIS_ATTR, "flex-basis"],
-    [STUDIO_ORIGINAL_FLEX_GROW_ATTR, "flex-grow"],
-    [STUDIO_ORIGINAL_FLEX_SHRINK_ATTR, "flex-shrink"],
-    [STUDIO_ORIGINAL_BOX_SIZING_ATTR, "box-sizing"],
-    [STUDIO_ORIGINAL_SCALE_ATTR, "scale"],
-    [STUDIO_ORIGINAL_TRANSFORM_ORIGIN_ATTR, "transform-origin"],
-    [STUDIO_ORIGINAL_DISPLAY_ATTR, "display"],
-  ];
-
-  for (const [attrName, styleProp] of origAttrs) {
-    const origVal = element.getAttribute(attrName);
-    if (origVal !== null) {
-      ops.push({ type: "inline-style", property: styleProp, value: origVal || null });
-    }
-    ops.push({ type: "attribute", property: attrName, value: null });
-  }
-
-  const origTransformDisplay = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-  if (origTransformDisplay !== null) {
-    ops.push({ type: "inline-style", property: "display", value: origTransformDisplay || null });
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR, value: null });
-  }
-
-  return ops;
-}
-
-export function buildRotationPatches(element: HTMLElement): PatchOperation[] {
-  const ops: PatchOperation[] = [];
-
-  const studioRotation = element.style.getPropertyValue(STUDIO_ROTATION_PROP);
-  const rotate = element.style.getPropertyValue("rotate");
-  const transformOrigin = element.style.getPropertyValue("transform-origin");
-  const displayVal = element.style.getPropertyValue("display");
-
-  if (studioRotation)
-    ops.push({ type: "inline-style", property: STUDIO_ROTATION_PROP, value: studioRotation });
-  if (rotate) ops.push({ type: "inline-style", property: "rotate", value: rotate });
-  if (transformOrigin)
-    ops.push({ type: "inline-style", property: "transform-origin", value: transformOrigin });
-  if (displayVal) ops.push({ type: "inline-style", property: "display", value: displayVal });
-
-  ops.push({ type: "attribute", property: STUDIO_ROTATION_ATTR, value: "true" });
-
-  const origRotate = element.getAttribute(STUDIO_ORIGINAL_ROTATE_ATTR);
-  const origInlineRotate = element.getAttribute(STUDIO_ORIGINAL_INLINE_ROTATE_ATTR);
-  const origRotationTransformOrigin = element.getAttribute(
-    STUDIO_ORIGINAL_ROTATION_TRANSFORM_ORIGIN_ATTR,
-  );
-  const origTransformDisplay = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-
-  if (origRotate !== null)
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_ROTATE_ATTR, value: origRotate });
-  if (origInlineRotate !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_INLINE_ROTATE_ATTR,
-      value: origInlineRotate,
-    });
-  if (origRotationTransformOrigin !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_ROTATION_TRANSFORM_ORIGIN_ATTR,
-      value: origRotationTransformOrigin,
-    });
-  if (origTransformDisplay !== null)
-    ops.push({
-      type: "attribute",
-      property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR,
-      value: origTransformDisplay,
-    });
-
-  return ops;
-}
-
-export function buildClearRotationPatches(element: HTMLElement): PatchOperation[] {
-  const origInlineRotate = element.getAttribute(STUDIO_ORIGINAL_INLINE_ROTATE_ATTR);
-  const origRotationTransformOrigin = element.getAttribute(
-    STUDIO_ORIGINAL_ROTATION_TRANSFORM_ORIGIN_ATTR,
-  );
-  const ops: PatchOperation[] = [
-    { type: "inline-style", property: STUDIO_ROTATION_PROP, value: null },
-    { type: "inline-style", property: "rotate", value: origInlineRotate || null },
-    {
-      type: "inline-style",
-      property: "transform-origin",
-      value: origRotationTransformOrigin !== null ? origRotationTransformOrigin || null : null,
-    },
-    { type: "attribute", property: STUDIO_ROTATION_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ROTATION_DRAFT_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ORIGINAL_ROTATE_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ORIGINAL_INLINE_ROTATE_ATTR, value: null },
-    { type: "attribute", property: STUDIO_ORIGINAL_ROTATION_TRANSFORM_ORIGIN_ATTR, value: null },
-  ];
-  const origTransformDisplay = element.getAttribute(STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR);
-  if (origTransformDisplay !== null) {
-    ops.push({ type: "inline-style", property: "display", value: origTransformDisplay || null });
-    ops.push({ type: "attribute", property: STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR, value: null });
-  }
-  return ops;
-}
-
-/* ── Motion HTML patch builders ──────────────────────────────────── */
-
-export function buildMotionPatches(element: HTMLElement): PatchOperation[] {
-  const motionJson = element.getAttribute(STUDIO_MOTION_ATTR);
-  if (!motionJson) return [];
-  const ops: PatchOperation[] = [
-    { type: "attribute", property: STUDIO_MOTION_ATTR, value: motionJson },
-  ];
-  const origTransform = element.getAttribute(STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR);
-  if (origTransform !== null) {
-    ops.push({
-      type: "attribute",
-      property: STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR,
-      value: origTransform,
-    });
-  }
-  const origOpacity = element.getAttribute(STUDIO_MOTION_ORIGINAL_OPACITY_ATTR);
-  if (origOpacity !== null) {
-    ops.push({
-      type: "attribute",
-      property: STUDIO_MOTION_ORIGINAL_OPACITY_ATTR,
-      value: origOpacity,
-    });
-  }
-  const origVisibility = element.getAttribute(STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR);
-  if (origVisibility !== null) {
-    ops.push({
-      type: "attribute",
-      property: STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR,
-      value: origVisibility,
-    });
-  }
-  return ops;
-}
-
-export function buildClearMotionPatches(_element: HTMLElement): PatchOperation[] {
-  return [
-    { type: "attribute", property: STUDIO_MOTION_ATTR, value: null },
-    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_TRANSFORM_ATTR, value: null },
-    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_OPACITY_ATTR, value: null },
-    { type: "attribute", property: STUDIO_MOTION_ORIGINAL_VISIBILITY_ATTR, value: null },
-  ];
-}
-
-/* ── Seek reapply (position + motion) ────────────────────────────── */
-
-export function reapplyPositionEditsAfterSeek(doc: Document): void {
-  const htmlElement = doc.defaultView?.HTMLElement;
-  if (!htmlElement) return;
-
-  const offsetEls = Array.from(doc.querySelectorAll(`[${STUDIO_PATH_OFFSET_ATTR}="true"]`)).filter(
-    (el): el is HTMLElement => el instanceof htmlElement,
-  );
-  for (const el of offsetEls) {
-    const x = el.style.getPropertyValue(STUDIO_OFFSET_X_PROP);
-    const y = el.style.getPropertyValue(STUDIO_OFFSET_Y_PROP);
-    if (x || y) {
-      applyStudioPathOffset(el, {
-        x: Number.parseFloat(x) || 0,
-        y: Number.parseFloat(y) || 0,
-      });
-    }
-  }
-
-  const boxSizeEls = Array.from(doc.querySelectorAll(`[${STUDIO_BOX_SIZE_ATTR}="true"]`)).filter(
-    (el): el is HTMLElement => el instanceof htmlElement,
-  );
-  for (const el of boxSizeEls) {
-    const w = Number.parseFloat(el.style.getPropertyValue(STUDIO_WIDTH_PROP));
-    const h = Number.parseFloat(el.style.getPropertyValue(STUDIO_HEIGHT_PROP));
-    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-      applyStudioBoxSize(el, { width: w, height: h });
-    }
-  }
-
-  const rotationEls = Array.from(doc.querySelectorAll(`[${STUDIO_ROTATION_ATTR}="true"]`)).filter(
-    (el): el is HTMLElement => el instanceof htmlElement,
-  );
-  for (const el of rotationEls) {
-    const angle = Number.parseFloat(el.style.getPropertyValue(STUDIO_ROTATION_PROP));
-    if (Number.isFinite(angle)) {
-      applyStudioRotation(el, { angle });
-    }
-  }
-
-  // Reapply DOM-backed motion timeline after seek
-  applyStudioMotionFromDom(doc);
 }

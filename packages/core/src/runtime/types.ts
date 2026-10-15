@@ -1,3 +1,6 @@
+import type { HfColorGradingTarget } from "../colorGrading";
+import type { RuntimeAnalyticsEvent } from "./analytics";
+
 export type RuntimeJson =
   | string
   | number
@@ -6,27 +9,42 @@ export type RuntimeJson =
   | RuntimeJson[]
   | { [key: string]: RuntimeJson };
 
-export type RuntimeBridgeControlAction =
-  | "play"
-  | "pause"
-  | "seek"
+import type { HyperframeControlAction } from "../inline-scripts/runtimeContract.js";
+import type { HyperframePickerElementInfo } from "../inline-scripts/pickerApi.js";
+import type { RuntimeProtocolV1 } from "./protocol.js";
+
+type RuntimeBridgeControlActionBase =
+  | HyperframeControlAction
   | "tick"
-  | "set-muted"
   | "set-volume"
   | "set-media-output-muted"
-  | "set-playback-rate"
-  | "enable-pick-mode"
-  | "disable-pick-mode"
+  | "set-native-media-sync-disabled"
+  | "set-web-audio-media-disabled"
+  | "set-idle-heartbeat"
+  | "set-display-scale"
+  | "set-root-duration"
+  | "set-play-range"
+  | "stop-media"
   | "flash-elements";
 
-export type RuntimeBridgeControlMessage = {
+type RuntimeBridgeControlMessageBase = {
   source: "hf-parent";
   type: "control";
   action: RuntimeBridgeControlAction;
   frame?: number;
+  timeSeconds?: number;
   muted?: boolean;
   volume?: number;
+  durationSeconds?: number;
+  startSeconds?: number | null;
+  endSeconds?: number | null;
+  disabled?: boolean;
+  slow?: boolean;
+  scale?: number;
   playbackRate?: number;
+  target?: HfColorGradingTarget | string | null;
+  grading?: RuntimeJson;
+  compare?: RuntimeJson;
   seekMode?: "drag" | "commit";
 };
 
@@ -34,12 +52,14 @@ export type RuntimeStateMessage = {
   source: "hf-preview";
   type: "state";
   frame: number;
+  currentTime: number;
+  ended: boolean;
   isPlaying: boolean;
   muted: boolean;
   playbackRate: number;
 };
 
-export type RuntimeTimelineClip = {
+export type RuntimeTimelineClipIdentity = {
   id: string | null;
   label: string;
   start: number;
@@ -48,11 +68,18 @@ export type RuntimeTimelineClip = {
   kind: "video" | "audio" | "image" | "element" | "composition";
   tagName: string | null;
   compositionId: string | null;
-  compositionAncestors: string[];
   parentCompositionId: string | null;
-  nodePath: string | null;
   compositionSrc: string | null;
   assetUrl: string | null;
+};
+
+export type RuntimeTimelineClip = RuntimeTimelineClipIdentity & {
+  zIndex: number;
+  stackingContextId: string | null;
+  compositionAncestors: string[];
+  nodePath: string | null;
+  playbackStart: number;
+  playbackRate: number;
   timelineRole: string | null;
   timelineLabel: string | null;
   timelineGroup: string | null;
@@ -68,14 +95,20 @@ export type RuntimeTimelineScene = {
   avatarName: string | null;
 };
 
-export type RuntimeTimelineMessage = {
+export type RuntimeTimelineMessage = RuntimeProtocolV1 & {
   source: "hf-preview";
   type: "timeline";
+  compositionContractVersion: 1;
+  durationSeconds: number;
   durationInFrames: number;
   clips: RuntimeTimelineClip[];
   scenes: RuntimeTimelineScene[];
   compositionWidth: number;
   compositionHeight: number;
+  /** Present when this runtime will post `assets-ready`; the value is whether
+   * the composition's assets have settled yet. Absent on older runtimes, whose
+   * parents must not wait for a message that never comes. */
+  assetsReady?: boolean;
 };
 
 export type RuntimeDiagnosticMessage = {
@@ -85,23 +118,7 @@ export type RuntimeDiagnosticMessage = {
   details: Record<string, RuntimeJson>;
 };
 
-export type RuntimePickerBoundingBox = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-export type RuntimePickerElementInfo = {
-  id: string | null;
-  tagName: string;
-  selector: string;
-  label: string;
-  boundingBox: RuntimePickerBoundingBox;
-  textContent: string | null;
-  src: string | null;
-  dataAttributes: Record<string, string>;
-};
+export type RuntimePickerElementInfo = HyperframePickerElementInfo;
 
 export type RuntimePickerHoveredMessage = {
   source: "hf-preview";
@@ -154,6 +171,44 @@ export type RuntimeMediaAutoplayBlockedMessage = {
 };
 
 /**
+ * Posted by the runtime when `installRuntimeControlBridge` finishes registering
+ * its message listener — signals that subsequent control messages
+ * (`set-muted`, `set-volume`, `set-playback-rate`, etc.) will now be received
+ * and processed. The parent (web component / host app) listens for this and
+ * replays current playback state to repair any race where bridge messages
+ * were posted before the listener was installed. Emitted again on every iframe
+ * reload because the new runtime instance starts with no state.
+ */
+export type RuntimeReadyMessage = {
+  source: "hf-preview";
+  type: "ready";
+};
+
+/** Posted once per runtime instance, after the first timeline message, when
+ * the composition's media, images and fonts have settled (or timed out). It
+ * lets a parent that cannot read the iframe (opaque origin) gate playback. */
+export type RuntimeAssetsReadyMessage = {
+  source: "hf-preview";
+  type: "assets-ready";
+  timedOut: boolean;
+};
+
+export type RuntimeDataErrorMessage = {
+  source: "hf-preview";
+  type: "runtime-data-error";
+  channel: string;
+  requestId: number;
+  message: string;
+};
+
+export type RuntimeDataAppliedMessage = {
+  source: "hf-preview";
+  type: "runtime-data-applied";
+  channel: string;
+  requestId: number;
+};
+
+/**
  * Analytics events emitted by the runtime.
  *
  * The host app receives these via postMessage and forwards to its analytics
@@ -163,13 +218,7 @@ export type RuntimeMediaAutoplayBlockedMessage = {
 export type RuntimeAnalyticsMessage = {
   source: "hf-preview";
   type: "analytics";
-  event:
-    | "composition_loaded"
-    | "composition_played"
-    | "composition_paused"
-    | "composition_seeked"
-    | "composition_ended"
-    | "element_picked";
+  event: RuntimeAnalyticsEvent;
   properties: Record<string, string | number | boolean | null>;
 };
 
@@ -188,6 +237,15 @@ export type RuntimePerformanceMessage = {
   tags: Record<string, string | number | boolean | null>;
 };
 
+/** One audio group's live meter reading, polled from the transport each tick
+ *  while playing. A group id absent from `levels` is idle/unknown (no active
+ *  member) — the studio side treats that as "no reading", not zero. */
+export type RuntimeGroupLevelsMessage = {
+  source: "hf-preview";
+  type: "group-levels";
+  levels: Array<{ groupId: string; level: number; clipped: boolean }>;
+};
+
 export type RuntimeOutboundMessage =
   | RuntimeStateMessage
   | RuntimeTimelineMessage
@@ -199,15 +257,22 @@ export type RuntimeOutboundMessage =
   | RuntimePickerCancelledMessage
   | RuntimeStageSizeMessage
   | RuntimeMediaAutoplayBlockedMessage
+  | RuntimeReadyMessage
+  | RuntimeAssetsReadyMessage
+  | RuntimeDataErrorMessage
+  | RuntimeDataAppliedMessage
   | RuntimeAnalyticsMessage
-  | RuntimePerformanceMessage;
+  | RuntimePerformanceMessage
+  | RuntimeGroupLevelsMessage;
+
+export type HeldSeek = Promise<void> | void;
 
 export type RuntimePlayer = {
   _timeline: RuntimeTimelineLike | null;
   play: () => void;
   pause: () => void;
-  seek: (timeSeconds: number, options?: { keepPlaying?: boolean }) => void;
-  renderSeek: (timeSeconds: number) => void;
+  seek: (timeSeconds: number, options?: { keepPlaying?: boolean }) => HeldSeek;
+  renderSeek: (timeSeconds: number, options?: RuntimeSeekOptions) => void;
   getTime: () => number;
   getDuration: () => number;
   isPlaying: () => boolean;
@@ -215,28 +280,124 @@ export type RuntimePlayer = {
   getPlaybackRate: () => number;
 };
 
+export type RuntimeSeekOptions = {
+  suppressEvents?: boolean;
+  /**
+   * Subdivide the output frame grid this render seek quantizes onto. Integer >= 1;
+   * 1 (or absent) is the output frame grid. Motion-blur sub-frame sampling passes the
+   * engine's sub-frame tick count so a fractional sample time survives quantization.
+   */
+  subFrameDivisions?: number;
+  exact?: boolean;
+};
+
+export type RuntimeTimelineChildLike = {
+  targets?: () => unknown[];
+  vars?: unknown;
+  startTime?: () => number;
+  duration?: () => number;
+  data?: unknown;
+  parent?: RuntimeTimelineChildLike;
+  getChildren?: RuntimeTimelineLike["getChildren"];
+};
+
+/** A timeline or tween a composition script started, as a scene swap stops it. */
+export type SceneAnimation = {
+  targets?: () => unknown[];
+  duration?: () => number;
+  getChildren?: (nested?: boolean, tweens?: boolean, timelines?: boolean) => SceneAnimation[];
+  revert?: () => void;
+  kill?: () => void;
+  totalTime?: (timeSeconds?: number, suppressEvents?: boolean) => unknown;
+};
+
 export type RuntimeTimelineLike = {
   play: () => void;
   pause: () => void;
-  seek: (timeSeconds: number, suppressEvents?: boolean) => void;
-  totalTime?: (timeSeconds: number, suppressEvents?: boolean) => void;
+  seek: (timeSeconds?: number, suppressEvents?: boolean) => unknown;
+  totalTime?: (timeSeconds?: number, suppressEvents?: boolean) => unknown;
+  totalDuration?: () => number;
+  progress?: (value?: number, suppressEvents?: boolean) => unknown;
   time: () => number;
   duration: () => number;
   add: (timeline: RuntimeTimelineLike, startAtSeconds: number) => void;
   paused: (paused?: boolean) => void;
   timeScale?: (rate: number) => void;
   set: (target: RuntimeGsapSetTarget, vars: RuntimeGsapSetVars, atSeconds?: number) => void;
+  getChildren?: (
+    nested?: boolean,
+    tweens?: boolean,
+    timelines?: boolean,
+    ignoreBeforeTime?: number,
+  ) => RuntimeTimelineChildLike[];
 };
 
 export type RuntimeDeterministicAdapter = {
   name: string;
   discover: () => void;
-  seek: (ctx: { time: number }) => void;
-  pause: () => void;
+  seek: (ctx: {
+    time: number;
+    suppressEvents?: boolean;
+    pageAnimations?: () => Animation[];
+  }) => void;
+  pause: (ctx?: { pageAnimations?: () => Animation[] }) => void;
   play?: () => void;
   revert?: () => void;
+  /**
+   * Optional async readiness gate. If the adapter has outstanding async work
+   * (e.g. Three.js's `DefaultLoadingManager` still loading models/textures),
+   * return a promise that settles when the work is done. The runtime waits
+   * for the returned promise to settle before publishing
+   * `window.__renderReady = true`, so the engine doesn't capture empty
+   * frames while assets are still loading.
+   *
+   * Return `null` (or omit the method) when nothing is pending. The runtime
+   * calls this on every readiness-publish evaluation and tracks promise
+   * identity, so returning the same promise on repeated calls is the
+   * expected contract — return a fresh promise only when a new wait is
+   * actually needed (e.g. a new batch of items has been queued).
+   *
+   * Throwing or rejecting is safe: the runtime swallows the error and
+   * proceeds to publish (matching the existing failure-doesn't-block-render
+   * convention).
+   */
+  getReadyPromise?: () => PromiseLike<unknown> | null;
+  /**
+   * Optional duration auto-inference. Non-GSAP runtimes (CSS, WAAPI, Lottie)
+   * have no `window.__timelines` entry, so the runtime has no authored source
+   * of truth for total composition length unless the author sets
+   * `data-duration` on the root element. This hook lets an adapter report the
+   * longest end time it can discover from its own animations, so the runtime
+   * can fold it into the duration floor (see `resolveAdapterDurationFloorSeconds`
+   * in `init.ts`) and treat `data-duration` as optional rather than required.
+   *
+   * Return the inferred duration in seconds, or `null` when nothing usable
+   * was discovered (e.g. no animations yet, or an animation with unbounded /
+   * infinite iteration count that can't be resolved to a finite end time —
+   * those compositions must keep declaring `data-duration` explicitly).
+   *
+   * Called on every adapter-discovery cycle (same cadence as `discover`), so
+   * it's safe — and expected — to return a growing value as async work
+   * (Lottie JSON fetch, etc.) resolves.
+   */
+  getInferredDurationSeconds?: () => number | null;
+  getAnimationCycleEndSeconds?: () => number | null;
 };
 
 export type RuntimeGsapSetTarget = string | Element | Element[] | null;
 
 export type RuntimeGsapSetVars = Record<string, string | number | boolean | null | undefined>;
+
+type RuntimeDataControlFields = {
+  channel?: string;
+  payload?: unknown;
+  requestId?: number;
+};
+
+type RuntimeBridgeControlAction =
+  | RuntimeBridgeControlActionBase
+  | "set-runtime-data"
+  | "clear-runtime-data";
+
+export type RuntimeBridgeControlMessage = RuntimeBridgeControlMessageBase &
+  RuntimeDataControlFields;

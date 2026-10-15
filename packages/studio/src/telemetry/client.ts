@@ -4,18 +4,16 @@
 // All calls are fire-and-forget; telemetry must never break the studio UI.
 // ---------------------------------------------------------------------------
 
-import { getAnonymousId, hasShownNotice, isOptedOut, markNoticeShown } from "./config";
+import { getAnonymousId, hasShownNotice, markNoticeShown } from "./config";
+import { browserTelemetryAllowed } from "./policy";
 import { getBrowserSystemMeta } from "./system";
+import { canaryEventProperties } from "./canary";
+import { recordBreadcrumb } from "./breadcrumbs";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
-// HeyGen's PostHog project key — write-only, safe to embed in client code.
-// OSS builds can override via `VITE_HYPERFRAMES_POSTHOG_KEY` at build time,
-// or set it to an empty string to disable telemetry entirely.
-const POSTHOG_API_KEY =
-  (import.meta.env.VITE_HYPERFRAMES_POSTHOG_KEY as string | undefined) ??
-  "phc_zjjbX0PnWxERXrMHhkEJWj9A9BhGVLRReICgsfTMmpx";
-const POSTHOG_HOST =
-  (import.meta.env.VITE_HYPERFRAMES_POSTHOG_HOST as string | undefined) ??
-  "https://us.i.posthog.com";
+// Write-only PostHog project key, safe to embed in client code.
+const POSTHOG_API_KEY = "phc_zjjbX0PnWxERXrMHhkEJWj9A9BhGVLRReICgsfTMmpx";
+const POSTHOG_HOST = "https://us.i.posthog.com";
 const FLUSH_INTERVAL_MS = 1_000;
 
 type EventProperties = Record<string, string | number | boolean | undefined>;
@@ -28,48 +26,30 @@ interface QueuedEvent {
 
 let eventQueue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let telemetryEnabled: boolean | null = null;
-
-function isDoNotTrackOn(): boolean {
-  return typeof navigator !== "undefined" && navigator.doNotTrack === "1";
-}
-
-function isApiKeyConfigured(): boolean {
-  return POSTHOG_API_KEY.startsWith("phc_");
-}
-
-// VITE_HYPERFRAMES_NO_TELEMETRY mirrors the CLI's HYPERFRAMES_NO_TELEMETRY=1
-// opt-out so HeyGen's own dev/CI builds can suppress telemetry from the studio
-// bundle the same way. Vite injects it at build time. Accepts "1" or "true".
-function isBuildTimeOptOut(): boolean {
-  const v = import.meta.env.VITE_HYPERFRAMES_NO_TELEMETRY as string | undefined;
-  return v === "1" || v === "true";
-}
-
-// `import.meta.env.DEV` is true under `vite dev` / `vite preview`. Auto-suppress
-// so developers running `hyperframes preview` don't pollute production telemetry.
-function isViteDevMode(): boolean {
-  return import.meta.env.DEV === true;
-}
 
 export function shouldTrack(): boolean {
-  if (telemetryEnabled !== null) return telemetryEnabled;
-  telemetryEnabled =
-    isApiKeyConfigured() &&
-    !isBuildTimeOptOut() &&
-    !isViteDevMode() &&
-    !isOptedOut() &&
-    !isDoNotTrackOn();
-  return telemetryEnabled;
+  // NOT memoized. policy.ts is explicit that the transports re-ask, and
+  // policy.test.ts asserts a mid-session opt-out takes effect at once — but
+  // this cached on first call, so a user who opted out in DevTools after one
+  // event kept sending `studio_*` and render events for the rest of the tab
+  // while `studio:*` correctly stopped. The check is two property reads.
+  return browserTelemetryAllowed();
 }
 
 export function trackEvent(event: string, properties: EventProperties = {}): void {
   if (!shouldTrack()) return;
 
+  // Every studio event passes through here, so this is the one place that can
+  // build a repro trail without asking each call site to opt in.
+  recordBreadcrumb(event, properties);
+
   const sys = getBrowserSystemMeta();
   eventQueue.push({
     event,
-    properties: { ...properties, ...sys },
+    // Canary assignments as `$feature/canary-<name>`, mirroring the CLI so a
+    // rollout spanning both surfaces reads as one flag in PostHog. Resolved
+    // after the shouldTrack guard, so opted-out users never pay for it.
+    properties: { ...properties, ...sys, ...canaryEventProperties() },
     timestamp: new Date().toISOString(),
   });
 
@@ -104,7 +84,7 @@ function send(url: string, payload: string): void {
   // Prefer fetch with keepalive (survives page navigation). sendBeacon is a
   // fallback for older runtimes where fetch isn't available.
   try {
-    void fetch(url, {
+    void studioApiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: payload,
@@ -126,6 +106,8 @@ function send(url: string, payload: string): void {
 function showNoticeOnce(): void {
   if (hasShownNotice()) return;
   markNoticeShown();
+  // Intentional one-time consent disclosure (not debug noise): tells users
+  // anonymous analytics are on and how to opt out. Kept behind a pragma.
   // eslint-disable-next-line no-console
   console.info(
     "%c[HyperFrames]%c Anonymous studio usage analytics enabled. " +

@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication
 import { describe, expect, it, vi } from "vitest";
 import { Window } from "happy-dom";
 import {
@@ -10,7 +11,6 @@ import {
   applyStudioPathOffset,
   applyStudioPathOffsetDraft,
   applyStudioRotation,
-  applyStudioRotationDraft,
   beginStudioManualEditGesture,
   captureStudioBoxSize,
   captureStudioRotation,
@@ -62,9 +62,9 @@ describe("studio manual edits", () => {
     expect(readStudioFileChangePath({ path: ".hyperframes/studio-manual-edits.json" })).toBe(
       ".hyperframes/studio-manual-edits.json",
     );
-    expect(readStudioFileChangePath({ data: '{"path":"nested/file.html"}' })).toBe(
-      "nested/file.html",
-    );
+    expect(readStudioFileChangePath({ filePath: "/nested/file.html" })).toBe("nested/file.html");
+    // A still-wrapped delivery is a decoding bug upstream, never a path.
+    expect(readStudioFileChangePath({ data: { path: "nested/file.html" } })).toBeNull();
   });
 
   it("applies offsets through CSS translate longhand", () => {
@@ -146,6 +146,20 @@ describe("studio manual edits", () => {
     expect(card.style.getPropertyValue("rotate")).toBe(`var(${STUDIO_ROTATION_PROP}, 0deg)`);
   });
 
+  it("keeps sub-pixel offsets, and box sizes on whole px so GSAP reads a -50% centring exactly", () => {
+    const document = createDocument(`<div id="card" style="width: 160px; height: 90px"></div>`);
+    const card = document.getElementById("card") as HTMLElement;
+    mockBoundingRect(card, 160, 90);
+
+    applyStudioPathOffsetDraft(card, { x: 14.25, y: -8.5 });
+    applyStudioBoxSizeDraft(card, { width: 240.4, height: 135.6 });
+
+    expect(card.style.getPropertyValue(STUDIO_OFFSET_X_PROP)).toBe("14.25px");
+    expect(card.style.getPropertyValue(STUDIO_OFFSET_Y_PROP)).toBe("-8.5px");
+    expect(card.style.getPropertyValue("width")).toBe("240px");
+    expect(card.style.getPropertyValue("height")).toBe("136px");
+  });
+
   it("applies box sizes through CSS dimensions and flex sizing overrides", () => {
     const document = createDocument(`
       <div style="display: flex; flex-direction: row">
@@ -188,24 +202,19 @@ describe("studio manual edits", () => {
     );
     const card = document.getElementById("card") as HTMLElement;
 
-    applyStudioRotation(card, { angle: 24.24 });
+    applyStudioRotation(card, { angle: 24.2468 });
 
-    expect(readStudioRotation(card)).toEqual({ angle: 24.2 });
-    expect(card.style.getPropertyValue(STUDIO_ROTATION_PROP)).toBe("24.2deg");
+    expect(readStudioRotation(card)).toEqual({ angle: 24.247 });
+    expect(card.style.getPropertyValue(STUDIO_ROTATION_PROP)).toBe("24.247deg");
     expect(card.style.getPropertyValue("rotate")).toContain("8deg");
     expect(card.style.getPropertyValue("rotate")).toContain(STUDIO_ROTATION_PROP);
     expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
 
-    applyStudioRotationDraft(card, { angle: -12.26 });
-    expect(readStudioRotation(card)).toEqual({ angle: -12.3 });
-    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.3deg)");
-    expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
-
     const snapshot = captureStudioRotation(card);
-    applyStudioRotationDraft(card, { angle: 45 });
+    applyStudioRotation(card, { angle: 45 });
     restoreStudioRotation(card, snapshot);
-    expect(readStudioRotation(card)).toEqual({ angle: -12.3 });
-    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.3deg)");
+    expect(readStudioRotation(card)).toEqual({ angle: 24.247 });
+    expect(card.style.getPropertyValue(STUDIO_ROTATION_PROP)).toBe("24.247deg");
     expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
   });
 
@@ -277,7 +286,7 @@ describe("studio manual edits", () => {
     expect(set).not.toHaveBeenCalled();
     expect(tickerTick).not.toHaveBeenCalled();
 
-    beginStudioManualEditGesture(card);
+    beginStudioManualEditGesture(card, "move");
     applyStudioPathOffsetDraft(card, { x: 35, y: -6 });
 
     expect(readStudioPathOffset(card)).toEqual({ x: 35, y: -6 });
@@ -387,8 +396,8 @@ describe("studio manual edits", () => {
     const card = document.getElementById("card") as HTMLElement;
 
     applyStudioPathOffset(card, { x: 40, y: 24 });
-    const firstToken = beginStudioManualEditGesture(card);
-    const secondToken = beginStudioManualEditGesture(card);
+    const firstToken = beginStudioManualEditGesture(card, "move");
+    const secondToken = beginStudioManualEditGesture(card, "move");
     endStudioManualEditGesture(card, firstToken);
 
     // Gesture still active — offset should remain
@@ -430,6 +439,30 @@ describe("studio manual edits", () => {
     ).toBe(true);
     (previewWindow.__player.seek as (time: number) => void)(2);
     expect(applied).toBe(11);
+  });
+
+  it("reapplies once after a seek that applied, and again once a held seek lands", async () => {
+    const previewWindow = new Window() as unknown as Parameters<
+      typeof installStudioManualEditSeekReapply
+    >[0] & { __player: Record<string, unknown> };
+    let landed = () => {};
+    const held = new Promise<void>((resolve) => (landed = resolve));
+    previewWindow.__player = { seek: (time: number) => (time > 5 ? held : undefined) };
+    let applied = 0;
+    installStudioManualEditSeekReapply(previewWindow, () => {
+      applied += 1;
+    });
+    const seek = previewWindow.__player.seek as (time: number) => unknown;
+
+    seek(1);
+    await Promise.resolve();
+    expect(applied).toBe(1);
+    expect(seek(5.5)).toBe(held);
+    expect(applied).toBe(2);
+    landed();
+    await held;
+    await Promise.resolve();
+    expect(applied).toBe(3);
   });
 
   it("reapplies manual edits while fresh playback is active", () => {
@@ -474,6 +507,106 @@ describe("studio manual edits", () => {
     expect(frames).toHaveLength(0);
   });
 
+  it("does not reapply every frame while the player is paused over unpaused scene timelines", () => {
+    const window = new Window();
+    const frames: FrameRequestCallback[] = [];
+    let playing = false;
+    const previewWindow = window as unknown as Parameters<
+      typeof installStudioManualEditSeekReapply
+    >[0] & {
+      __player: Record<string, unknown>;
+      __timelines: Record<string, Record<string, unknown>>;
+      requestAnimationFrame: (callback: FrameRequestCallback) => number;
+    };
+    previewWindow.requestAnimationFrame = (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    };
+    previewWindow.__player = {
+      play: () => {
+        playing = true;
+      },
+      isPlaying: () => playing,
+    };
+    // A GSAP child of a paused master: not paused itself, inactive, time left.
+    const master = { paused: () => true };
+    previewWindow.__timelines = {
+      scene0: {
+        parent: master,
+        play: () => {},
+        paused: () => false,
+        isActive: () => false,
+        time: () => 0,
+        duration: () => 5,
+      },
+    };
+
+    expect(installStudioManualEditSeekReapply(previewWindow, () => {})).toBe(true);
+    expect(frames).toHaveLength(0);
+
+    (previewWindow.__player.play as () => void)();
+    expect(frames).toHaveLength(1);
+    playing = false;
+    frames.shift()?.(16);
+    expect(frames).toHaveLength(0);
+  });
+
+  it("tolerates a timeline whose parent chain loops", () => {
+    const window = new Window();
+    const previewWindow = window as unknown as Parameters<
+      typeof installStudioManualEditSeekReapply
+    >[0] & {
+      __timelines: Record<string, Record<string, unknown>>;
+      requestAnimationFrame: (callback: FrameRequestCallback) => number;
+    };
+    previewWindow.requestAnimationFrame = () => 1;
+    const loop: Record<string, unknown> = { paused: () => false };
+    loop.parent = loop;
+    previewWindow.__timelines = {
+      scene0: {
+        parent: loop,
+        play: () => {},
+        paused: () => false,
+        time: () => 0,
+        duration: () => 5,
+      },
+    };
+
+    expect(() => installStudioManualEditSeekReapply(previewWindow, () => {})).not.toThrow();
+  });
+
+  it("keeps reapplying while Studio drives a timeline directly and the player reads idle", () => {
+    const window = new Window();
+    const frames: FrameRequestCallback[] = [];
+    let paused = true;
+    const previewWindow = window as unknown as Parameters<
+      typeof installStudioManualEditSeekReapply
+    >[0] & {
+      __player: Record<string, unknown>;
+      __timeline: Record<string, unknown>;
+      requestAnimationFrame: (callback: FrameRequestCallback) => number;
+    };
+    previewWindow.requestAnimationFrame = (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    };
+    previewWindow.__player = { play: () => {}, isPlaying: () => false };
+    previewWindow.__timeline = {
+      play: () => {
+        paused = false;
+      },
+      paused: () => paused,
+      isActive: () => !paused,
+      time: () => 1,
+      duration: () => 5,
+    };
+
+    expect(installStudioManualEditSeekReapply(previewWindow, () => {})).toBe(true);
+    (previewWindow.__timeline.play as () => void)();
+    frames.shift()?.(16);
+    expect(frames).toHaveLength(1);
+  });
+
   it("stops playback reapply after an unpaused timeline has completed", () => {
     const window = new Window();
     const frames: FrameRequestCallback[] = [];
@@ -514,5 +647,106 @@ describe("studio manual edits", () => {
     frames.shift()?.(16);
     expect(applied).toBe(2);
     expect(frames).toHaveLength(0);
+  });
+});
+
+describe("applyStudioPathOffset sets correct attribute name", () => {
+  it("sets data-hf-studio-path-offset without double data- prefix", () => {
+    const window = new Window();
+    const el = window.document.createElement("div");
+    window.document.body.append(el);
+
+    applyStudioPathOffset(el, { x: 100, y: 50 });
+
+    expect(el.getAttribute("data-hf-studio-path-offset")).toBe("true");
+    expect(el.getAttribute("data-data-hf-studio-path-offset")).toBeNull();
+  });
+
+  it("stores offset in CSS vars alongside the attribute marker", () => {
+    const window = new Window();
+    const el = window.document.createElement("div");
+    window.document.body.append(el);
+
+    applyStudioPathOffset(el, { x: 50, y: 25 });
+
+    expect(el.getAttribute("data-hf-studio-path-offset")).toBe("true");
+    expect(el.style.getPropertyValue(STUDIO_OFFSET_X_PROP)).toBe("50px");
+    expect(el.style.getPropertyValue(STUDIO_OFFSET_Y_PROP)).toBe("25px");
+    expect(el.style.getPropertyValue("translate")).toContain(STUDIO_OFFSET_X_PROP);
+  });
+
+  it("corrects offset applied on top of legacy double-prefix element", () => {
+    const window = new Window();
+    const el = window.document.createElement("div");
+    el.setAttribute("data-data-hf-studio-path-offset", "true");
+    el.style.setProperty(STUDIO_OFFSET_X_PROP, "200px");
+    el.style.setProperty(STUDIO_OFFSET_Y_PROP, "-30px");
+    window.document.body.append(el);
+
+    applyStudioPathOffset(el, { x: 200, y: -30 });
+
+    expect(el.getAttribute("data-hf-studio-path-offset")).toBe("true");
+    expect(readStudioPathOffset(el)).toEqual({ x: 200, y: -30 });
+    expect(el.style.getPropertyValue("translate")).toContain(STUDIO_OFFSET_X_PROP);
+  });
+});
+
+describe("applyStudioPathOffset strips GSAP double-counted translate", () => {
+  it("strips GSAP transform translate when applying offset", () => {
+    const window = new Window();
+    const element = window.document.createElement("div");
+    window.document.body.append(element);
+
+    // Simulate GSAP having baked translate into the transform matrix
+    element.style.setProperty("transform", "matrix(1, 0, 0, 1, 200, 0)");
+
+    applyStudioPathOffset(element, { x: 200, y: 0 });
+
+    // The transform translate should be stripped (GSAP's 200px removed)
+    const transform = element.style.getPropertyValue("transform");
+    if (transform && transform !== "none") {
+      const m = new window.DOMMatrix(transform);
+      expect(m.m41).toBe(0);
+      expect(m.m42).toBe(0);
+    }
+    // The offset should be stored in CSS vars
+    expect(readStudioPathOffset(element).x).toBe(200);
+  });
+
+  it("subtracts only the studio offset from GSAP transform, preserving animation values", () => {
+    const window = new Window();
+    const element = window.document.createElement("div");
+    window.document.body.append(element);
+
+    // GSAP has scale + baked translate (offset 50) + animation contribution (-70)
+    // Total m42 = 50 + (-70) = -20
+    element.style.setProperty("transform", "matrix(0.5, 0, 0, 0.5, 0, -20)");
+
+    applyStudioPathOffset(element, { x: 0, y: 50 });
+
+    const transform = element.style.getPropertyValue("transform");
+    if (transform && transform !== "none") {
+      const m = new window.DOMMatrix(transform);
+      expect(m.a).toBeCloseTo(0.5);
+      expect(m.d).toBeCloseTo(0.5);
+      // Only the studio offset (50) is subtracted, animation contribution (-70) preserved
+      expect(m.m41).toBe(0);
+      expect(m.m42).toBe(-70);
+    }
+    expect(readStudioPathOffset(element).y).toBe(50);
+  });
+
+  it("offset survives repeated applyStudioPathOffset calls without drift", () => {
+    const window = new Window();
+    const element = window.document.createElement("div");
+    window.document.body.append(element);
+
+    // Apply offset 3 times with same value (simulates reapply hook firing multiple times)
+    applyStudioPathOffset(element, { x: 100, y: -20 });
+    applyStudioPathOffset(element, { x: 100, y: -20 });
+    applyStudioPathOffset(element, { x: 100, y: -20 });
+
+    expect(readStudioPathOffset(element).x).toBe(100);
+    expect(readStudioPathOffset(element).y).toBe(-20);
   });
 });

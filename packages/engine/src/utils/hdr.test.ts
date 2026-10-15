@@ -4,6 +4,9 @@ import {
   detectTransfer,
   getHdrEncoderColorParams,
   analyzeCompositionHdr,
+  findHdrAutoPromotion,
+  formatHdrAutoPromotionWarning,
+  sanitizeHdrAutoPromotionAsset,
   DEFAULT_HDR10_MASTERING,
 } from "./hdr.js";
 import type { VideoColorSpace } from "./ffprobe.js";
@@ -19,10 +22,10 @@ describe("isHdrColorSpace", () => {
     ).toBe(false);
   });
 
-  it("detects bt2020 primaries", () => {
+  it("does not treat SDR transfer in a BT.2020 gamut as HDR", () => {
     expect(
       isHdrColorSpace({ colorTransfer: "bt709", colorPrimaries: "bt2020", colorSpace: "bt709" }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("detects smpte2084 (PQ)", () => {
@@ -187,5 +190,37 @@ describe("analyzeCompositionHdr", () => {
       hasHdr: true,
       dominantTransfer: "pq",
     });
+  });
+});
+
+describe("HDR auto-promotion reporting", () => {
+  const pq: VideoColorSpace = {
+    colorTransfer: "smpte2084",
+    colorPrimaries: "bt2020",
+    colorSpace: "bt2020nc",
+  };
+
+  it("reports the first HDR asset and the promoted output pipeline", () => {
+    const promotion = findHdrAutoPromotion([
+      {
+        asset: "assets/intro.mp4",
+        colorSpace: { colorTransfer: "bt709", colorPrimaries: "bt709", colorSpace: "bt709" },
+      },
+      { asset: "assets/hero-hdr.mp4?token=secret#preview", colorSpace: pq },
+    ]);
+
+    expect(promotion).toEqual({
+      triggeringAsset: "assets/hero-hdr.mp4",
+      output: { colorSpace: "BT.2020", codec: "HEVC Main10" },
+    });
+    expect(formatHdrAutoPromotionWarning(promotion!)).toBe(
+      '[Render] HDR auto-promotion triggered by "assets/hero-hdr.mp4", output: BT.2020 / HEVC Main10',
+    );
+  });
+
+  it("removes line breaks before an asset reaches logs", () => {
+    expect(sanitizeHdrAutoPromotionAsset("assets/hero.mp4\r\n[ERROR] forged")).toBe(
+      "assets/hero.mp4",
+    );
   });
 });

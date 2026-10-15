@@ -1,40 +1,57 @@
 import { useState, useEffect, useMemo } from "react";
 import type { RegistryItem } from "@hyperframes/core/registry";
-import { type BlockCategory, resolveBlockCategory } from "../utils/blockCategories";
+import {
+  BLOCK_CATEGORIES,
+  type BlockCategory,
+  resolveBlockCategory,
+} from "../utils/blockCategories";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
-export type CatalogItem = RegistryItem & {
+type CatalogItem = RegistryItem & {
   category: BlockCategory;
 };
 
+let catalogCache: CatalogItem[] | null = null;
+let catalogRequest: Promise<CatalogItem[]> | null = null;
+
+function loadCatalog(): Promise<CatalogItem[]> {
+  catalogRequest ??= studioApiFetch("/api/registry/blocks")
+    .then((response) => {
+      if (!response.ok) throw new Error("Failed to load catalog");
+      return response.json() as Promise<RegistryItem[]>;
+    })
+    .then((items) => {
+      catalogCache = items
+        .map((item) => ({ ...item, category: resolveBlockCategory(item.tags) }))
+        .sort((a, b) => {
+          const aIndex = BLOCK_CATEGORIES.findIndex((category) => category.id === a.category);
+          const bIndex = BLOCK_CATEGORIES.findIndex((category) => category.id === b.category);
+          return (aIndex === -1 ? 99 : aIndex) - (bIndex === -1 ? 99 : bIndex);
+        });
+      return catalogCache;
+    })
+    .catch((error: unknown) => {
+      catalogRequest = null;
+      throw error;
+    });
+  return catalogRequest;
+}
+
 export function useBlockCatalog() {
-  const [blocks, setBlocks] = useState<CatalogItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [blocks, setBlocks] = useState<CatalogItem[]>(() => catalogCache ?? []);
+  const [loading, setLoading] = useState(catalogCache === null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<BlockCategory | null>(null);
 
   // fallow-ignore-next-line complexity
   useEffect(() => {
-    const CATEGORY_ORDER: Record<BlockCategory, number> = {
-      captions: 0,
-      vfx: 1,
-      transitions: 2,
-      effects: 3,
-      social: 4,
-      data: 5,
-      scenes: 6,
-    };
-
+    if (catalogCache) return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/registry/blocks");
-        if (!res.ok) throw new Error("Failed to load catalog");
-        const data = (await res.json()) as RegistryItem[];
+        const items = await loadCatalog();
         if (cancelled) return;
-        const items = data
-          .map((b) => ({ ...b, category: resolveBlockCategory(b.tags) }))
-          .sort((a, b) => (CATEGORY_ORDER[a.category] ?? 9) - (CATEGORY_ORDER[b.category] ?? 9));
         setBlocks(items);
       } catch (err) {
         if (cancelled) return;
@@ -56,7 +73,11 @@ export function useBlockCatalog() {
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(
-        (b) => b.title.toLowerCase().includes(q) || b.description.toLowerCase().includes(q),
+        (b) =>
+          b.title.toLowerCase().includes(q) ||
+          b.description.toLowerCase().includes(q) ||
+          b.category.toLowerCase().includes(q) ||
+          b.tags?.some((t) => t.toLowerCase().includes(q)),
       );
     }
     return result;

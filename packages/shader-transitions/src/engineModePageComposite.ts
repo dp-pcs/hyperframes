@@ -76,6 +76,63 @@ interface ResolvedTransition {
 export const PAGE_COMPOSITOR_CANVAS_ID = "__hf-page-side-compositor";
 export const PAGE_COMPOSITOR_BUILD_CANARY = "__hf_page_compositor_v1__";
 
+/** Wraps a scene clone in childless copies of its ancestors below `<body>`, so inherited styles,
+ *  scoped selectors and ancestor effects apply as they do live. */
+function stageWithAncestors(
+  scene: HTMLElement,
+  clone: HTMLElement,
+): { root: HTMLElement; liveRoot: HTMLElement; pairs: Array<[Element, Element]> } {
+  const liveDescendants = scene.querySelectorAll("*");
+  const cloneDescendants = clone.querySelectorAll("*");
+  const pairs: Array<[Element, Element]> = [[scene, clone]];
+  liveDescendants.forEach((el, n) => pairs.push([el, cloneDescendants[n]!]));
+  let root = clone;
+  let liveRoot = scene;
+  for (
+    let el = scene.parentElement;
+    el && el !== document.body && el !== document.documentElement;
+    el = el.parentElement
+  ) {
+    const shell = el.cloneNode(false) as HTMLElement;
+    shell.appendChild(root);
+    pairs.push([el, shell]);
+    root = shell;
+    liveRoot = el;
+  }
+  return { root, liveRoot, pairs };
+}
+
+/** Pauses each copied CSS animation at its live counterpart's time instead of restarting it;
+ *  one with no live counterpart has finished live, so it is cancelled. */
+function holdAnimations(liveRoot: Element, copyRoot: Element, pairs: Array<[Element, Element]>) {
+  const slot = new Map<Element, number>();
+  pairs.forEach(([live, copy], n) => {
+    slot.set(live, n);
+    slot.set(copy, n);
+  });
+  const keyOf = (a: Animation): string | null => {
+    if (!("animationName" in a)) return null;
+    const effect = a.effect as KeyframeEffect;
+    return `${slot.get(effect.target!)}|${effect.pseudoElement ?? ""}|${(a as CSSAnimation).animationName}`;
+  };
+  const liveTimes = new Map<string, CSSNumberish | null>();
+  for (const a of liveRoot.getAnimations({ subtree: true })) {
+    const key = keyOf(a);
+    if (key) liveTimes.set(key, a.currentTime);
+  }
+  for (const a of copyRoot.getAnimations({ subtree: true })) {
+    const key = keyOf(a);
+    if (!key) continue;
+    const time = liveTimes.get(key);
+    if (time === undefined) {
+      a.cancel();
+    } else {
+      a.pause();
+      a.currentTime = time;
+    }
+  }
+}
+
 export function isPageSideCompositingSupported(): boolean {
   if (typeof window === "undefined" || typeof document === "undefined") return false;
   if (!isHtmlInCanvasCaptureSupported()) return false;
@@ -86,6 +143,7 @@ export function isPageSideCompositingSupported(): boolean {
   return true;
 }
 
+// fallow-ignore-next-line complexity
 export function installPageSideCompositor(options: PageCompositorInstallOptions): boolean {
   if (typeof window === "undefined") return false;
   (window as unknown as { __HF_PAGE_COMPOSITOR_CANARY__?: string }).__HF_PAGE_COMPOSITOR_CANARY__ =
@@ -209,6 +267,7 @@ export function installPageSideCompositor(options: PageCompositorInstallOptions)
   // injection so cloneNode picks up <img> replacements for <video> elements.
   // Awaits decode on cloned data-URI images so drawElementImage reads
   // the current frame, not a stale paint cache entry.
+  // fallow-ignore-next-line complexity
   async function prepareComposite(): Promise<boolean> {
     const active = currentActive;
     if (!active) {
@@ -224,8 +283,31 @@ export function installPageSideCompositor(options: PageCompositorInstallOptions)
     }
     while (fromStaging.firstChild) fromStaging.removeChild(fromStaging.firstChild);
     while (toStaging.firstChild) toStaging.removeChild(toStaging.firstChild);
-    fromStaging.appendChild(fromEl.cloneNode(true));
-    toStaging.appendChild(toEl.cloneNode(true));
+
+    // cloneNode copies the GSAP opacity-fade (opacity:0 / hidden data-start), and
+    // Chrome won't paint hidden elements — drawElementImage then throws "No cached
+    // paint record" and the shader degrades to a hard cut. The shader blends from
+    // full-opacity textures via u_progress, so force the clones visible. Cf.
+    // forceSceneVisibleInClone (html2canvas path).
+    for (const [live, staging] of [
+      [fromEl, fromStaging],
+      [toEl, toStaging],
+    ] as const) {
+      const clone = live.cloneNode(true) as HTMLElement;
+      clone.style.opacity = "1";
+      clone.style.visibility = "visible";
+      clone.querySelectorAll<HTMLElement>("[data-start]").forEach((el) => {
+        el.style.opacity = "1";
+        el.style.visibility = "visible";
+      });
+      const { root, liveRoot, pairs } = stageWithAncestors(live, clone);
+      // A full-frame box gives the copies a sized containing block to lay out against.
+      const frame = document.createElement("div");
+      frame.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;margin:0;`;
+      frame.appendChild(root);
+      staging.appendChild(frame);
+      holdAnimations(liveRoot, root, pairs);
+    }
 
     // Decode any data-URI images in clones so the browser has current
     // bitmaps before the micro-screenshot forces a paint pass.
@@ -244,6 +326,7 @@ export function installPageSideCompositor(options: PageCompositorInstallOptions)
 
   // Phase 2b: drawElementImage from painted clones + shader composite.
   // Called after micro-screenshot forces the browser to paint the clones.
+  // fallow-ignore-next-line complexity
   function resolveComposite(): boolean {
     const active = currentActive;
     if (!active) {
@@ -265,23 +348,29 @@ export function installPageSideCompositor(options: PageCompositorInstallOptions)
       return false;
     }
 
+    const staged = [
+      [fromCtx, fromChild],
+      [toCtx, toChild],
+    ] as const;
     try {
-      fromCtx.fillStyle = options.bgColor;
-      fromCtx.fillRect(0, 0, width, height);
-      fromCtx.drawElementImage(fromChild, 0, 0, width, height);
-
-      toCtx.fillStyle = options.bgColor;
-      toCtx.fillRect(0, 0, width, height);
-      toCtx.drawElementImage(toChild, 0, 0, width, height);
+      for (const [ctx, child] of staged) {
+        ctx.fillStyle = options.bgColor;
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawElementImage(child, 0, 0, width, height);
+      }
+      uploadTextureSource(gl as WebGLRenderingContext, fromTex, fromStaging);
+      uploadTextureSource(gl as WebGLRenderingContext, toTex, toStaging);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("[HyperShader] page-side compositor: drawElementImage failed:", err);
+      console.warn("[HyperShader] page-side compositor: scene capture failed:", err);
+      glCanvas.style.display = "none";
       pWin.__hf_page_composite_pending = false;
       return false;
+    } finally {
+      // The staging canvases sit behind the page, so a bitmap left on them would show
+      // through any transparent area of the composition for the rest of the film.
+      for (const [ctx] of staged) ctx.clearRect(0, 0, width, height);
     }
-
-    uploadTextureSource(gl as WebGLRenderingContext, fromTex, fromStaging);
-    uploadTextureSource(gl as WebGLRenderingContext, toTex, toStaging);
 
     try {
       renderShader(

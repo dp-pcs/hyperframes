@@ -1,7 +1,8 @@
-import { memo, useState, useCallback, useRef } from "react";
+import { memo, useEffect, useState, useCallback, useRef } from "react";
+import { useLivePreviewIframe } from "../../player/store/previewIframeStore";
 import { useCaptionStore } from "../store";
-import { useMountEffect } from "../../hooks/useMountEffect";
-import { shouldHandleCaptionNudgeKey } from "../keyboard";
+import { usePlayerStore } from "../../player";
+import { shouldHandleCaptionNudgeKey, isEditableEventTarget } from "../keyboard";
 import {
   readWordBoxes,
   getWordEl,
@@ -9,6 +10,7 @@ import {
   getOrCreateWrapper,
   writeTransform,
   computeTransformStyle,
+  registerCaptionIframe,
   type WordBox,
 } from "./CaptionOverlayUtils";
 
@@ -16,7 +18,8 @@ interface CaptionOverlayProps {
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
 }
 
-const HANDLE = 8;
+const HANDLE = 8; // visual size of a handle dot
+const HANDLE_HIT = 24; // pointer target size (invisible padding around the dot)
 const ROTATION_OFFSET = 20; // px above the selection box
 
 /** Sync canvas state back to the Zustand store so the property panel reflects it. */
@@ -29,6 +32,7 @@ function syncToStore(segmentId: string, el: HTMLElement, iframeWin: Window) {
 
 export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: CaptionOverlayProps) {
   const isEditMode = useCaptionStore((s) => s.isEditMode);
+  const livePreviewIframe = useLivePreviewIframe();
   const model = useCaptionStore((s) => s.model);
   const selectedSegmentIds = useCaptionStore((s) => s.selectedSegmentIds);
   const selectSegment = useCaptionStore((s) => s.selectSegment);
@@ -38,6 +42,8 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
   const overlayRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef(model);
   modelRef.current = model;
+  // Set by the mount effect; lets Escape handling cancel an in-flight drag.
+  const cancelDragRef = useRef<(() => boolean) | null>(null);
 
   // Interaction mode — only one active at a time
   const interactionRef = useRef<
@@ -76,10 +82,18 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
     | null
   >(null);
 
-  useMountEffect(() => {
+  // The observer and message filter bind to the live iframe element, which a promoted reload replaces.
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
     if (!isEditMode) return;
+
+    // Let undo/redo (useAppHotkeys) reapply restored models to this iframe.
+    const unregisterIframe = registerCaptionIframe(iframeRef);
+
     let prevBoxes: WordBox[] = [];
+    let rafId: number | null = null;
     const tick = () => {
+      rafId = null;
       const iframe = iframeRef.current;
       const m = modelRef.current;
       const overlay = overlayRef.current;
@@ -95,15 +109,99 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
       prevBoxes = next;
       setWordBoxes(next);
     };
-    const id = setInterval(tick, 66);
+    // Coalesce bursts of triggers (player store updates, resize) into one
+    // layout read per frame — replaces the old unconditional 66ms polling.
+    const scheduleTick = () => {
+      if (rafId === null) rafId = requestAnimationFrame(tick);
+    };
+
+    // Event sources: player state changes (seek/scrub/select), preview
+    // messages, element resize, window resize.
+    const unsubPlayer = usePlayerStore.subscribe(scheduleTick);
+    const handleMessage = (e: MessageEvent) => {
+      if (!e.source || e.source !== iframeRef.current?.contentWindow) return;
+      const data = e.data;
+      if (data?.source === "hf-preview") scheduleTick();
+    };
+    window.addEventListener("message", handleMessage);
+    window.addEventListener("resize", scheduleTick);
+    const resizeObserver = new ResizeObserver(scheduleTick);
+    if (iframeRef.current) resizeObserver.observe(iframeRef.current);
+    if (overlayRef.current) resizeObserver.observe(overlayRef.current);
+
+    // During playback caption groups animate continuously — a light interval
+    // is the only reliable driver, but it runs ONLY while playing.
+    let playInterval: ReturnType<typeof setInterval> | null = null;
+    const syncPlaybackInterval = () => {
+      const playing = usePlayerStore.getState().isPlaying;
+      if (playing && playInterval === null) {
+        playInterval = setInterval(scheduleTick, 66);
+      } else if (!playing && playInterval !== null) {
+        clearInterval(playInterval);
+        playInterval = null;
+      }
+    };
+    const unsubPlayback = usePlayerStore.subscribe(syncPlaybackInterval);
+    syncPlaybackInterval();
     tick();
 
-    // Arrow key nudge for selected words
+    const getWin = (): Window | null => {
+      try {
+        return iframeRef.current?.contentWindow ?? null;
+      } catch {
+        return null;
+      }
+    };
+
+    const cancelActiveDrag = (): boolean => {
+      const i = interactionRef.current;
+      if (!i) return false;
+      const win = getWin();
+      if (win) {
+        // Restore the pre-drag transform instead of committing the partial one.
+        writeTransform(i.wordEl, win, i.origTX, i.origTY, i.origScale, i.origRotation);
+      }
+      interactionRef.current = null;
+      return true;
+    };
+    cancelDragRef.current = cancelActiveDrag;
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      const { selectedSegmentIds: sel, model: m } = useCaptionStore.getState();
+      const store = useCaptionStore.getState();
+      const { selectedSegmentIds: sel, model: m } = store;
+
+      // Escape: cancel an in-flight drag first, else clear the selection.
+      if (e.key === "Escape") {
+        if (cancelActiveDrag()) {
+          e.preventDefault();
+          scheduleTick();
+          return;
+        }
+        if (sel.size > 0) {
+          e.preventDefault();
+          store.clearSelection();
+        }
+        return;
+      }
+
+      // ⌘A / Ctrl+A selects every caption word (unless typing in a field).
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.key.toLowerCase() === "a" &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !isEditableEventTarget(e.target)
+      ) {
+        e.preventDefault();
+        store.selectAll();
+        return;
+      }
+
       if (sel.size === 0 || !m) return;
       const arrow = e.key;
-      if (!shouldHandleCaptionNudgeKey(e)) return;
+      // Pass the event target so arrows inside inputs keep their native
+      // behavior instead of nudging the canvas word.
+      if (!shouldHandleCaptionNudgeKey(e, e.target)) return;
 
       e.preventDefault();
       const step = e.shiftKey ? 10 : 1;
@@ -129,14 +227,24 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
           break;
         }
       }
+      scheduleTick();
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => {
-      clearInterval(id);
+      unregisterIframe();
+      unsubPlayer();
+      unsubPlayback();
+      if (playInterval !== null) clearInterval(playInterval);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      resizeObserver.disconnect();
+      window.removeEventListener("message", handleMessage);
+      window.removeEventListener("resize", scheduleTick);
       window.removeEventListener("keydown", handleKeyDown);
+      cancelDragRef.current = null;
     };
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [livePreviewIframe]);
 
   const getCssScale = useCallback(() => {
     const iframe = iframeRef.current;
@@ -297,6 +405,13 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
       onPointerUp={handlePointerUp}
       onLostPointerCapture={handlePointerUp}
     >
+      {wordBoxes.length === 0 && model && model.segments.size > 0 && (
+        <div className="absolute inset-x-0 top-3 flex justify-center pointer-events-none">
+          <span className="px-2.5 py-1 rounded-full bg-black/60 border border-neutral-700 text-2xs text-neutral-300">
+            No captions visible at this frame. Scrub to a caption, or select one in the track below
+          </span>
+        </div>
+      )}
       {wordBoxes.map((box) => {
         const isSelected = selectedSegmentIds.has(box.segmentId);
         return (
@@ -325,23 +440,33 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
           >
             {isSelected && (
               <>
-                {/* Rotation handle — circle above the box */}
+                {/* Rotation handle — 24px hit area around an 8px dot */}
                 <div
                   style={{
                     position: "absolute",
                     left: "50%",
-                    top: -ROTATION_OFFSET - HANDLE,
-                    marginLeft: -HANDLE / 2,
-                    width: HANDLE,
-                    height: HANDLE,
-                    borderRadius: "50%",
-                    backgroundColor: "var(--hf-accent, #3CE6AC)",
-                    border: "1px solid rgba(0,0,0,0.5)",
+                    top: -ROTATION_OFFSET - HANDLE / 2 - HANDLE_HIT / 2,
+                    marginLeft: -HANDLE_HIT / 2,
+                    width: HANDLE_HIT,
+                    height: HANDLE_HIT,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                     cursor: "grab",
                     touchAction: "none",
                   }}
                   onPointerDown={(e) => startRotate(box, e)}
-                />
+                >
+                  <div
+                    style={{
+                      width: HANDLE,
+                      height: HANDLE,
+                      borderRadius: "50%",
+                      backgroundColor: "var(--hf-accent, #3CE6AC)",
+                      border: "1px solid rgba(0,0,0,0.5)",
+                    }}
+                  />
+                </div>
                 {/* Line from box to rotation handle */}
                 <div
                   style={{
@@ -356,29 +481,52 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
                     pointerEvents: "none",
                   }}
                 />
-                {/* Scale handles — four corners */}
+                {/* Scale handles — four corners, 24px hit areas around 8px dots */}
                 {[
-                  { right: -HANDLE / 2, bottom: -HANDLE / 2, cursor: "nwse-resize" },
-                  { left: -HANDLE / 2, top: -HANDLE / 2, cursor: "nwse-resize" },
-                  { right: -HANDLE / 2, top: -HANDLE / 2, cursor: "nesw-resize" },
-                  { left: -HANDLE / 2, bottom: -HANDLE / 2, cursor: "nesw-resize" },
-                ].map((pos, idx) => (
+                  {
+                    corner: { right: -HANDLE_HIT / 2, bottom: -HANDLE_HIT / 2 },
+                    cursor: "nwse-resize",
+                  },
+                  {
+                    corner: { left: -HANDLE_HIT / 2, top: -HANDLE_HIT / 2 },
+                    cursor: "nwse-resize",
+                  },
+                  {
+                    corner: { right: -HANDLE_HIT / 2, top: -HANDLE_HIT / 2 },
+                    cursor: "nesw-resize",
+                  },
+                  {
+                    corner: { left: -HANDLE_HIT / 2, bottom: -HANDLE_HIT / 2 },
+                    cursor: "nesw-resize",
+                  },
+                ].map(({ corner, cursor }, idx) => (
                   <div
                     key={idx}
                     style={{
                       position: "absolute",
-                      ...pos,
-                      width: HANDLE,
-                      height: HANDLE,
-                      backgroundColor: "var(--hf-accent, #3CE6AC)",
-                      border: "1px solid rgba(0,0,0,0.5)",
-                      borderRadius: 2,
+                      ...corner,
+                      width: HANDLE_HIT,
+                      height: HANDLE_HIT,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor,
                       touchAction: "none",
                     }}
                     onPointerDown={(e) =>
                       startScale(box.groupIndex, box.wordIndex, box.segmentId, e)
                     }
-                  />
+                  >
+                    <div
+                      style={{
+                        width: HANDLE,
+                        height: HANDLE,
+                        backgroundColor: "var(--hf-accent, #3CE6AC)",
+                        border: "1px solid rgba(0,0,0,0.5)",
+                        borderRadius: 2,
+                      }}
+                    />
+                  </div>
                 ))}
               </>
             )}

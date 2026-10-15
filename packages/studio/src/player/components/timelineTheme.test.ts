@@ -1,17 +1,48 @@
 import { describe, expect, it } from "vitest";
 import {
+  clipWidthLadder,
+  defaultTimelineTheme,
   getClipHandleOpacity,
   getRenderedTimelineElement,
   getTimelineTrackStyle,
 } from "./timelineTheme";
+import { getTrackStyle } from "./timelineIcons";
+
+describe("clipWidthLadder", () => {
+  it("labels from 60px, keeps the picture below that, and uses one frame below 24px", () => {
+    expect(clipWidthLadder(200)).toBe("labeled");
+    expect(clipWidthLadder(60)).toBe("labeled");
+    expect(clipWidthLadder(59)).toBe("picture");
+    expect(clipWidthLadder(24)).toBe("picture");
+    expect(clipWidthLadder(23)).toBe("frame");
+    expect(defaultTimelineTheme.clipRadius).toBe("var(--timeline-clip-radius)");
+    expect(defaultTimelineTheme.audioClipRadius).toBe("var(--timeline-clip-audio-radius)");
+  });
+});
 
 describe("getTimelineTrackStyle", () => {
-  it("reuses heading styles for heading tags", () => {
-    expect(getTimelineTrackStyle("h2").accent).toBe(getTimelineTrackStyle("h1").accent);
-  });
+  it("uses one neutral clip style for every timeline tag", () => {
+    const expectedStyle = {
+      clip: "var(--timeline-track-clip-fill)",
+      clipActive: "var(--timeline-track-clip-active)",
+      accent: "var(--color-accent)",
+      label: "var(--timeline-track-label)",
+    };
 
-  it("falls back for unknown tags", () => {
-    expect(getTimelineTrackStyle("custom-tag").accent).toBe("#3CE6AC");
+    expect(getTimelineTrackStyle("video")).toEqual(expectedStyle);
+    expect(getTimelineTrackStyle("audio")).toEqual(expectedStyle);
+    expect(getTimelineTrackStyle("custom-tag")).toEqual(expectedStyle);
+    expect(getTimelineTrackStyle("video")).toEqual(getTimelineTrackStyle("audio"));
+    expect(getTimelineTrackStyle("video")).toEqual(getTimelineTrackStyle("custom-tag"));
+  });
+});
+
+describe("getTrackStyle", () => {
+  it("returns the timeline style only and preserves the empty tag fallback", () => {
+    const style = getTrackStyle("");
+    expect(style).toEqual(getTimelineTrackStyle("div"));
+    expect(Object.keys(style)).not.toContain("icon");
+    expect(Object.keys(style)).not.toContain("iconBackground");
   });
 });
 

@@ -1,91 +1,74 @@
-import { useState, useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { RightPanelTab } from "../utils/studioHelpers";
-import { readStudioUiPreferences, writeStudioUiPreferences } from "../utils/studioUiPreferences";
 import { trackStudioEvent } from "../utils/studioTelemetry";
+import { useDockLayoutStore, visiblePanelInZone } from "../components/dock/dockLayoutStore";
+import { PANEL_DEFINITIONS, type PanelId } from "../components/dock/panelRegistry";
+import { useStableHandlers } from "./useStableHandlers";
 
 export interface InitialPanelLayoutState {
   rightCollapsed?: boolean | null;
   rightPanelTab?: RightPanelTab | null;
 }
 
+/** The dock panel each legacy right-panel tab name opens; block params render inside Design. */
+function panelForTab(tab: RightPanelTab): PanelId {
+  return tab === "block-params" ? "design" : tab;
+}
+
+function tabForPanel(id: PanelId | null): RightPanelTab {
+  return id !== null && PANEL_DEFINITIONS[id].zone === "right" ? (id as RightPanelTab) : "design";
+}
+
+/** The right column as the rest of Studio reads it, backed by the dock's panel state. */
 export function usePanelLayout(initialState?: InitialPanelLayoutState) {
-  const [leftWidth, setLeftWidth] = useState(240);
-  const [rightWidth, setRightWidth] = useState(400);
-  const [leftCollapsed, setLeftCollapsed] = useState(
-    () => readStudioUiPreferences().leftCollapsed ?? false,
-  );
-  const [rightCollapsed, setRightCollapsed] = useState(initialState?.rightCollapsed ?? true);
-  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>(
-    initialState?.rightPanelTab ?? "renders",
-  );
-  const panelDragRef = useRef<{
-    side: "left" | "right";
-    startX: number;
-    startW: number;
-  } | null>(null);
+  const controller = useDockLayoutStore((state) => state.controller);
+  const lastActive = useDockLayoutStore((state) => state.lastActive);
+  const visiblePanels = useDockLayoutStore((state) => state.visiblePanels);
 
-  const toggleLeftSidebar = useCallback(() => {
-    setLeftCollapsed((collapsed) => {
-      writeStudioUiPreferences({ leftCollapsed: !collapsed });
-      trackStudioEvent("panel_toggle", { panel: "left_sidebar", collapsed: !collapsed });
-      return !collapsed;
-    });
+  const initialRef = useRef(initialState);
+  useEffect(() => {
+    if (!controller) return;
+    const { rightCollapsed, rightPanelTab } = initialRef.current ?? {};
+    initialRef.current = undefined;
+    const store = useDockLayoutStore.getState();
+    const wanted = rightPanelTab ? panelForTab(rightPanelTab) : null;
+    let unsubscribe = () => {};
+    if (wanted && store.openPanels.has(wanted)) {
+      store.activatePanel(wanted);
+    } else if (wanted === "slideshow") {
+      // The slideshow panel only opens once the composition loads and turns out to be one.
+      unsubscribe = useDockLayoutStore.subscribe((state) => {
+        if (!state.openPanels.has("slideshow")) return;
+        unsubscribe();
+        state.activatePanel("slideshow");
+      });
+    }
+    if (rightCollapsed != null) store.setZoneVisible("right", !rightCollapsed);
+    return () => unsubscribe();
+  }, [controller]);
+
+  const visibleRight = visiblePanelInZone("right", lastActive, visiblePanels);
+  const rightPanelTab = tabForPanel(visibleRight);
+  const rightCollapsed = visibleRight === null;
+
+  const setRightPanelTab = useCallback((tab: RightPanelTab) => {
+    const store = useDockLayoutStore.getState();
+    const shown = visiblePanelInZone("right", store.lastActive, store.visiblePanels);
+    store.activatePanel(panelForTab(tab));
+    if (tabForPanel(shown) !== tab) trackStudioEvent("tab_switch", { panel: "right_panel", tab });
   }, []);
 
-  const handlePanelResizeStart = useCallback(
-    (side: "left" | "right", e: React.PointerEvent) => {
-      e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
-      panelDragRef.current = {
-        side,
-        startX: e.clientX,
-        startW: side === "left" ? leftWidth : rightWidth,
-      };
-    },
-    [leftWidth, rightWidth],
-  );
-
-  const handlePanelResizeMove = useCallback((e: React.PointerEvent) => {
-    const drag = panelDragRef.current;
-    if (!drag) return;
-    const delta = e.clientX - drag.startX;
-    const maxLeft = Math.floor(window.innerWidth * 0.5);
-    const newW = Math.max(
-      160,
-      Math.min(
-        drag.side === "left" ? maxLeft : 600,
-        drag.startW + (drag.side === "left" ? delta : -delta),
-      ),
-    );
-    if (drag.side === "left") setLeftWidth(newW);
-    else setRightWidth(newW);
+  const setRightCollapsed = useCallback((collapsed: boolean) => {
+    const store = useDockLayoutStore.getState();
+    if (!collapsed && visiblePanelInZone("right", store.lastActive, store.visiblePanels) === null) {
+      store.activatePanel("design");
+      return;
+    }
+    store.setZoneVisible("right", !collapsed);
   }, []);
 
-  const handlePanelResizeEnd = useCallback(() => {
-    panelDragRef.current = null;
-  }, []);
-
-  const trackedSetRightPanelTab = useCallback(
-    (tab: RightPanelTab) => {
-      setRightPanelTab(tab);
-      trackStudioEvent("tab_switch", { panel: "right_panel", tab });
-    },
-    [setRightPanelTab],
+  return useStableHandlers(
+    { rightCollapsed, setRightCollapsed, rightPanelTab, setRightPanelTab },
+    null,
   );
-
-  return {
-    leftWidth,
-    setLeftWidth,
-    rightWidth,
-    leftCollapsed,
-    setLeftCollapsed,
-    rightCollapsed,
-    setRightCollapsed,
-    rightPanelTab,
-    setRightPanelTab: trackedSetRightPanelTab,
-    toggleLeftSidebar,
-    handlePanelResizeStart,
-    handlePanelResizeMove,
-    handlePanelResizeEnd,
-  };
 }

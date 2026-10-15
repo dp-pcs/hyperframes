@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Eye, Layers, Palette, Settings, Square, Zap } from "../../icons/SystemIcons";
 import { buildDefaultGradientModel, serializeGradient } from "./gradientValue";
 import { isTextEditableSelection, type DomEditSelection } from "./domEditing";
 import {
   buildBoxShadowPresetValue,
   buildClipPathValue,
+  buildInsetClipPathSides,
   buildInsetClipPathValue,
   buildStrokeStyleUpdates,
   buildStrokeWidthStyleUpdates,
@@ -17,10 +18,12 @@ import {
   inferClipPathPreset,
   LABEL,
   normalizePanelPxValue,
+  parseInsetClipPathSides,
   parseNumericValue,
   parsePxMetricValue,
   RESPONSIVE_GRID,
   setCssFilterFunctionPx,
+  type ClipPathInsetSides,
   type BoxShadowPreset,
 } from "./propertyPanelHelpers";
 import {
@@ -33,25 +36,44 @@ import {
 } from "./propertyPanelPrimitives";
 import { ColorField } from "./propertyPanelColor";
 import { GradientField, ImageFillField } from "./propertyPanelFill";
+import { BorderRadiusEditor } from "./BorderRadiusEditor";
 
+// fallow-ignore-next-line complexity
 export function StyleSections({
   projectId,
   element,
   styles,
   assets,
   onSetStyle,
+  onSetHtmlAttribute,
   onImportAssets,
+  gsapBorderRadius,
+  hideFlex = false,
 }: {
   projectId: string;
   element: DomEditSelection;
   styles: Record<string, string>;
   assets: string[];
-  onSetStyle: (prop: string, value: string) => void | Promise<void>;
+  onSetStyle: (prop: string, value: string) => void | Promise<unknown>;
+  onSetHtmlAttribute: (attr: string, value: string | null) => void | Promise<void>;
   onImportAssets?: (files: FileList) => Promise<string[]>;
+  gsapBorderRadius?: { tl: number; tr: number; br: number; bl: number } | null;
+  // When true, the Flex `Section` is suppressed. The flat inspector renders
+  // its own Flex controls inside the Layout group (LayoutFlexBlock), so the
+  // flat path passes this to avoid a double-render. Non-flat callers omit it.
+  hideFlex?: boolean;
 }) {
   const styleEditingDisabled = !element.capabilities.canEditStyles;
   const isFlex = styles.display === "flex" || styles.display === "inline-flex";
   const radiusValue = parseNumericValue(styles["border-radius"]) ?? 0;
+  const radiusTL =
+    gsapBorderRadius?.tl ?? parseNumericValue(styles["border-top-left-radius"]) ?? radiusValue;
+  const radiusTR =
+    gsapBorderRadius?.tr ?? parseNumericValue(styles["border-top-right-radius"]) ?? radiusValue;
+  const radiusBR =
+    gsapBorderRadius?.br ?? parseNumericValue(styles["border-bottom-right-radius"]) ?? radiusValue;
+  const radiusBL =
+    gsapBorderRadius?.bl ?? parseNumericValue(styles["border-bottom-left-radius"]) ?? radiusValue;
   const opacityValue = Math.round((parseNumericValue(styles.opacity) ?? 1) * 100);
   const borderWidthValue =
     parsePxMetricValue(styles["border-width"] ?? "") ??
@@ -75,43 +97,85 @@ export function StyleSections({
   const backdropBlurValue = getCssFilterFunctionPx(styles["backdrop-filter"], "blur");
   const clipPathValue = styles["clip-path"] || "none";
   const clipPathPreset = inferClipPathPreset(clipPathValue);
+  const parsedClipInsets = parseInsetClipPathSides(clipPathValue);
   const clipInsetValue = getClipPathInsetPx(clipPathValue);
+  const clipInsetSides = parsedClipInsets ?? {
+    top: clipInsetValue,
+    right: clipInsetValue,
+    bottom: clipInsetValue,
+    left: clipInsetValue,
+    radius: radiusValue,
+  };
+  const showClipInsetSides = clipPathPreset === "inset" || parsedClipInsets != null;
   const backgroundImage = styles["background-image"] ?? "none";
   const hasTextControls = isTextEditableSelection(element);
 
-  const fillMode =
-    backgroundImage && backgroundImage !== "none"
-      ? backgroundImage.includes("gradient")
-        ? "Gradient"
-        : "Image"
-      : "Solid";
+  let fillMode = "Solid";
+  if (element.tagName === "img") {
+    fillMode = "Image";
+  } else if (backgroundImage && backgroundImage !== "none") {
+    fillMode = backgroundImage.includes("gradient") ? "Gradient" : "Image";
+  }
   const [preferredFillMode, setPreferredFillMode] = useState(fillMode);
   const imageUrl = extractBackgroundImageUrl(backgroundImage);
+  // Remember the last authored gradient so an exploratory Solid↔Gradient
+  // toggle restores it instead of destroying it with the default gradient.
+  const lastGradientRef = useRef<string | null>(
+    backgroundImage.includes("gradient") ? backgroundImage : null,
+  );
+
+  // The remembered gradient is per-element: reset on selection change so
+  // element A's gradient can't leak onto element B via the fill-mode toggle.
+  // (The effect below re-stores it when the new element has its own gradient.)
+  useEffect(() => {
+    lastGradientRef.current = null;
+  }, [element.id, element.selector]);
 
   useEffect(() => {
     setPreferredFillMode(fillMode);
+    if (backgroundImage.includes("gradient")) {
+      lastGradientRef.current = backgroundImage;
+    }
   }, [fillMode, element.id, element.selector, backgroundImage]);
 
   const handleFillModeChange = (nextMode: string) => {
     setPreferredFillMode(nextMode);
     if (nextMode === "Solid") {
+      if (backgroundImage.includes("gradient")) {
+        lastGradientRef.current = backgroundImage;
+      }
       onSetStyle("background-image", "none");
       return;
     }
     if (nextMode === "Gradient" && !backgroundImage.includes("gradient")) {
       onSetStyle(
         "background-image",
-        serializeGradient(buildDefaultGradientModel(styles["background-color"])),
+        lastGradientRef.current ??
+          serializeGradient(buildDefaultGradientModel(styles["background-color"])),
       );
     }
   };
 
+  const commitClipInsetSide = (side: keyof ClipPathInsetSides, nextValue: string) => {
+    const next = parsePxMetricValue(nextValue);
+    if (next == null) return;
+    const sides: ClipPathInsetSides = {
+      top: clipInsetSides.top,
+      right: clipInsetSides.right,
+      bottom: clipInsetSides.bottom,
+      left: clipInsetSides.left,
+    };
+    sides[side] = next;
+    onSetStyle("clip-path", buildInsetClipPathSides(sides, clipInsetSides.radius));
+  };
+
   return (
     <>
-      {isFlex && (
+      {isFlex && !hideFlex && (
         <Section title="Flex" icon={<Layers size={15} />} defaultCollapsed>
           <div className="space-y-4">
             <SegmentedControl
+              trackName="Flex direction"
               disabled={styleEditingDisabled}
               value={styles["flex-direction"] || "row"}
               onChange={(next) => onSetStyle("flex-direction", next)}
@@ -155,15 +219,26 @@ export function StyleSections({
 
       {hasVisualBackground && (
         <Section title="Radius" icon={<Settings size={15} />} defaultCollapsed>
-          <SliderControl
-            value={radiusValue}
-            min={0}
-            max={Math.max(240, Math.ceil(radiusValue))}
-            step={1}
+          <BorderRadiusEditor
+            tl={radiusTL}
+            tr={radiusTR}
+            br={radiusBR}
+            bl={radiusBL}
             disabled={styleEditingDisabled}
-            displayValue={`${formatNumericValue(radiusValue)}px`}
-            formatDisplayValue={(next) => `${formatNumericValue(next)}px`}
-            onCommit={(next) => onSetStyle("border-radius", `${formatNumericValue(next)}px`)}
+            onCommit={(corner, value) => {
+              const px = `${formatNumericValue(value)}px`;
+              if (corner === "all") {
+                onSetStyle("border-radius", px);
+              } else {
+                const prop = {
+                  tl: "border-top-left-radius",
+                  tr: "border-top-right-radius",
+                  br: "border-bottom-right-radius",
+                  bl: "border-bottom-left-radius",
+                }[corner];
+                onSetStyle(prop, px);
+              }
+            }}
           />
         </Section>
       )}
@@ -245,6 +320,7 @@ export function StyleSections({
             <div className="grid min-w-0 gap-1.5">
               <span className={LABEL}>Layer blur</span>
               <SliderControl
+                trackName="Layer blur"
                 value={filterBlurValue}
                 min={0}
                 max={Math.max(40, Math.ceil(filterBlurValue))}
@@ -260,6 +336,7 @@ export function StyleSections({
             <div className="grid min-w-0 gap-1.5">
               <span className={LABEL}>Backdrop</span>
               <SliderControl
+                trackName="Backdrop blur"
                 value={backdropBlurValue}
                 min={0}
                 max={Math.max(60, Math.ceil(backdropBlurValue))}
@@ -310,6 +387,7 @@ export function StyleSections({
           <div className="grid min-w-0 gap-1.5">
             <span className={LABEL}>Mask inset</span>
             <SliderControl
+              trackName="Mask inset"
               value={clipInsetValue}
               min={0}
               max={Math.max(120, Math.ceil(clipInsetValue))}
@@ -322,12 +400,43 @@ export function StyleSections({
               }
             />
           </div>
+          {showClipInsetSides && (
+            <div className="grid gap-2">
+              <div className="grid grid-cols-4 gap-2">
+                <MetricField
+                  label="T"
+                  value={formatPxMetricValue(clipInsetSides.top)}
+                  disabled={styleEditingDisabled}
+                  onCommit={(next) => commitClipInsetSide("top", next)}
+                />
+                <MetricField
+                  label="R"
+                  value={formatPxMetricValue(clipInsetSides.right)}
+                  disabled={styleEditingDisabled}
+                  onCommit={(next) => commitClipInsetSide("right", next)}
+                />
+                <MetricField
+                  label="B"
+                  value={formatPxMetricValue(clipInsetSides.bottom)}
+                  disabled={styleEditingDisabled}
+                  onCommit={(next) => commitClipInsetSide("bottom", next)}
+                />
+                <MetricField
+                  label="L"
+                  value={formatPxMetricValue(clipInsetSides.left)}
+                  disabled={styleEditingDisabled}
+                  onCommit={(next) => commitClipInsetSide("left", next)}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </Section>
 
       <Section title="Transparency" icon={<Eye size={15} />} defaultCollapsed>
         <div className="space-y-4">
           <SliderControl
+            trackName="Opacity"
             value={opacityValue}
             min={0}
             max={100}
@@ -347,17 +456,10 @@ export function StyleSections({
         </div>
       </Section>
 
-      <Section
-        title="Fill"
-        icon={<Palette size={15} />}
-        accessory={
-          <div className="rounded-full border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-400">
-            {preferredFillMode}
-          </div>
-        }
-      >
+      <Section title="Fill" icon={<Palette size={15} />}>
         <div className="space-y-4">
           <SegmentedControl
+            trackName="Fill type"
             disabled={styleEditingDisabled}
             value={preferredFillMode}
             onChange={handleFillModeChange}
@@ -388,7 +490,8 @@ export function StyleSections({
           ) : (
             <ImageFillField
               projectId={projectId}
-              sourceFile={element.sourceFile}
+              element={element}
+              onSetHtmlAttribute={onSetHtmlAttribute}
               value={imageUrl}
               assets={assets}
               disabled={styleEditingDisabled}

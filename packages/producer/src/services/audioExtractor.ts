@@ -1,3 +1,4 @@
+// fallow-ignore-file unused-file code-duplication complexity
 /**
  * Audio Extractor Service
  *
@@ -8,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { getFfmpegBinary, trackChildProcess } from "@hyperframes/engine";
 
 export interface AudioElement {
   id: string;
@@ -43,7 +45,10 @@ export function parseAudioElements(html: string): AudioElement[] {
     const tagName = (match[1] ?? "").toLowerCase() as "audio" | "video";
     const start = parseFloat(match[2] ?? "");
 
-    const idMatch = fullTag.match(/id=["']([^"']+)["']/);
+    // `(?<![\w-])` keeps the plain-id pattern off `data-hf-render-id="…"` (and
+    // `data-hf-id`), which would otherwise match first and report the wrong id.
+    const idMatch = fullTag.match(/(?<![\w-])id=["']([^"']+)["']/);
+    const renderIdMatch = fullTag.match(/data-hf-render-id=["']([^"']+)["']/);
     const srcMatch = fullTag.match(/src=["']([^"']+)["']/);
     if (!srcMatch) continue;
 
@@ -63,7 +68,9 @@ export function parseAudioElements(html: string): AudioElement[] {
           : 0;
 
     elements.push({
-      id: idMatch?.[1] || `media-${elements.length}`,
+      // The stamped render id is document-unique; the authored id is only
+      // unique within one composition file. See core's mediaRenderIds.ts.
+      id: renderIdMatch?.[1] || idMatch?.[1] || `media-${elements.length}`,
       src: srcMatch[1] ?? "",
       start: isNaN(start) ? 0 : start,
       duration,
@@ -81,7 +88,9 @@ export function parseAudioElements(html: string): AudioElement[] {
  */
 function runFFmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn("ffmpeg", args);
+    // See runFfmpeg.ts: keeps a console window off the user's desktop on Windows.
+    const ffmpeg = spawn(getFfmpegBinary(), args, { windowsHide: true });
+    trackChildProcess(ffmpeg);
     let stderr = "";
 
     ffmpeg.stderr.on("data", (data) => {
@@ -203,14 +212,18 @@ async function mixTracks(
     const delayMs = Math.round(track.start * 1000);
     const trimDuration = track.duration > 0 ? track.duration : totalDuration;
 
+    // See audioMixer.ts for why asetpts sits between apad and atrim.
     filterParts.push(
-      `[${i}:a]atrim=0:${trimDuration},volume=${track.volume},adelay=${delayMs}|${delayMs},apad=whole_dur=${totalDuration}[a${i}]`,
+      `[${i}:a]atrim=0:${trimDuration},volume=${track.volume},adelay=${delayMs}|${delayMs},apad,asetpts=N/SR/TB,atrim=0:${totalDuration}[a${i}]`,
     );
   });
 
   const mixInputs = tracks.map((_, i) => `[a${i}]`).join("");
-  const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest:normalize=0[out]`;
-  const fullFilter = [...filterParts, mixFilter].join(";");
+  // amix divides by track count by default (normalize=true). Compensate with
+  // a volume gain to preserve per-track levels across all FFmpeg versions.
+  const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest[mixed]`;
+  const postMixGain = `[mixed]volume=${tracks.length}[out]`;
+  const fullFilter = [...filterParts, mixFilter, postMixGain].join(";");
 
   const args = [
     ...inputs,

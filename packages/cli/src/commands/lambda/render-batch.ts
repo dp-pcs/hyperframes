@@ -1,3 +1,4 @@
+import { failCommand, setCommandExitCode } from "../../utils/commandResult.js";
 /**
  * `hyperframes lambda render-batch <projectDir> --batch <path.jsonl>` —
  * fan out N personalised renders of the same project, one per JSONL line.
@@ -28,6 +29,7 @@ import type {
   SerializableDistributedRenderConfig,
   SiteHandle,
 } from "@hyperframes/aws-lambda/sdk";
+import type { CanvasResolution } from "@hyperframes/core";
 import { c } from "../../ui/colors.js";
 import { errorBox } from "../../ui/format.js";
 import {
@@ -35,6 +37,8 @@ import {
   reportVariableIssues,
   validateVariablesAgainstSchema,
 } from "../../utils/variables.js";
+import { normalizeErrorMessage } from "../../utils/errorMessage.js";
+import { warnOnDimensionMismatch } from "./_dimensions.js";
 import { requireStack } from "./state.js";
 
 // Dynamic-import the SDK so tsup keeps it out of the static-import head of
@@ -60,11 +64,21 @@ export interface RenderBatchArgs {
   fps: 24 | 30 | 60;
   width: number;
   height: number;
+  /** See {@link RenderArgs.outputResolution}. */
+  outputResolution?: CanvasResolution;
+  /**
+   * See {@link RenderArgs.outputResolutionAspectAgnostic}. Threaded through
+   * `SerializableDistributedRenderConfig` so the Lambda worker's compile
+   * stage remaps aspect-agnostic aliases (`1080p` / `hd` / `4k` / `uhd`) to
+   * the composition's orientation — same regression class as the local CLI.
+   */
+  outputResolutionAspectAgnostic?: boolean;
   format: DistributedFormat;
   codec?: "h264" | "h265";
   quality?: "draft" | "standard" | "high";
   chunkSize?: number;
   maxParallelChunks?: number;
+  targetChunkFrames?: number;
   /**
    * Maximum in-flight Step Functions starts at any moment. Caps fan-out
    * so a 10 000-entry batch doesn't try to spawn 10 000 executions
@@ -154,13 +168,21 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
   const batchPath = resolvePath(args.batch);
   if (!existsSync(batchPath)) {
     errorBox("Batch file not found", `No such file: ${batchPath}`);
-    process.exit(1);
+    failCommand();
   }
   const entries = parseBatchFile(batchPath);
   if (entries.length === 0) {
     errorBox("Empty batch", `${batchPath} contains zero entries (every line was blank).`);
-    process.exit(1);
+    failCommand();
   }
+
+  warnOnDimensionMismatch({
+    projectDir,
+    cliWidth: args.width,
+    cliHeight: args.height,
+    outputResolution: args.outputResolution,
+    quiet: args.json,
+  });
 
   // Pre-validate every entry's variables against the composition's
   // schema. Mismatches print as warnings; strict mode aborts before any
@@ -192,20 +214,10 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
       "Variable validation failed",
       "Aborting batch due to variable issues in one or more entries (--strict-variables mode).",
     );
-    process.exit(1);
+    failCommand();
   }
 
-  const config: SerializableDistributedRenderConfig = {
-    fps: args.fps,
-    width: args.width,
-    height: args.height,
-    format: args.format,
-    codec: args.codec,
-    quality: args.quality,
-    chunkSize: args.chunkSize,
-    maxParallelChunks: args.maxParallelChunks,
-    runtimeCap: "lambda",
-  };
+  const config: SerializableDistributedRenderConfig = buildLambdaBatchRenderConfig(args);
 
   // Deploy the site once and reuse it across every entry. --site-id and
   // --dry-run both skip the deploy via a synthesised handle.
@@ -279,7 +291,7 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
         outputKey: entry.outputKey,
         executionArn: null,
         status: "failed-to-start",
-        error: err instanceof Error ? err.message : String(err),
+        error: normalizeErrorMessage(err),
       };
     }
   };
@@ -314,7 +326,7 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
         : (row.executionArn ?? c.dim("(no execution)"));
     console.log(`  ${tag} line ${row.inputLine}  ${c.dim(row.outputKey)}  ${detail}`);
   }
-  if (failed > 0) process.exitCode = 1;
+  if (failed > 0) setCommandExitCode(1);
 }
 
 /**
@@ -332,6 +344,34 @@ function makePlaceholderSiteHandle(siteId: string, bucketName: string): SiteHand
     uploadedAt: "",
     uploaded: false,
   };
+}
+
+/**
+ * Build the shared wire {@link SerializableDistributedRenderConfig} used
+ * for every entry in a `hyperframes lambda render-batch` run. Extracted for
+ * boundary-test coverage of the aspect-agnostic flag threading (per-entry
+ * `variables` are still overlayed at dispatch time inside {@link runRenderBatch}).
+ */
+export function buildLambdaBatchRenderConfig(
+  args: RenderBatchArgs,
+): SerializableDistributedRenderConfig {
+  const config: SerializableDistributedRenderConfig = {
+    fps: args.fps,
+    width: args.width,
+    height: args.height,
+    outputResolution: args.outputResolution,
+    format: args.format,
+    codec: args.codec,
+    quality: args.quality,
+    chunkSize: args.chunkSize,
+    maxParallelChunks: args.maxParallelChunks,
+    targetChunkFrames: args.targetChunkFrames,
+    runtimeCap: "lambda",
+  };
+  if (args.outputResolutionAspectAgnostic) {
+    config.outputResolutionAspectAgnostic = true;
+  }
+  return config;
 }
 
 /**
@@ -356,18 +396,15 @@ export function parseBatchFile(path: string): Array<{ entry: BatchEntry; lineNum
     try {
       parsed = JSON.parse(line);
     } catch (err) {
-      errorBox(
-        `Invalid JSON in batch file on line ${i + 1}`,
-        err instanceof Error ? err.message : String(err),
-      );
-      process.exit(1);
+      errorBox(`Invalid JSON in batch file on line ${i + 1}`, normalizeErrorMessage(err));
+      failCommand();
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       errorBox(
         `Invalid batch entry on line ${i + 1}`,
         'Each line must be a JSON object with at least { "outputKey": "..." }.',
       );
-      process.exit(1);
+      failCommand();
     }
     const obj = parsed as Record<string, unknown>;
     const outputKey = obj.outputKey;
@@ -376,7 +413,7 @@ export function parseBatchFile(path: string): Array<{ entry: BatchEntry; lineNum
         `Missing outputKey on line ${i + 1}`,
         'Each batch entry needs a non-empty "outputKey" string (e.g. "renders/alice.mp4").',
       );
-      process.exit(1);
+      failCommand();
     }
     if (obj.variables !== undefined) {
       if (
@@ -388,7 +425,7 @@ export function parseBatchFile(path: string): Array<{ entry: BatchEntry; lineNum
           `Invalid variables on line ${i + 1}`,
           '"variables" must be a JSON object (or omitted).',
         );
-        process.exit(1);
+        failCommand();
       }
     }
     if (obj.executionName !== undefined && typeof obj.executionName !== "string") {
@@ -396,7 +433,7 @@ export function parseBatchFile(path: string): Array<{ entry: BatchEntry; lineNum
         `Invalid executionName on line ${i + 1}`,
         '"executionName" must be a string (or omitted).',
       );
-      process.exit(1);
+      failCommand();
     }
     out.push({
       entry: {

@@ -1,8 +1,5 @@
 export type StudioFeatureFlagEnv = Record<string, boolean | string | undefined>;
 
-const STUDIO_PREVIEW_MANUAL_DRAGGING_ENV = "VITE_STUDIO_ENABLE_PREVIEW_MANUAL_DRAGGING";
-const STUDIO_INSPECTOR_PANELS_ENV = "VITE_STUDIO_ENABLE_INSPECTOR_PANELS";
-const STUDIO_MOTION_PANEL_ENV = "VITE_STUDIO_ENABLE_MOTION_PANEL";
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on", "enabled"]);
 const FALSY_ENV_VALUES = new Set(["0", "false", "no", "off", "disabled"]);
 
@@ -30,32 +27,63 @@ export function resolveStudioBooleanEnvFlag(
 // and downstream `env[name]` reads would crash. Fall back to `{}` so
 // every flag resolves to its declared default outside Vite. Direct
 // property access keeps Vite's compile-time transform happy.
-const env = (import.meta.env ?? {}) as StudioFeatureFlagEnv;
+//
+// When the studio is served as a pre-built SPA by the embedded Hono server,
+// `import.meta.env` values were baked at build time. The server injects
+// `window.__HF_STUDIO_ENV__` with any `VITE_STUDIO_*` env vars from the
+// user's shell, so runtime overrides take precedence over baked defaults.
+const runtimeEnv =
+  typeof window !== "undefined"
+    ? ((window as Window & { __HF_STUDIO_ENV__?: StudioFeatureFlagEnv }).__HF_STUDIO_ENV__ ?? {})
+    : {};
+const env = { ...(import.meta.env ?? {}), ...runtimeEnv } as StudioFeatureFlagEnv;
 
-export const STUDIO_PREVIEW_MANUAL_EDITING_ENABLED = resolveStudioBooleanEnvFlag(
+// Stage 7 SDK cutover — routes Studio edits through SDK dispatch instead of the
+// server patch/mutation routes. Default TRUE as of the flip release (spec:
+// 2026-09-17-studio-sdk-cutover-flip-design.md). Kill switch:
+// VITE_STUDIO_SDK_CUTOVER_ENABLED=false (works at runtime via __HF_STUDIO_ENV__).
+export const STUDIO_SDK_CUTOVER_ENABLED = resolveStudioBooleanEnvFlag(
   env,
-  [STUDIO_PREVIEW_MANUAL_DRAGGING_ENV, "VITE_STUDIO_PREVIEW_MANUAL_EDITING_ENABLED"],
+  ["VITE_STUDIO_SDK_CUTOVER_ENABLED"],
   true,
 );
 
-export const STUDIO_INSPECTOR_PANELS_ENABLED = resolveStudioBooleanEnvFlag(
+/**
+ * Per-family selection. Unset = every family (the master alone enables all).
+ * Set `VITE_STUDIO_SDK_CUTOVER_FAMILIES=dom,timing` to RESTRICT to a subset.
+ */
+export const STUDIO_SDK_CUTOVER_FAMILIES = resolveEnabledSdkFamilies(
   env,
-  [STUDIO_INSPECTOR_PANELS_ENV, "VITE_STUDIO_INSPECTOR_PANELS_ENABLED"],
+  STUDIO_SDK_CUTOVER_ENABLED,
+);
+
+// Resolver-parity tripwire (telemetry-only, decoupled from cutover).
+// Runs the SDK resolver alongside any edit and emits sdk_resolver_shadow on
+// divergence. Default true; disable via VITE_STUDIO_SDK_RESOLVER_SHADOW_ENABLED=false.
+// Soak gate: retire once zero element_not_found divergences over a clean window.
+export const STUDIO_SDK_RESOLVER_SHADOW_ENABLED = resolveStudioBooleanEnvFlag(
+  env,
+  ["VITE_STUDIO_SDK_RESOLVER_SHADOW_ENABLED"],
   true,
 );
 
-export const STUDIO_MOTION_PANEL_ENABLED = resolveStudioBooleanEnvFlag(
+// Studio inspector redesign ("Ledger, flat" — design_handoff_studio_inspector):
+// flat identity header/footer/groups. Default true as of v0.7.59+ bug-fix pass
+// (right-aligned values, Stroke select-only, promote-badge overlap, Layout/
+// Style section gating); disable via VITE_STUDIO_FLAT_INSPECTOR_ENABLED=false
+// to fall back to the legacy panel.
+export const STUDIO_FLAT_INSPECTOR_ENABLED = resolveStudioBooleanEnvFlag(
   env,
-  [STUDIO_MOTION_PANEL_ENV, "VITE_STUDIO_MOTION_PANEL_ENABLED"],
+  ["VITE_STUDIO_ENABLE_FLAT_INSPECTOR", "VITE_STUDIO_FLAT_INSPECTOR_ENABLED"],
+  true,
+);
+
+// A host whose mounted API authenticates with same-origin cookies sets this; studioApiFetch then sends them, and its
+// requests share the preview media's sockets again.
+export const STUDIO_API_SAME_ORIGIN_CREDENTIALS = resolveStudioBooleanEnvFlag(
+  env,
+  ["VITE_STUDIO_API_SAME_ORIGIN_CREDENTIALS"],
   false,
 );
 
-export const STUDIO_BLOCKS_PANEL_ENABLED = resolveStudioBooleanEnvFlag(
-  env,
-  ["VITE_STUDIO_ENABLE_BLOCKS_PANEL", "VITE_STUDIO_BLOCKS_PANEL_ENABLED"],
-  false,
-);
-
-export const STUDIO_PREVIEW_SELECTION_ENABLED = STUDIO_INSPECTOR_PANELS_ENABLED;
-
-export const STUDIO_MANUAL_EDITING_DISABLED_TITLE = "Manual editing is temporarily disabled";
+import { resolveEnabledSdkFamilies } from "../../utils/sdkCutoverPolicy";

@@ -1,9 +1,10 @@
-import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { usePanelLayout } from "../hooks/usePanelLayout";
+import { useContext, useMemo, type ReactNode } from "react";
+import { createStableContext } from "../utils/hmrStableContext";
 
 type PanelLayoutValue = ReturnType<typeof usePanelLayout>;
 
-const PanelLayoutContext = createContext<PanelLayoutValue | null>(null);
+const PanelLayoutContext = createStableContext<PanelLayoutValue | null>("PanelLayoutContext", null);
 
 export function usePanelLayoutContext(): PanelLayoutValue {
   const ctx = useContext(PanelLayoutContext);
@@ -12,57 +13,15 @@ export function usePanelLayoutContext(): PanelLayoutValue {
 }
 
 export function PanelLayoutProvider({
-  value: {
-    leftWidth,
-    setLeftWidth,
-    rightWidth,
-    leftCollapsed,
-    setLeftCollapsed,
-    rightCollapsed,
-    setRightCollapsed,
-    rightPanelTab,
-    setRightPanelTab,
-    toggleLeftSidebar,
-    handlePanelResizeStart,
-    handlePanelResizeMove,
-    handlePanelResizeEnd,
-  },
+  value: { rightCollapsed, setRightCollapsed, rightPanelTab, setRightPanelTab },
   children,
 }: {
   value: PanelLayoutValue;
   children: ReactNode;
 }) {
   const stable = useMemo<PanelLayoutValue>(
-    () => ({
-      leftWidth,
-      setLeftWidth,
-      rightWidth,
-      leftCollapsed,
-      setLeftCollapsed,
-      rightCollapsed,
-      setRightCollapsed,
-      rightPanelTab,
-      setRightPanelTab,
-      toggleLeftSidebar,
-      handlePanelResizeStart,
-      handlePanelResizeMove,
-      handlePanelResizeEnd,
-    }),
-    [
-      leftWidth,
-      setLeftWidth,
-      rightWidth,
-      leftCollapsed,
-      setLeftCollapsed,
-      rightCollapsed,
-      setRightCollapsed,
-      rightPanelTab,
-      setRightPanelTab,
-      toggleLeftSidebar,
-      handlePanelResizeStart,
-      handlePanelResizeMove,
-      handlePanelResizeEnd,
-    ],
+    () => ({ rightCollapsed, setRightCollapsed, rightPanelTab, setRightPanelTab }),
+    [rightCollapsed, setRightCollapsed, rightPanelTab, setRightPanelTab],
   );
   return <PanelLayoutContext value={stable}>{children}</PanelLayoutContext>;
 }

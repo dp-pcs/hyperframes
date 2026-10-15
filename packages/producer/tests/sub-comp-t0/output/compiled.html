@@ -54,7 +54,7 @@
   font-style: normal;
   font-weight: 900;
   font-display: block;
-}</style>
+}</style><style data-hyperframes-text-rendering="true">html,body,*{text-rendering:geometricPrecision}</style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=1920, height=1080">
     <script>/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */
@@ -81,14 +81,14 @@
         width: 1920px;
         height: 1080px;
         overflow: hidden;
-        background: #07110d;
+        background: #0f172a;
       }
       #root {
         position: relative;
         width: 1920px;
         height: 1080px;
         overflow: hidden;
-        background: #07110d;
+        background: #0f172a;
       }
       .scene {
         position: absolute;
@@ -100,49 +100,66 @@
         opacity: 1;
       }
 
-[data-composition-id="hook"] [data-hf-authored-id="hook"] {
+[data-composition-id="hook"][data-hf-authored-id="hook"] {
         position: relative;
         width: 1920px;
         height: 1080px;
         overflow: hidden;
-        background: #07110d;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 20px;
+        background: #ef4444;
       }
-      [data-composition-id="hook"] [data-hf-authored-id="hook"] .hook-title {
+      [data-composition-id="hook"][data-hf-authored-id="hook"] .hook-bg {
+        position: absolute;
+        inset: 0;
+        background: #ef4444;
+      }
+      [data-composition-id="hook"][data-hf-authored-id="hook"] .hook-title {
+        position: absolute;
+        top: 250px;
+        left: 0;
+        width: 1920px;
+        text-align: center;
         font-family: Impact, system-ui, sans-serif;
-        font-size: 200px;
+        font-size: 280px;
         font-weight: 900;
-        color: #ff3b30;
+        color: #ffffff;
         opacity: 0;
       }
-      [data-composition-id="hook"] [data-hf-authored-id="hook"] .hook-subtitle {
+      [data-composition-id="hook"][data-hf-authored-id="hook"] .hook-subtitle {
+        position: absolute;
+        top: 600px;
+        left: 0;
+        width: 1920px;
+        text-align: center;
         font-family: Arial, system-ui, sans-serif;
-        font-size: 60px;
-        color: #f7f3e8;
+        font-size: 80px;
+        color: #ffffff;
         opacity: 0;
       }
     
 
 
-      [data-composition-id="later"] [data-hf-authored-id="later"] {
+      [data-composition-id="later"][data-hf-authored-id="later"] {
         position: relative;
         width: 1920px;
         height: 1080px;
         overflow: hidden;
-        background: #0e2c1e;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        background: #3b82f6;
       }
-      [data-composition-id="later"] [data-hf-authored-id="later"] .later-heading {
+      [data-composition-id="later"][data-hf-authored-id="later"] .later-bg {
+        position: absolute;
+        inset: 0;
+        background: #3b82f6;
+      }
+      [data-composition-id="later"][data-hf-authored-id="later"] .later-heading {
+        position: absolute;
+        top: 380px;
+        left: 0;
+        width: 1920px;
+        text-align: center;
         font-family: Arial, system-ui, sans-serif;
-        font-size: 120px;
+        font-size: 160px;
         font-weight: 700;
-        color: #f7f3e8;
+        color: #ffffff;
         opacity: 0;
       }</style>
   </head>
@@ -150,6 +167,7 @@
     <div id="root" data-composition-id="main" data-start="0" data-duration="6" data-width="1920" data-height="1080">
       <!-- First sub-comp at near-zero start: the bug trigger -->
       <div style="width:1920px;height:1080px" data-composition-file="compositions/hook.html" data-hf-authored-id="hook" data-height="1080" data-width="1920" id="scene-hook" class="scene" data-layout-allow-overflow="" data-composition-id="hook" data-start="0.001" data-duration="2.0" data-track-index="0">
+    <div class="hook-bg"></div>
     <div class="hook-title">BREAKING</div>
     <div class="hook-subtitle">Transfer confirmed</div>
 
@@ -161,6 +179,7 @@
 
       <!-- Second sub-comp at a later start: works correctly -->
       <div style="width:1920px;height:1080px" data-composition-file="compositions/later.html" data-hf-authored-id="later" data-height="1080" data-width="1920" id="scene-later" class="scene" data-layout-allow-overflow="" data-composition-id="later" data-start="2.5" data-duration="3.5" data-track-index="1">
+    <div class="later-bg"></div>
     <div class="later-heading">Second Scene</div>
 
     
@@ -462,7 +481,6 @@
         var tl = gsap.timeline({ paused: true });
         var scope = "#hook";
 
-        // Title slams in at 0.1s
         tl.fromTo(
           scope + " .hook-title",
           { scale: 3.5, opacity: 0 },
@@ -470,7 +488,6 @@
           0.1,
         );
 
-        // Subtitle fades in at 0.5s
         tl.fromTo(
           scope + " .hook-subtitle",
           { y: 30, opacity: 0 },

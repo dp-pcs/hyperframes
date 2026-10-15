@@ -1,6 +1,9 @@
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { readProjectFile } from "@hyperframes/parsers/asset-resolution";
+import { resolveCompositionDuration } from "@hyperframes/parsers/composition-duration";
+import { readDataDurationSeconds } from "@hyperframes/parsers/media-duration";
 import { resolve, dirname } from "node:path";
 
 export const examples: Example[] = [
@@ -10,6 +13,7 @@ export const examples: Example[] = [
 import { c } from "../ui/colors.js";
 import { ensureDOMParser } from "../utils/dom.js";
 import { resolveProject } from "../utils/project.js";
+import { resolveReferencedStart } from "@hyperframes/engine";
 import { withMeta } from "../utils/updateCheck.js";
 
 interface CompositionInfo {
@@ -45,12 +49,14 @@ function estimateDurationFromScripts(root: ParentNode): number {
   return duration;
 }
 
-function parseCompositions(html: string, baseDir: string): CompositionInfo[] {
+export function parseCompositions(html: string, baseDir: string): CompositionInfo[] {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
   const compositionDivs = doc.querySelectorAll("[data-composition-id]");
   const compositions: CompositionInfo[] = [];
+  const startCache = new Map<Element, number>();
+  const visiting = new Set<Element>();
 
   compositionDivs.forEach((div) => {
     const id = div.getAttribute("data-composition-id") ?? "unknown";
@@ -61,21 +67,21 @@ function parseCompositions(html: string, baseDir: string): CompositionInfo[] {
     // If this references an external sub-composition, parse that file
     if (compositionSrc) {
       const subPath = resolve(baseDir, compositionSrc);
-      if (existsSync(subPath)) {
-        const subHtml = readFileSync(subPath, "utf-8");
-        const subInfo = parseSubComposition(subHtml, id, width, height);
+      const sub = readProjectFile(subPath);
+      if (sub.kind === "file") {
+        const subInfo = parseSubComposition(sub.text, id, width, height);
         compositions.push({ ...subInfo, source: compositionSrc });
         return;
       }
     }
 
     const timedChildren = div.querySelectorAll("[data-start]");
-    let maxEnd = 0;
+    const clipEndsSeconds: number[] = [];
     let elementCount = 0;
 
     timedChildren.forEach((el) => {
       elementCount++;
-      const start = parseFloat(el.getAttribute("data-start") ?? "0");
+      const start = resolveReferencedStart(doc, el, startCache, visiting);
       const endAttr = el.getAttribute("data-end");
       const durationAttr = el.getAttribute("data-duration");
 
@@ -88,14 +94,18 @@ function parseCompositions(html: string, baseDir: string): CompositionInfo[] {
         end = start + 5;
       }
 
-      if (end > maxEnd) {
-        maxEnd = end;
-      }
+      clipEndsSeconds.push(end);
     });
+
+    const duration =
+      resolveCompositionDuration({
+        authoredDurationSeconds: readDataDurationSeconds((name) => div.getAttribute(name)),
+        clipEndsSeconds,
+      }).seconds ?? 0;
 
     compositions.push({
       id,
-      duration: maxEnd,
+      duration,
       width,
       height,
       elementCount,
@@ -131,19 +141,14 @@ export function parseSubComposition(
     elementCount = countRenderableDescendants(compDiv);
   }
 
-  // Parse duration from the composition's own data-duration attribute
-  let duration = 0;
-  const durationAttr = compDiv?.getAttribute("data-duration");
-  if (durationAttr && !durationAttr.startsWith("__")) {
-    duration = parseFloat(durationAttr) || 0;
-  }
-
-  // Also check timed children for max end time
+  const clipEndsSeconds: number[] = [];
   if (compDiv) {
     const timedEls = compDiv.querySelectorAll("[data-start]");
+    const startCache = new Map<Element, number>();
+    const visiting = new Set<Element>();
     timedEls.forEach((el) => {
       elementCount = Math.max(elementCount, timedEls.length);
-      const start = parseFloat(el.getAttribute("data-start") ?? "0");
+      const start = resolveReferencedStart(doc, el, startCache, visiting);
       const endAttr = el.getAttribute("data-end");
       const durAttr = el.getAttribute("data-duration");
 
@@ -155,11 +160,14 @@ export function parseSubComposition(
       } else {
         end = start + 5;
       }
-      if (end > duration) {
-        duration = end;
-      }
+      clipEndsSeconds.push(end);
     });
   }
+  let duration =
+    resolveCompositionDuration({
+      authoredDurationSeconds: readDataDurationSeconds((name) => compDiv?.getAttribute(name)),
+      clipEndsSeconds,
+    }).seconds ?? 0;
   if (duration <= 0) {
     duration = estimateDurationFromScripts(searchRoot);
   }
@@ -180,13 +188,15 @@ export default defineCommand({
     ensureDOMParser();
     const compositions = parseCompositions(html, dirname(project.indexPath));
 
-    if (compositions.length === 0) {
-      console.log(`${c.success("◇")}  ${c.accent(project.name)} — no compositions found`);
+    // --json must always emit a machine-readable envelope, including the empty
+    // case — check it before the human "no compositions" message on stdout.
+    if (args.json) {
+      console.log(JSON.stringify(withMeta({ compositions }), null, 2));
       return;
     }
 
-    if (args.json) {
-      console.log(JSON.stringify(withMeta({ compositions }), null, 2));
+    if (compositions.length === 0) {
+      console.log(`${c.success("◇")}  ${c.accent(project.name)} — no compositions found`);
       return;
     }
 

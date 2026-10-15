@@ -9,10 +9,29 @@
     {
       "name": "hyperframes",
       "source": "./",
-      "description": "HyperFrames by HeyGen. Write HTML, render video. Compositions, GSAP and runtime adapter animations, captions, voiceovers, audio-reactive visuals, and website-to-video capture for HyperFrames.",
-      "version": "0.1.0",
+      "description": "Recommended: all published HyperFrames skills in one versioned bundle. Create and render videos from HTML; load workflows on demand without installing newer standalone skills.",
       "homepage": "https://hyperframes.heygen.com",
       "license": "Apache-2.0"
+    },
+    {
+      "name": "core-skills",
+      "source": "./",
+      "description": "Legacy core-only installation. For release-managed bundled workflows, install hyperframes@hyperframes and then uninstall core-skills@hyperframes.",
+      "homepage": "https://hyperframes.heygen.com",
+      "license": "Apache-2.0",
+      "skills": [
+        "./skills/hyperframes",
+        "./skills/hyperframes-animation",
+        "./skills/hyperframes-audio",
+        "./skills/hyperframes-cli",
+        "./skills/hyperframes-core",
+        "./skills/hyperframes-creative",
+        "./skills/hyperframes-keyframes",
+        "./skills/hyperframes-registry",
+        "./skills/hyperframes-studio",
+        "./skills/media-use"
+      ]
     }
-  ]
+  ],
+  "description": "HyperFrames video creation skills, versioned and updated as one plugin."
 }

@@ -1,7 +1,17 @@
-import { memo, useState, useRef, useEffect } from "react";
+import { memo, useState, useRef, useEffect, useLayoutEffect, useId } from "react";
+import { createPortal } from "react-dom";
+import { CANVAS_DIMENSIONS } from "@hyperframes/parsers";
 import { RenderQueueItem } from "./RenderQueueItem";
+import { FfmpegRequiredNotice } from "./FfmpegRequiredNotice";
+import type { FfmpegStatus } from "./useFfmpegStatus";
+import { Button } from "../ui/Button";
+import { IconButton } from "../ui/IconButton";
+import { Select, type SelectOption } from "../ui/Select";
+import { Tooltip } from "../ui/Tooltip";
+import { resolveFloatingPanelPosition, type FloatingPosition } from "../editor/floatingPanel";
 import type { RenderJob, ResolutionPreset } from "./useRenderQueue";
 import { getPersistedRenderSettings, persistRenderSettings } from "./renderSettings";
+import { GpuEncodingToggle } from "./GpuEncodingToggle";
 import { trackStudioEvent } from "../../utils/studioTelemetry";
 
 export interface CompositionDimensions {
@@ -9,26 +19,42 @@ export interface CompositionDimensions {
   height: number;
 }
 
-type StartRenderHandler = (
+export type StartRenderHandler = (
   format: "mp4" | "webm" | "mov",
   quality: "draft" | "standard" | "high",
   resolution: ResolutionPreset | "auto",
   fps: 24 | 30 | 60,
+  gpu?: boolean,
 ) => void | Promise<void>;
 
-interface RenderQueueProps {
+export interface RenderQueueProps {
   jobs: RenderJob[];
   projectId: string;
   onDelete: (jobId: string) => void;
+  onCancel?: (jobId: string) => void;
   onClearCompleted: () => void;
   onStartRender: StartRenderHandler;
   isRendering: boolean;
+  /** History fetch failure (null when the last load succeeded). */
+  loadError?: string | null;
+  /** Retry a failed history load. */
+  onRetryLoad?: () => void;
+  /** Failure of a delete/cancel action, shown inline until dismissed. */
+  actionError?: string | null;
+  onDismissActionError?: () => void;
   /**
    * Authored dimensions of the active composition. Used to pick the
    * matching preset (landscape / portrait / square) when the user selects
    * a 1080p or 4K scale. `null` falls back to landscape (legacy default).
    */
   compositionDimensions?: CompositionDimensions | null;
+  /**
+   * Encoder availability, owned by useRenderQueue so the panel's Export button
+   * and the header's agree. `null` means "no answer", not "missing".
+   */
+  ffmpeg: FfmpegStatus | null;
+  ffmpegChecking: boolean;
+  onRecheckFfmpeg: () => void;
 }
 
 // Orientation is derived from the composition's authored aspect ratio,
@@ -42,17 +68,6 @@ const SCALE_LABEL: Record<RenderScale, string> = {
   auto: "Auto",
   "1080p": "1080p",
   "4k": "4K",
-};
-
-// Mirrors `CANVAS_DIMENSIONS` in @hyperframes/core. Studio can't import from
-// the core barrel (it transitively pulls in node:fs) and the values are stable.
-const CANVAS_DIMENSIONS: Record<ResolutionPreset, CompositionDimensions> = {
-  landscape: { width: 1920, height: 1080 },
-  portrait: { width: 1080, height: 1920 },
-  "landscape-4k": { width: 3840, height: 2160 },
-  "portrait-4k": { width: 2160, height: 3840 },
-  square: { width: 1080, height: 1080 },
-  "square-4k": { width: 2160, height: 2160 },
 };
 
 type CompAspect = "landscape" | "portrait" | "square";
@@ -110,16 +125,22 @@ function scaleOptionLabel(
   dims: CompositionDimensions | null | undefined,
 ): string {
   const resolved = resolvedDimensions(scale, dims);
-  return resolved
+  const base = resolved
     ? `${SCALE_LABEL[scale]} · ${resolved.width}×${resolved.height}`
     : SCALE_LABEL[scale];
+  // Explain *why* an option is disabled instead of greying it silently:
+  // the preset must be an exact integer upscale of the authored size.
+  if (dims && !scaleApplies(scale, dims)) {
+    return `${base} (not an integer scale of ${dims.width}×${dims.height})`;
+  }
+  return base;
 }
 
 const FORMAT_INFO: Record<"mp4" | "webm" | "mov", { label: string; desc: string }> = {
   mp4: { label: "MP4", desc: "Best for general use. Smallest file, universal playback." },
   mov: {
     label: "MOV (ProRes 4444)",
-    desc: "Transparent video. Works in CapCut, Final Cut Pro, Premiere, DaVinci Resolve, After Effects. Large files.",
+    desc: "Transparent video. Works in Final Cut Pro, DaVinci Resolve, and most video editors. Large files.",
   },
   webm: {
     label: "WebM (VP9)",
@@ -127,9 +148,22 @@ const FORMAT_INFO: Record<"mp4" | "webm" | "mov", { label: string; desc: string 
   },
 };
 
+// Estimated, like COLOR_PICKER_SIZE in propertyPanelColor: only the flip
+// decision uses the height, and the clamp keeps the panel on screen either way.
+const FORMAT_PANEL_SIZE = { width: 208, height: 150 };
+
+// Rich format guidance in a keyboard-reachable disclosure: the trigger is a
+// real button (focusable, labelled), the panel is tied to it via
+// aria-describedby, and Escape dismisses (WCAG 1.4.13). Content is too rich
+// for the one-line ui/Tooltip primitive, so this stays a local popover.
+// It renders in a portal because the right panel is overflow-hidden: an
+// in-flow absolute panel gets clipped at the panel edge.
 function FormatInfoTooltip({ format }: { format: "mp4" | "webm" | "mov" }) {
   const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<FloatingPosition | null>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const panelId = useId();
 
   const show = () => {
     clearTimeout(timeoutRef.current);
@@ -141,151 +175,255 @@ function FormatInfoTooltip({ format }: { format: "mp4" | "webm" | "mov" }) {
 
   useEffect(() => () => clearTimeout(timeoutRef.current), []);
 
+  // Positioned once on open, so it does not follow panel scroll. The popover
+  // is hover-lived; add a scroll listener only if that ever shows up.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = triggerRef.current;
+    if (!el) return;
+    setPosition(
+      resolveFloatingPanelPosition(
+        el.getBoundingClientRect(),
+        { width: window.innerWidth, height: window.innerHeight },
+        FORMAT_PANEL_SIZE,
+        { offset: 6 },
+      ),
+    );
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
   const info = FORMAT_INFO[format];
 
   return (
-    <div className="relative" onPointerEnter={show} onPointerLeave={hide}>
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className="text-neutral-600 hover:text-neutral-400 transition-colors cursor-help"
+    <div ref={triggerRef} className="relative" onPointerEnter={show} onPointerLeave={hide}>
+      <button
+        type="button"
+        aria-label="About video formats"
+        aria-expanded={open}
+        aria-describedby={open ? panelId : undefined}
+        onFocus={show}
+        onBlur={hide}
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex items-center justify-center p-0.5 -m-0.5 rounded-sm text-text-5 hover:text-text-3 transition-colors cursor-help outline-hidden focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-accent"
       >
-        <circle cx="12" cy="12" r="10" />
-        <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
-        <line x1="12" y1="17" x2="12.01" y2="17" />
-      </svg>
-      {open && (
-        <div className="absolute top-full right-0 mt-1.5 w-52 p-2 rounded bg-neutral-900 border border-neutral-700 shadow-lg z-50">
-          <p className="text-[10px] font-semibold text-neutral-200 mb-0.5">{info.label}</p>
-          <p className="text-[9px] text-neutral-400 leading-tight">{info.desc}</p>
-          <div className="mt-1.5 pt-1.5 border-t border-neutral-800">
-            {(["mp4", "mov", "webm"] as const)
-              .filter((f) => f !== format)
-              .map((f) => (
-                <p key={f} className="text-[9px] text-neutral-500 leading-relaxed">
-                  <span className="text-neutral-400 font-medium">{FORMAT_INFO[f].label}</span>
-                  {" — "}
-                  {FORMAT_INFO[f].desc}
-                </p>
-              ))}
-          </div>
-        </div>
-      )}
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+      </button>
+      {open &&
+        createPortal(
+          <div
+            id={panelId}
+            role="tooltip"
+            onPointerEnter={show}
+            onPointerLeave={hide}
+            className="fixed w-52 p-2 rounded-sm bg-input border border-border-input shadow-menu z-200"
+            style={{ left: position?.left ?? -9999, top: position?.top ?? -9999 }}
+          >
+            <p className="text-step-10 font-semibold text-text-1 mb-0.5">{info.label}</p>
+            <p className="text-step-9 text-text-3 leading-tight">{info.desc}</p>
+            <div className="mt-1.5 pt-1.5 border-t border-border">
+              {(["mp4", "mov", "webm"] as const)
+                .filter((f) => f !== format)
+                .map((f) => (
+                  <p key={f} className="text-step-9 text-text-4 leading-relaxed">
+                    <span className="text-text-3 font-medium">{FORMAT_INFO[f].label}</span>
+                    {": "}
+                    {FORMAT_INFO[f].desc}
+                  </p>
+                ))}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
 
-const QUALITY_OPTIONS: {
-  value: "draft" | "standard" | "high";
-  label: string;
-  title: string;
-}[] = [
-  { value: "draft", label: "Draft", title: "Fast render, smaller file" },
-  { value: "standard", label: "Standard", title: "Good quality, balanced file size" },
-  { value: "high", label: "High Quality", title: "Best quality, larger file" },
+const FORMAT_OPTIONS: SelectOption[] = [
+  { value: "mp4", label: "MP4" },
+  { value: "mov", label: "MOV (ProRes)" },
+  { value: "webm", label: "WebM" },
 ];
+
+const QUALITY_OPTIONS: SelectOption[] = [
+  { value: "draft", label: "Draft" },
+  { value: "standard", label: "Standard" },
+  { value: "high", label: "High Quality" },
+];
+
+const FPS_OPTIONS: SelectOption[] = [
+  { value: "24", label: "24 fps" },
+  { value: "30", label: "30 fps" },
+  { value: "60", label: "60 fps" },
+];
+
+function formatEta(ms: number): string {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
 
 function FormatExportButton({
   onStartRender,
   isRendering,
   compositionDimensions,
+  lastRenderDurationMs,
+  ffmpeg,
+  ffmpegChecking,
+  onRecheckFfmpeg,
 }: {
   onStartRender: StartRenderHandler;
   isRendering: boolean;
   compositionDimensions?: CompositionDimensions | null;
+  lastRenderDurationMs?: number;
+  ffmpeg: FfmpegStatus | null;
+  ffmpegChecking: boolean;
+  onRecheckFfmpeg: () => void;
 }) {
   const persisted = getPersistedRenderSettings();
   const [format, setFormat] = useState<"mp4" | "webm" | "mov">(persisted.format);
   const [quality, setQuality] = useState<"draft" | "standard" | "high">(persisted.quality);
-  const [resolution, setResolution] = useState<ResolutionPreset | "auto">("auto");
+  const [resolution, setResolution] = useState<RenderScale>("auto");
   const [fps, setFps] = useState<24 | 30 | 60>(persisted.fps);
+  const [gpu, setGpu] = useState(persisted.gpu);
+
+  // Only a definite "not installed" blocks Export. A null status means the
+  // probe gave no answer, and refusing to export on no answer would break
+  // setups that are perfectly fine. Holding the narrowed value rather than a
+  // boolean keeps the notice from re-testing what this line already decided.
+  const missingFfmpeg = ffmpeg && !ffmpeg.ok ? ffmpeg : null;
 
   // MOV (ProRes) is a fixed-quality codec — quality selector has no effect.
   const showQuality = format !== "mov";
 
   return (
-    <div className="flex items-center gap-1 flex-wrap justify-end">
-      <FormatInfoTooltip format={format} />
-      {/* Resolution must remain the leftmost <select> in this row — it
-          carries `rounded-l` for the joined-button look. If you ever hide it
-          (feature-flag, etc.), move `rounded-l` to whichever element ends up
-          leftmost. */}
-      <select
-        value={resolution}
-        onChange={(e) => setResolution(e.target.value as ResolutionPreset | "auto")}
-        disabled={isRendering}
-        className="h-5 px-1 text-[10px] rounded-l bg-neutral-800 border border-neutral-700 text-neutral-300 outline-none disabled:opacity-50"
-      >
-        {SCALE_OPTION_ORDER.map((value) => (
-          <option key={value} value={value} disabled={!scaleApplies(value, compositionDimensions)}>
-            {scaleOptionLabel(value, compositionDimensions)}
-          </option>
-        ))}
-      </select>
-      {showQuality && (
-        <select
-          value={quality}
-          onChange={(e) => {
-            const v = e.target.value as "draft" | "standard" | "high";
-            setQuality(v);
-            persistRenderSettings(format, v, fps);
-          }}
-          disabled={isRendering}
-          title={QUALITY_OPTIONS.find((q) => q.value === quality)?.title}
-          className="h-5 px-1 text-[10px] bg-neutral-800 border border-neutral-700 text-neutral-300 outline-none disabled:opacity-50"
-        >
-          {QUALITY_OPTIONS.map((q) => (
-            <option key={q.value} value={q.value} title={q.title}>
-              {q.label}
-            </option>
-          ))}
-        </select>
+    <div className="flex flex-col gap-3">
+      {missingFfmpeg && (
+        <FfmpegRequiredNotice
+          status={missingFfmpeg}
+          checking={ffmpegChecking}
+          onRecheck={onRecheckFfmpeg}
+        />
       )}
-      <select
-        value={fps}
-        onChange={(e) => {
-          const v = Number(e.target.value) as 24 | 30 | 60;
-          setFps(v);
-          persistRenderSettings(format, quality, v);
-        }}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-1">
+            <span className="text-step-10 text-text-4">Format</span>
+            <FormatInfoTooltip format={format} />
+          </div>
+          <Select
+            label="Format"
+            value={format}
+            options={FORMAT_OPTIONS}
+            disabled={isRendering}
+            onCommit={(next) => {
+              const v = next as "mp4" | "webm" | "mov";
+              setFormat(v);
+              persistRenderSettings(v, quality, fps);
+            }}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-step-10 text-text-4">Resolution</span>
+          <Select
+            label="Resolution"
+            value={resolution}
+            options={SCALE_OPTION_ORDER.map((value) => ({
+              value,
+              label: scaleOptionLabel(value, compositionDimensions),
+              disabled: !scaleApplies(value, compositionDimensions),
+            }))}
+            disabled={isRendering}
+            onCommit={(next) => setResolution(next as RenderScale)}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-step-10 text-text-4">Frame rate</span>
+          <Select
+            label="Frame rate"
+            value={String(fps)}
+            options={FPS_OPTIONS}
+            disabled={isRendering}
+            onCommit={(next) => {
+              const v = Number(next) as 24 | 30 | 60;
+              setFps(v);
+              persistRenderSettings(format, quality, v);
+            }}
+          />
+        </div>
+        {showQuality && (
+          <div className="flex flex-col gap-1">
+            <span className="text-step-10 text-text-4">Quality</span>
+            <Select
+              label="Quality"
+              value={quality}
+              options={QUALITY_OPTIONS}
+              disabled={isRendering}
+              onCommit={(next) => {
+                const v = next as "draft" | "standard" | "high";
+                setQuality(v);
+                persistRenderSettings(format, v, fps);
+              }}
+            />
+          </div>
+        )}
+      </div>
+      <GpuEncodingToggle
+        format={format}
+        checked={gpu}
         disabled={isRendering}
-        title="Frames per second"
-        className="h-5 px-1 text-[10px] bg-neutral-800 border border-neutral-700 text-neutral-300 outline-none disabled:opacity-50"
-      >
-        <option value={24}>24fps</option>
-        <option value={30}>30fps</option>
-        <option value={60}>60fps</option>
-      </select>
-      <select
-        value={format}
-        onChange={(e) => {
-          const v = e.target.value as "mp4" | "webm" | "mov";
-          setFormat(v);
-          persistRenderSettings(v, quality, fps);
+        onToggle={() => {
+          setGpu(!gpu);
+          persistRenderSettings(format, quality, fps, !gpu);
         }}
-        disabled={isRendering}
-        className="h-5 px-1 text-[10px] bg-neutral-800 border border-neutral-700 text-neutral-300 outline-none disabled:opacity-50"
-      >
-        <option value="mp4">MP4</option>
-        <option value="mov">MOV</option>
-        <option value="webm">WebM</option>
-      </select>
-      <button
+      />
+      <Button
+        variant="primary"
+        size="md"
+        data-testid="renders-export"
+        loading={isRendering}
+        disabled={missingFfmpeg !== null}
+        title={missingFfmpeg ? "Install FFmpeg to export. See the note above." : undefined}
         onClick={() => {
-          trackStudioEvent("render_start", { format, quality, resolution, fps });
-          void onStartRender(format, quality, resolution, fps);
+          // loading already disables the button; this guard also stops a
+          // double-click in the same frame from enqueueing two renders.
+          if (isRendering || missingFfmpeg) return;
+          const outputResolution = resolveResolution(resolution, compositionDimensions);
+          trackStudioEvent("render_start", { format, quality, resolution: outputResolution, fps });
+          void onStartRender(format, quality, outputResolution, fps, gpu);
         }}
-        disabled={isRendering}
-        className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-r bg-studio-accent text-[#09090B] hover:brightness-110 transition-colors disabled:opacity-50"
+        // Width only. A type size or a weight here would win the merge against
+        // the size recipe and leave this Export a step away from the header's
+        // (AE3), which is exactly what it used to do.
+        className="w-full"
       >
-        {isRendering ? "Rendering..." : "Export"}
-      </button>
+        {isRendering ? "Rendering…" : "Export"}
+      </Button>
+      {lastRenderDurationMs !== undefined && !isRendering && (
+        <p className="text-step-9 text-text-5 text-center -mt-1.5">
+          Last render took {formatEta(lastRenderDurationMs)}
+        </p>
+      )}
     </div>
   );
 }
@@ -294,10 +432,18 @@ export const RenderQueue = memo(function RenderQueue({
   jobs,
   projectId,
   onDelete,
+  onCancel,
   onClearCompleted,
   onStartRender,
   isRendering,
+  loadError,
+  onRetryLoad,
+  actionError,
+  onDismissActionError,
   compositionDimensions,
+  ffmpeg,
+  ffmpegChecking,
+  onRecheckFfmpeg,
 }: RenderQueueProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -310,31 +456,67 @@ export const RenderQueue = memo(function RenderQueue({
   }, [jobs.length]);
 
   const completedCount = jobs.filter((j) => j.status !== "rendering").length;
+  const lastRenderDurationMs = [...jobs]
+    .reverse()
+    .find((j) => j.status === "complete" && j.durationMs !== undefined)?.durationMs;
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header — no title, already shown in header button */}
-      <div className="flex items-center justify-end flex-wrap gap-y-1.5 px-3 py-2 border-b border-neutral-800/50 flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          {completedCount > 0 && (
-            <button
-              onClick={onClearCompleted}
-              className="text-[10px] text-neutral-600 hover:text-neutral-400 transition-colors"
-            >
-              Clear
-            </button>
-          )}
-          <FormatExportButton
-            onStartRender={onStartRender}
-            isRendering={isRendering}
-            compositionDimensions={compositionDimensions}
-          />
-        </div>
+      <div className="px-3 py-3 border-b border-border shrink-0">
+        <FormatExportButton
+          onStartRender={onStartRender}
+          isRendering={isRendering}
+          compositionDimensions={compositionDimensions}
+          lastRenderDurationMs={lastRenderDurationMs}
+          ffmpeg={ffmpeg}
+          ffmpegChecking={ffmpegChecking}
+          onRecheckFfmpeg={onRecheckFfmpeg}
+        />
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          className="flex items-start justify-between gap-2 px-3 py-2 border-b border-border bg-danger/10"
+        >
+          <span className="text-step-10 text-danger-ink">{actionError}</span>
+          {onDismissActionError && (
+            <IconButton
+              size="sm"
+              onClick={onDismissActionError}
+              aria-label="Dismiss error"
+              className="shrink-0"
+              icon={
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              }
+            />
+          )}
+        </div>
+      )}
 
       {/* Job list */}
       <div ref={listRef} className="flex-1 overflow-y-auto">
-        {jobs.length === 0 ? (
+        {loadError && jobs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full px-4 gap-2" role="alert">
+            <p className="text-step-10 text-danger-ink text-center">{loadError}</p>
+            {onRetryLoad && (
+              <Button size="sm" variant="secondary" onClick={onRetryLoad}>
+                Retry
+              </Button>
+            )}
+          </div>
+        ) : jobs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full px-4 gap-2">
             <svg
               width="20"
@@ -343,7 +525,7 @@ export const RenderQueue = memo(function RenderQueue({
               fill="none"
               stroke="currentColor"
               strokeWidth="1.5"
-              className="text-neutral-700"
+              className="text-text-5"
             >
               <rect
                 x="2"
@@ -361,17 +543,34 @@ export const RenderQueue = memo(function RenderQueue({
                 strokeLinejoin="round"
               />
             </svg>
-            <p className="text-[10px] text-neutral-600 text-center">No renders yet</p>
+            <p className="text-step-10 text-text-5 text-center">No renders yet</p>
           </div>
         ) : (
-          jobs.map((job) => (
-            <RenderQueueItem
-              key={job.id}
-              job={job}
-              projectId={projectId}
-              onDelete={() => onDelete(job.id)}
-            />
-          ))
+          <div>
+            {completedCount > 0 && (
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border">
+                <span className="text-step-10 text-text-4">
+                  {jobs.length} render{jobs.length === 1 ? "" : "s"}
+                </span>
+                {/* "Hide", not "Clear": files stay on disk (delete is per-row
+                    and confirmed); hidden rows don't resurrect on reload. */}
+                <Tooltip label="Hide finished renders from this list (files stay on disk)">
+                  <Button size="sm" variant="ghost" onClick={onClearCompleted}>
+                    Hide finished
+                  </Button>
+                </Tooltip>
+              </div>
+            )}
+            {jobs.map((job) => (
+              <RenderQueueItem
+                key={job.id}
+                job={job}
+                projectId={projectId}
+                onDelete={() => onDelete(job.id)}
+                onCancel={() => onCancel?.(job.id)}
+              />
+            ))}
+          </div>
         )}
       </div>
     </div>

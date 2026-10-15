@@ -1,5 +1,17 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { buildDoctorReport, redactHome, type CheckOutcome } from "./doctor.js";
+import { optionalPackageDir } from "../utils/optionalPackages.js";
+import {
+  buildDoctorReport,
+  checkFramesCache,
+  checkOptionalPackage,
+  redactHome,
+  parseToolVersion,
+  type CheckOutcome,
+} from "./doctor.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -59,6 +71,62 @@ describe("redactHome", () => {
   it("leaves strings without HOME unchanged", () => {
     process.env["HOME"] = "/Users/alice";
     expect(redactHome("brew install ffmpeg")).toBe("brew install ffmpeg");
+  });
+});
+
+describe("parseToolVersion", () => {
+  it("extracts ffmpeg version from full copyright line", () => {
+    expect(
+      parseToolVersion("ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers"),
+    ).toBe("ffmpeg 8.1.1");
+  });
+
+  it("extracts ffprobe version from full copyright line", () => {
+    expect(
+      parseToolVersion("ffprobe version 8.1.1 Copyright (c) 2007-2026 the FFmpeg developers"),
+    ).toBe("ffprobe 8.1.1");
+  });
+
+  it("handles Windows gyan.dev builds with suffix", () => {
+    expect(
+      parseToolVersion(
+        "ffmpeg version 7.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024",
+      ),
+    ).toBe("ffmpeg 7.1.1-essentials_build-www.gyan.dev");
+  });
+
+  it("returns trimmed input when pattern does not match", () => {
+    expect(parseToolVersion("  some unrecognized output  ")).toBe("some unrecognized output");
+  });
+});
+
+describe("checkArchiveExtractor", () => {
+  it("reports a missing unzip dependency on non-Windows hosts", async () => {
+    const doctor = await import("./doctor.js");
+    expect(doctor).toHaveProperty("checkArchiveExtractor");
+    const result = doctor.checkArchiveExtractor("linux", () => false);
+
+    expect(result).toEqual({
+      ok: false,
+      detail: "Not found",
+      hint: "Install unzip so HyperFrames can extract its managed Chrome download.",
+    });
+  });
+
+  it("accepts unzip on non-Windows hosts", async () => {
+    const { checkArchiveExtractor } = await import("./doctor.js");
+    expect(checkArchiveExtractor("darwin", (command) => command === "unzip")).toEqual({
+      ok: true,
+      detail: "unzip",
+    });
+  });
+
+  it("uses the built-in Windows extraction path", async () => {
+    const { checkArchiveExtractor } = await import("./doctor.js");
+    expect(checkArchiveExtractor("win32", () => false)).toEqual({
+      ok: true,
+      detail: "Built into Windows",
+    });
   });
 });
 
@@ -137,5 +205,131 @@ describe("buildDoctorReport", () => {
       ];
       expect(buildDoctorReport(outcomes).checks[0]?.detail).toBe("/Users/alice/Chrome");
     });
+  });
+});
+
+describe("checkFramesCache", () => {
+  it("reports disabled state with the raw env value when the user opts out", () => {
+    const result = checkFramesCache(
+      { HYPERFRAMES_EXTRACT_CACHE_DIR: "off" },
+      () => 100_000,
+      () => true,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("Disabled (off)");
+    expect(result.detail).toContain("per-render workDir");
+  });
+
+  it("reports the effective directory + free space + default source when env is unset", () => {
+    const result = checkFramesCache(
+      {},
+      () => 50_000, // ~48.8 GB
+      () => true,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("48.8 GB free");
+    expect(result.detail).toContain("default");
+  });
+
+  it("reports a positive env override with source: HYPERFRAMES_EXTRACT_CACHE_DIR", () => {
+    const result = checkFramesCache(
+      { HYPERFRAMES_EXTRACT_CACHE_DIR: "/mnt/scratch/hf" },
+      () => 10_000,
+      () => true,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("/mnt/scratch/hf");
+    expect(result.detail).toContain("HYPERFRAMES_EXTRACT_CACHE_DIR");
+  });
+
+  it("fails with a relocation hint when free space at the cache location is <2 GB", () => {
+    const result = checkFramesCache(
+      { HYPERFRAMES_EXTRACT_CACHE_DIR: "/tmp/hf" },
+      () => 512, // 0.5 GB
+      () => true,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.hint).toContain("--frames-cache-dir");
+    expect(result.hint).toContain("HYPERFRAMES_EXTRACT_CACHE_DIR");
+  });
+
+  it("falls back to the first existing ancestor when the cache dir does not exist yet", () => {
+    const seen: string[] = [];
+    const result = checkFramesCache(
+      { HYPERFRAMES_EXTRACT_CACHE_DIR: "/mnt/scratch/newly/created/subdir" },
+      (path) => {
+        seen.push(path);
+        return 20_000;
+      },
+      (path) => path === "/mnt/scratch",
+    );
+    expect(result.ok).toBe(true);
+    // statfs was called against the walked-up ancestor, not the raw dir.
+    expect(seen).toContain("/mnt/scratch");
+  });
+
+  it("handles a null free-space reading without failing the check", () => {
+    const result = checkFramesCache(
+      { HYPERFRAMES_EXTRACT_CACHE_DIR: "/mnt/scratch" },
+      () => null,
+      () => true,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("free space unknown");
+  });
+});
+
+describe("checkOptionalPackage", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports a package that has not been installed yet as ok, installing on first use", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "hf-doctor-optional-"));
+    dirs.push(cacheDir);
+    const cliUrl = pathToFileURL(join(cacheDir, "cli.js")).href;
+    expect(checkOptionalPackage("onnxruntime-node", cacheDir, cliUrl)).toEqual({
+      ok: true,
+      detail: "Not installed (installs on first use)",
+    });
+  });
+
+  it("reports the installed version read from the cached package", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "hf-doctor-optional-"));
+    dirs.push(cacheDir);
+    const pkgDir = join(
+      optionalPackageDir("@google/genai", cacheDir),
+      "node_modules/@google/genai",
+    );
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "1.52.0" }));
+    const cliUrl = pathToFileURL(join(cacheDir, "cli.js")).href;
+    expect(checkOptionalPackage("@google/genai", cacheDir, cliUrl)).toEqual({
+      ok: true,
+      detail: "1.52.0 installed",
+    });
+  });
+});
+
+describe("checkSettingsLock", () => {
+  it("names a lock left by a process that stopped, and leaves it for the person to remove", async () => {
+    const { checkSettingsLock } = await import("./doctor.js");
+    const dir = mkdtempSync(join(tmpdir(), "hf-doctor-lock-"));
+    try {
+      const lock = join(dir, "config.json.lock");
+      expect(checkSettingsLock(lock)).toEqual({ ok: true, detail: "Not locked" });
+
+      writeFileSync(lock, "stopped");
+      const past = new Date(Date.now() - 60_000);
+      utimesSync(lock, past, past);
+      const result = checkSettingsLock(lock);
+
+      expect(result.ok).toBe(false);
+      expect(result.hint).toContain(`delete ${lock}`);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,5 +1,6 @@
 <template id="hook-template">
   <div id="hook" data-composition-id="hook" data-width="1920" data-height="1080">
+    <div class="hook-bg"></div>
     <div class="hook-title">BREAKING</div>
     <div class="hook-subtitle">Transfer confirmed</div>
 
@@ -9,24 +10,34 @@
         width: 1920px;
         height: 1080px;
         overflow: hidden;
-        background: #07110d;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 20px;
+        background: #ef4444;
+      }
+      #hook .hook-bg {
+        position: absolute;
+        inset: 0;
+        background: #ef4444;
       }
       #hook .hook-title {
+        position: absolute;
+        top: 250px;
+        left: 0;
+        width: 1920px;
+        text-align: center;
         font-family: Impact, system-ui, sans-serif;
-        font-size: 200px;
+        font-size: 280px;
         font-weight: 900;
-        color: #ff3b30;
+        color: #ffffff;
         opacity: 0;
       }
       #hook .hook-subtitle {
+        position: absolute;
+        top: 600px;
+        left: 0;
+        width: 1920px;
+        text-align: center;
         font-family: Arial, system-ui, sans-serif;
-        font-size: 60px;
-        color: #f7f3e8;
+        font-size: 80px;
+        color: #ffffff;
         opacity: 0;
       }
     </style>
@@ -38,7 +49,6 @@
         var tl = gsap.timeline({ paused: true });
         var scope = "#hook";
 
-        // Title slams in at 0.1s
         tl.fromTo(
           scope + " .hook-title",
           { scale: 3.5, opacity: 0 },
@@ -46,7 +56,6 @@
           0.1,
         );
 
-        // Subtitle fades in at 0.5s
         tl.fromTo(
           scope + " .hook-subtitle",
           { y: 30, opacity: 0 },

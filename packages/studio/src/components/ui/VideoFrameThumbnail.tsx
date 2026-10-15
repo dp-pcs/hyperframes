@@ -5,10 +5,19 @@ import { useState, useEffect } from "react";
  * video + canvas. Seeks to ~10% of duration to avoid black opening frames.
  * Used by AssetThumbnail (assets tab) and RenderQueueItem (renders tab).
  */
-export function VideoFrameThumbnail({ src }: { src: string }) {
+export function VideoFrameThumbnail({
+  src,
+  fallbackLabel,
+}: {
+  src: string;
+  /** Shown instead of an endless shimmer when the video can't be decoded. */
+  fallbackLabel?: string;
+}) {
   const [frame, setFrame] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    setFailed(false);
     const video = document.createElement("video");
     video.crossOrigin = "anonymous";
     video.muted = true;
@@ -17,9 +26,18 @@ export function VideoFrameThumbnail({ src }: { src: string }) {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
 
+    // Clearing src fires one more `error` on the video, so the error handler
+    // must be detached first — otherwise error → cleanup → error spins forever.
     const cleanup = () => {
+      video.removeEventListener("error", onError);
       video.src = "";
       video.load();
+    };
+    const onError = () => {
+      // Ignore the synthetic error cleanup itself just triggered.
+      if (!video.getAttribute("src")) return;
+      setFailed(true);
+      cleanup();
     };
 
     video.addEventListener("loadedmetadata", () => {
@@ -35,15 +53,25 @@ export function VideoFrameThumbnail({ src }: { src: string }) {
       cleanup();
     });
 
-    video.addEventListener("error", cleanup);
+    video.addEventListener("error", onError);
     video.src = src;
     video.load();
 
     return cleanup;
   }, [src]);
 
+  if (failed && !frame) {
+    return (
+      <div className="w-full h-full bg-neutral-800 flex items-center justify-center">
+        <span className="text-[9px] font-medium text-neutral-600">{fallbackLabel ?? "VIDEO"}</span>
+      </div>
+    );
+  }
+
   if (!frame) {
-    return <div className="w-full h-full bg-neutral-800 animate-pulse" />;
+    return (
+      <div className="w-full h-full bg-neutral-800 animate-pulse motion-reduce:animate-none" />
+    );
   }
 
   return <img src={frame} alt="" draggable={false} className="w-full h-full object-contain" />;

@@ -60,17 +60,16 @@ export interface DeployOptions {
 }
 
 /**
- * Resolve the SAM template path relative to `repoRoot`. We look for the
- * `examples/aws-lambda/template.yaml` first (development checkout) and
- * fall back to the installed-package layout when running from a globally
- * installed `hyperframes` CLI.
+ * Resolve the SAM template path relative to `repoRoot`. No installed-package fallback: the
+ * template's `CodeUri` is relative to the monorepo, so it only works inside a checkout.
  */
 export function locateSamTemplate(repoRoot: string): string {
   const candidate = join(repoRoot, "examples", "aws-lambda", "template.yaml");
   if (!existsSync(candidate)) {
     throw new Error(
       `[lambda] SAM template not found at ${candidate}. ` +
-        `If you're running from an installed package, point --sam-template at your local copy of examples/aws-lambda/template.yaml.`,
+        "`hyperframes lambda deploy` needs a HyperFrames repo checkout: run it from one, " +
+        "or set HYPERFRAMES_REPO_ROOT to point at one.",
     );
   }
   return candidate;
@@ -106,7 +105,14 @@ export function samDeploy(opts: DeployOptions): void {
   const samDir = join(opts.repoRoot, "examples", "aws-lambda");
   const result = spawnSync("sam", args, { cwd: samDir, stdio: opts.stdio ?? "inherit" });
   if (result.status !== 0) {
-    throw new Error(`[lambda] sam deploy exited with code ${result.status ?? "unknown"}`);
+    throw new Error(
+      `[lambda] sam deploy exited with code ${result.status ?? "unknown"}\n` +
+        `If a prior attempt left a stack in ROLLBACK_COMPLETE, CloudFormation can't reuse it. ` +
+        `Delete it before retrying:\n` +
+        `  aws cloudformation delete-stack --stack-name aws-sam-cli-managed-default --region ${opts.region}\n` +
+        `  aws cloudformation delete-stack --stack-name ${opts.stackName} --region ${opts.region}\n` +
+        `(the first is SAM's managed artifacts stack from --resolve-s3; the second is the render stack).`,
+    );
   }
 }
 

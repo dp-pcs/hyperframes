@@ -9,6 +9,38 @@
 
 // ── Phase 1: Capture ────────────────────────────────────────────────────────
 
+export type CapturePhase =
+  | "browser"
+  | "navigation"
+  | "core-extraction"
+  | "fonts"
+  | "assets"
+  | "vision"
+  | "contact-sheets"
+  | "scaffold"
+  | "complete";
+
+export const DEFAULT_MAX_SCREENSHOTS = 21;
+
+export const CAPTURE_PHASE_SCHEMA = "hyperframes.capture.phase.v1" as const;
+
+export interface CapturePhaseProgress {
+  schema: typeof CAPTURE_PHASE_SCHEMA;
+  phase: CapturePhase;
+  status: "started" | "completed" | "degraded";
+  /** Null before the post-navigation budget begins. */
+  remainingMs: number | null;
+  reason?:
+    | "budget-exhausted"
+    | "disabled"
+    | "request-timeout"
+    | "provider-error"
+    | "internal-error"
+    | "blocked"
+    | "webgl-disabled-retry"
+    | "deadline";
+}
+
 export interface CaptureOptions {
   /** URL to capture */
   url: string;
@@ -22,10 +54,18 @@ export interface CaptureOptions {
   timeout?: number;
   /** Extra wait after load for JS to settle (default: 3000) */
   settleTime?: number;
-  /** Maximum screenshots to take (default: 24) */
+  /** Maximum screenshot files including the full-page plate (default: 21) */
   maxScreenshots?: number;
   /** Skip asset downloads */
   skipAssets?: boolean;
+  /** Skip optional vision captioning */
+  skipVision?: boolean;
+  /** Cooperative post-navigation budget in ms (default: 120000). */
+  postNavigationBudgetMs?: number;
+  /** Optional hard wall-clock deadline for the complete capture run. */
+  captureDeadlineMs?: number;
+  /** Stable, non-sensitive progress records for watchdog diagnostics. */
+  onPhase?: (event: CapturePhaseProgress) => void;
   /** Output JSON for programmatic use */
   json?: boolean;
 }
@@ -37,6 +77,11 @@ export interface CaptureResult {
   projectDir: string;
   /** Source URL */
   url: string;
+  /**
+   * What the server answered for `url`, after redirects; null when navigation produced no
+   * response. Also persisted to `extracted/response.json` for out-of-process consumers.
+   */
+  httpStatus: number | null;
   /** Page title */
   title: string;
   /** Extracted HTML data */
@@ -47,10 +92,19 @@ export interface CaptureResult {
   tokens: DesignTokens;
   /** Downloaded asset paths (relative to projectDir) */
   assets: DownloadedAsset[];
+  /**
+   * How many referenced assets are NOT here, by reason.
+   *
+   * Without this, a capture of a page with three images and a capture truncated to three images
+   * are the same object. All zeroes means the capture kept everything it was offered.
+   */
+  dropped: import("./assetDownloader.js").AssetDropCounts;
   /** Animation catalog (captured during full-JS page load) */
   animationCatalog?: import("./animationCataloger.js").AnimationCatalog;
   /** Errors/warnings encountered during capture */
   warnings: string[];
+  /** Final structured phase record emitted by a successful capture. */
+  lastPhase: CapturePhaseProgress;
 }
 
 export interface ExtractedHtml {
@@ -90,8 +144,30 @@ export interface DesignTokens {
   cssVariables: Record<string, string>;
   /** Font families in use (with weights) */
   fonts: FontToken[];
-  /** Extracted colors (background, text, accent) */
+  /** Extracted colors (background, text, accent), ranked by weighted usage */
   colors: string[];
+  /**
+   * Per-color usage signals for brand classification (how each color is used:
+   * as a fill, on interactive elements, on large areas, or as text). Consumers
+   * (e.g. design-system build) use these to pick the brand primary — the
+   * chromatic color most used as an interactive/repeated FILL, as distinct from
+   * section surfaces (large blocks) and link/text colors. Top ~48 by usage.
+   */
+  colorStats?: Array<{
+    hex: string;
+    /** total occurrences across bg + text */
+    count: number;
+    /** times used as a non-transparent background */
+    bgCount: number;
+    /** times that background sat on an interactive element (a/button/role) */
+    interactiveBg: number;
+    /** times that background covered a large area (> 50000px²) */
+    areaBg: number;
+    /** times used as a text color */
+    textCount: number;
+    /** largest single area (px²) this color filled */
+    maxArea: number;
+  }>;
   /** Headings with text and basic styles */
   headings: Array<{
     level: number;
@@ -102,22 +178,113 @@ export interface DesignTokens {
   }>;
   /** CTA button/link text */
   ctas: Array<{ text: string; href?: string }>;
-  /** SVG elements with labels */
+  /** SVG elements with labels (outerHTML kept in memory for asset downloader, stripped from saved JSON) */
   svgs: Array<{
     label?: string;
     viewBox?: string;
+    width: number;
+    height: number;
     outerHTML: string;
     isLogo: boolean;
   }>;
-  /** Detected page sections with bounding rects */
+  /** Detected page sections with bounding rects + inner content for recreation */
   sections: Array<{
     selector: string;
     type: string;
+    x?: number;
     y: number;
+    width?: number;
     height: number;
     heading: string;
     backgroundColor?: string;
     backgroundImage?: string;
+    /** Visible button/link labels inside the section */
+    callsToAction?: string[];
+    /** Squeezed body text (≤600 chars) */
+    text?: string;
+    /** Coarse layout hint for rebuild */
+    layout?: "stacked" | "grid" | "split" | "centered";
+    /** In-section media URLs (remote at extraction; joined to local in index.ts) */
+    assetUrls?: string[];
+    /** Local asset paths (assets/…) resolved from assetUrls after download */
+    assets?: string[];
+  }>;
+  /** Full-page + viewport geometry (drives measured scroll distance downstream) */
+  page?: {
+    width: number;
+    height: number;
+    viewport: { width: number; height: number };
+  };
+}
+
+// ── Design Styles (computed from live DOM) ──────────────────────────────────
+
+export interface TypographyRole {
+  role: string;
+  fontFamily: string;
+  fontSize: string;
+  fontWeight: string;
+  lineHeight: string;
+  letterSpacing: string;
+  color: string;
+  sampleText: string;
+}
+
+export interface ComponentStyle {
+  label: string;
+  background: string;
+  /** Gradient background-image if any (url()/none dropped) — a core brand signal */
+  backgroundImage?: string;
+  /** backdrop-filter value if any (frosted-glass panels); "" when none */
+  backdropFilter?: string;
+  color: string;
+  padding: string;
+  borderRadius: string;
+  border: string;
+  boxShadow: string;
+  fontSize: string;
+  fontWeight: string;
+  height: string;
+}
+
+export interface StatCellStyle {
+  background: string;
+  borderRadius: string;
+  border: string;
+  boxShadow: string;
+  /** the large numeral's type */
+  numberFontSize: string;
+  numberFontWeight: string;
+  numberColor: string;
+}
+
+export interface DesignStyles {
+  typography: TypographyRole[];
+  spacing: {
+    observed: number[];
+    baseUnit: number;
+  };
+  radius: string[];
+  shadows: Array<{ value: string; count: number }>;
+  buttons: ComponentStyle[];
+  cards: ComponentStyle[];
+  nav: ComponentStyle | null;
+  /** pill / badge / chip / tag — small rounded labelled elements */
+  chips?: ComponentStyle[];
+  /** metric / KPI cells (a large numeral + label) */
+  statCells?: StatCellStyle[];
+  /** tab controls */
+  tabs?: ComponentStyle[];
+  /** Dominant gradient/mesh background washes, ranked by on-screen area covered */
+  backgrounds?: Array<{ value: string; area: number }>;
+  /** Frosted-glass panels (backdrop-filter): raw translucent fill + blur, ranked by area */
+  glass?: Array<{
+    backdropFilter: string;
+    background: string;
+    border: string;
+    borderRadius: string;
+    boxShadow: string;
+    area: number;
   }>;
 }
 

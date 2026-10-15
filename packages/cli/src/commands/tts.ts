@@ -1,6 +1,9 @@
+import { failCommand, failUsage } from "../utils/commandResult.js";
+import { isTextFile } from "../utils/textFile.js";
+// fallow-ignore-file code-duplication
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 export const examples: Example[] = [
   ["Generate speech from text", 'hyperframes tts "Welcome to HyperFrames"'],
@@ -18,7 +21,7 @@ export const examples: Example[] = [
   ["Read text from a file", "hyperframes tts script.txt"],
   ["List available voices", "hyperframes tts --list"],
 ];
-import { resolve, extname } from "node:path";
+import { resolve } from "node:path";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
 import { errorBox } from "../ui/format.js";
@@ -45,10 +48,14 @@ export default defineCommand({
       description: "Text to speak, or path to a .txt file",
       required: false,
     },
+    "text-file": {
+      type: "string",
+      description: "Read text from a .txt file (compatibility alias)",
+    },
     output: {
       type: "string",
       description: "Output file path (default: speech.wav in current directory)",
-      alias: "o",
+      alias: ["o", "out"],
     },
     voice: {
       type: "string",
@@ -76,44 +83,49 @@ export default defineCommand({
       default: false,
     },
   },
+  // fallow-ignore-next-line complexity
   async run({ args }) {
+    if (args["text-file"] && args.input) {
+      console.error(c.error("Pass text to speak or --text-file, not both."));
+      failUsage();
+    }
+
     // ── List voices mode ──────────────────────────────────────────────
     if (args.list) {
       return listVoices(args.json);
     }
 
     // ── Resolve input text ────────────────────────────────────────────
-    if (!args.input) {
+    const input = args["text-file"] ?? args.input;
+    if (!input) {
       console.error(c.error("Provide text to speak, or use --list to see available voices."));
-      process.exit(1);
+      failCommand();
     }
 
     let text: string;
-    const maybeFile = resolve(args.input);
-
-    if (existsSync(maybeFile) && extname(maybeFile).toLowerCase() === ".txt") {
-      text = readFileSync(maybeFile, "utf-8").trim();
+    if (isTextFile(input)) {
+      text = readFileSync(resolve(input), "utf-8").trim();
       if (!text) {
         console.error(c.error("File is empty."));
-        process.exit(1);
+        failCommand();
       }
     } else {
-      text = args.input;
+      text = input;
     }
 
     if (!text.trim()) {
       console.error(c.error("No text provided."));
-      process.exit(1);
+      failCommand();
     }
 
     // ── Resolve output path ───────────────────────────────────────────
     const output = resolve(args.output ?? "speech.wav");
     const voice = args.voice ?? DEFAULT_VOICE;
-    const speed = args.speed ? parseFloat(args.speed) : 1.0;
+    const speed = args.speed === undefined ? 1.0 : Number(args.speed);
 
-    if (isNaN(speed) || speed <= 0 || speed > 3) {
+    if (!Number.isFinite(speed) || speed < 0.1 || speed > 3) {
       console.error(c.error("Speed must be a number between 0.1 and 3.0"));
-      process.exit(1);
+      failCommand();
     }
 
     const inferredLang = inferLangFromVoiceId(voice);
@@ -122,7 +134,7 @@ export default defineCommand({
       const requested = String(args.lang).toLowerCase();
       if (!isSupportedLang(requested)) {
         errorBox("Invalid --lang", `Got "${args.lang}". Must be one of: ${langList}.`);
-        process.exit(1);
+        failCommand();
       }
       lang = requested;
     }
@@ -183,7 +195,7 @@ export default defineCommand({
       } else {
         spin?.stop(c.error(`Speech synthesis failed: ${message}`));
       }
-      process.exit(1);
+      failCommand();
     }
   },
 });

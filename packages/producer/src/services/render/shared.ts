@@ -10,25 +10,44 @@
  * backwards compatibility with existing test files and external callers.
  */
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { CANVAS_DIMENSIONS, type CanvasResolution } from "@hyperframes/core";
+import {
+  CANVAS_DIMENSIONS,
+  checkOutputResolutionCompatibility,
+  type CanvasResolution,
+} from "@hyperframes/core";
 import type {
   AudioElement,
   ExtractedFrames,
   ImageElement,
+  ParallelProgress,
   VideoElement,
 } from "@hyperframes/engine";
 import type { CompiledComposition } from "../htmlCompiler.js";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import { isPathInside } from "../../utils/paths.js";
-import type { ProgressCallback, RenderJob, RenderStatus } from "../renderOrchestrator.js";
+import type {
+  ProgressCallback,
+  RenderJob,
+  RenderStageProgress,
+  RenderStatus,
+} from "../renderOrchestrator.js";
 
 export interface CompositionMetadata {
   duration: number;
   videos: VideoElement[];
   audios: AudioElement[];
   images: ImageElement[];
+  masterFxChain?: string;
   width: number;
   height: number;
 }
@@ -40,6 +59,30 @@ export interface CompositionMetadata {
  * HTML and we want to ignore sub-millisecond float noise.
  */
 export const BROWSER_MEDIA_EPSILON = 0.0001;
+
+/**
+ * Resolve the browser/runtime end for a media element.
+ *
+ * `data-end` is compiler-generated metadata, while `data-duration` is the
+ * authored/runtime value. A render variable can replace a placeholder source
+ * and update `data-duration` after compilation, leaving the compiler-clamped
+ * `data-end` stale. Prefer the live duration when present so the audio/video
+ * extraction window follows the runtime media slot.
+ */
+export function resolveBrowserMediaEnd(start: number, end: number, duration: number): number {
+  return Number.isFinite(duration) && duration > 0 ? start + duration : end;
+}
+
+export function writeFileExclusiveSync(path: string, data: NodeJS.ArrayBufferView | string): void {
+  try {
+    writeFileSync(path, data, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+      return;
+    }
+    throw error;
+  }
+}
 
 /**
  * Browser-discovered media inside inlined sub-compositions can still report
@@ -83,52 +126,22 @@ export function resolveDeviceScaleFactor(input: {
   alphaRequested: boolean;
 }): number {
   if (!input.outputResolution) return 1;
-  if (input.hdrRequested) {
-    throw new Error(
-      "outputResolution cannot be combined with hdrMode='force-hdr'. " +
-        "HDR rendering composites at composition dimensions and does not yet " +
-        "support supersampling. Pick one or render in two passes.",
-    );
-  }
-  if (input.alphaRequested) {
-    throw new Error(
-      "outputResolution cannot be combined with alpha output (--format webm|mov|png-sequence). " +
-        "The alpha screenshot path does not yet apply deviceScaleFactor and would silently " +
-        "produce composition-resolution frames. Render alpha at composition resolution and " +
-        "upscale separately, or use --format mp4.",
-    );
-  }
+  // Single source of truth for the aspect/HDR/scale constraints, shared
+  // with the CLI render pre-flight so both raise the identical, actionable
+  // message. This is the deep defense-in-depth throw; the pre-flight aborts
+  // long before this runs on common compatibility mistakes.
+  const compat = checkOutputResolutionCompatibility({
+    compositionWidth: input.compositionWidth,
+    compositionHeight: input.compositionHeight,
+    outputResolution: input.outputResolution,
+    alphaRequested: input.alphaRequested,
+    hdrRequested: input.hdrRequested,
+  });
+  if (!compat.ok) throw new Error(compat.message);
+
   const target = CANVAS_DIMENSIONS[input.outputResolution];
-  // Aspect-ratio compare via cross-multiplication so the equality is integer-
-  // safe. Float division (`target.width / compositionWidth`) loses precision
-  // for non-power-of-2 ratios (e.g. cinema 4K 4096×2160 = 1.8963…) and a
-  // future preset could trip a false-mismatch on otherwise valid input.
-  if (target.width * input.compositionHeight !== target.height * input.compositionWidth) {
-    throw new Error(
-      `outputResolution ${input.outputResolution} (${target.width}×${target.height}) ` +
-        `does not match the aspect ratio of the composition ` +
-        `(${input.compositionWidth}×${input.compositionHeight}). ` +
-        `Pick a preset whose orientation matches.`,
-    );
-  }
   // Aspect ratios match → widthRatio === heightRatio. Compute once.
-  const widthRatio = target.width / input.compositionWidth;
-  if (widthRatio < 1) {
-    throw new Error(
-      `outputResolution ${input.outputResolution} (${target.width}×${target.height}) ` +
-        `is smaller than the composition (${input.compositionWidth}×${input.compositionHeight}). ` +
-        `Downsampling via --resolution is not supported.`,
-    );
-  }
-  if (!Number.isInteger(widthRatio)) {
-    throw new Error(
-      `outputResolution ${input.outputResolution} requires a non-integer ` +
-        `device scale factor (${widthRatio}×) to upsample from ` +
-        `${input.compositionWidth}×${input.compositionHeight}. ` +
-        `Pick a preset that's an integer multiple, or rescale the composition.`,
-    );
-  }
-  return widthRatio;
+  return target.width / input.compositionWidth;
 }
 
 /**
@@ -239,12 +252,147 @@ export function updateJobStatus(
   stage: string,
   progress: number,
   onProgress?: ProgressCallback,
+  stageProgress?: RenderStageProgress,
 ): void {
+  job.warnings ??= [];
   job.status = status;
   job.currentStage = stage;
-  job.progress = progress;
-  if (status === "failed" || status === "complete") job.completedAt = new Date();
-  if (onProgress) onProgress(job, stage);
+  job.stageProgress = stageProgress;
+  const boundedProgress = Math.max(0, Math.min(100, Math.round(progress)));
+  job.progress = Math.max(job.progress, boundedProgress);
+  if (status === "failed" || status === "complete" || status === "cancelled") {
+    job.completedAt = new Date();
+    job.outcome =
+      status === "failed"
+        ? "failed"
+        : status === "cancelled"
+          ? "cancelled"
+          : job.warnings.length > 0
+            ? "completed_with_warnings"
+            : "completed";
+  }
+  if (onProgress) void onProgress(job, stage);
+}
+
+const PROGRESS_REPORT_INTERVAL_MS = 250;
+const lastFrameReportAt = new WeakMap<RenderJob, number>();
+const lastStartupReportAt = new WeakMap<RenderJob, number>();
+const lastReportSent = new WeakMap<RenderJob, string>();
+
+// The job updates on every call; the callback fires on the first call per job, when forced, and at
+// most once per interval in between, never twice in a row with the same stage and percent.
+function reportThrottled(
+  lastReportAt: WeakMap<RenderJob, number>,
+  job: RenderJob,
+  stage: string,
+  progress: number,
+  onProgress: ProgressCallback | undefined,
+  force: boolean,
+  stageProgress: RenderStageProgress,
+  status: RenderStatus = "rendering",
+): void {
+  const now = Date.now();
+  const last = lastReportAt.get(job);
+  const sent = `${stage}|${progress}`;
+  const due =
+    lastReportSent.get(job) !== sent &&
+    (force || last === undefined || now - last >= PROGRESS_REPORT_INTERVAL_MS);
+  if (due) {
+    lastReportAt.set(job, now);
+    lastReportSent.set(job, sent);
+  }
+  updateJobStatus(job, status, stage, progress, due ? onProgress : undefined, stageProgress);
+}
+
+/** Capture-loop progress: the first frame, the last frame, and at most four reports a second between. */
+export function reportFrameProgress(
+  job: RenderJob,
+  stage: string,
+  progress: number,
+  onProgress: ProgressCallback | undefined,
+  done: number,
+  total: number,
+): void {
+  reportThrottled(lastFrameReportAt, job, stage, progress, onProgress, done === total, {
+    code: "capture",
+    done,
+    total,
+  });
+}
+
+const lastEncodeReportAt = new WeakMap<RenderJob, number>();
+
+/** Frames ffmpeg has encoded, from where capture left the bar up to 90%; same cadence as capture. */
+export function reportEncodeProgress(
+  job: RenderJob,
+  done: number,
+  total: number,
+  onProgress: ProgressCallback | undefined,
+  from: number,
+): void {
+  if (total <= 0) return;
+  const frames = Math.min(done, total);
+  reportThrottled(
+    lastEncodeReportAt,
+    job,
+    `Encoding frame ${frames}/${total}`,
+    from + ((90 - from) * frames) / total,
+    onProgress,
+    frames === total,
+    { code: "encode", done: frames, total },
+    "encoding",
+  );
+}
+
+const lastAssembleReportAt = new WeakMap<RenderJob, number>();
+
+/** Seconds of the final file written, 90% to 99%: only a complete file reaches 100. */
+export function reportAssembleProgress(
+  job: RenderJob,
+  done: number,
+  total: number,
+  onProgress: ProgressCallback | undefined,
+): void {
+  if (total <= 0) return;
+  const seconds = Math.min(done, total);
+  reportThrottled(
+    lastAssembleReportAt,
+    job,
+    "Assembling final video",
+    90 + (9 * seconds) / total,
+    onProgress,
+    seconds >= total,
+    { code: "assemble", done: seconds, total },
+    "assembling",
+  );
+}
+
+const workerPhasesByJob = new WeakMap<RenderJob, Map<number, string>>();
+
+/** Browser warm-up before the first frame, from the parallel workers' phase events. */
+export function reportWorkerStartup(
+  job: RenderJob,
+  progress: ParallelProgress,
+  onProgress: ProgressCallback | undefined,
+): void {
+  const phase = progress.latestWorkerPhase;
+  if (!phase) return;
+  const phases = workerPhasesByJob.get(job) ?? new Map<number, string>();
+  workerPhasesByJob.set(job, phases);
+  phases.set(phase.workerId, phase.phase);
+  // ponytail: ids past a smaller retry's worker count are stale, so they are not counted
+  const ready = [...phases].filter(
+    ([id, p]) => id < progress.activeWorkers && (p === "frame_capture" || p === "frame_encode"),
+  ).length;
+  reportThrottled(
+    lastStartupReportAt,
+    job,
+    `Starting browsers (${ready}/${progress.activeWorkers} ready)`,
+    job.progress,
+    onProgress,
+    false,
+    { code: "start_browsers", done: ready, total: progress.activeWorkers },
+  );
 }
 
 /**
@@ -288,8 +436,12 @@ type MaterializePathModule = {
 type MaterializeFileSystem = {
   existsSync: (path: string) => boolean;
   mkdirSync: (path: string, options: { recursive: true }) => unknown;
-  symlinkSync: (target: string, path: string) => unknown;
+  symlinkSync: (target: string, path: string, type?: "dir" | "junction") => unknown;
   cpSync: (src: string, dest: string, options: { recursive: true }) => unknown;
+  // Optional: only the stale-entry (EEXIST) recovery path calls it, and the
+  // default fileSystem always supplies it. Test doubles that never trigger
+  // EEXIST may omit it.
+  rmSync?: (path: string, options: { recursive: true; force: true }) => unknown;
 };
 
 type MaterializeExtractedFramesOptions = {
@@ -319,6 +471,7 @@ const materializeFileSystem: MaterializeFileSystem = {
   mkdirSync,
   symlinkSync,
   cpSync,
+  rmSync,
 };
 
 /**
@@ -388,6 +541,100 @@ export function createMemorySampler(intervalMs: number = 250): MemorySampler {
  * Exported for integration tests; not part of the stable public API —
  * external callers should use `executeRenderJob` instead.
  */
+// Stage one video's extracted-frame dir into the compiled dir. Default is a
+// directory link (cheap; the in-process renderer); `materializeSymlinks` copies
+// instead (distributed plan() needs a self-contained dir). On Windows, try a
+// junction if symlink privileges are unavailable before falling back to a copy.
+// One-time guard for the symlink→copy fallback notice below.
+let warnedSymlinkFallback = false;
+
+// Junctions avoid Windows symlink privileges. POSIX keeps its copy fallback.
+function tryWindowsFrameJunction(
+  fileSystem: MaterializeFileSystem,
+  src: string,
+  dest: string,
+): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    fileSystem.symlinkSync(src, dest, "junction");
+    return true;
+  } catch (error) {
+    const code =
+      error instanceof Error && "code" in error && typeof error.code === "string"
+        ? error.code
+        : undefined;
+    if (
+      ["EPERM", "EACCES", "UNKNOWN", "EINVAL", "ENOSYS", "EOPNOTSUPP", "ENOTSUP"].includes(
+        code ?? "",
+      )
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+// Create the symlink, degrading to a copy on Windows' no-symlink-privilege
+// errors (EPERM/EACCES, plus UNKNOWN), trying a Windows junction first.
+// Other symlink errors and non-capability junction errors propagate.
+function linkOrCopyFrameDir(fileSystem: MaterializeFileSystem, src: string, dest: string): void {
+  try {
+    fileSystem.symlinkSync(src, dest, "dir");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== "EPERM" && code !== "EACCES" && code !== "UNKNOWN") throw err;
+    if (tryWindowsFrameJunction(fileSystem, src, dest)) return;
+    // Copying is measurably slower than symlinking, so surface the degrade once
+    // — it explains a render that suddenly got heavier and saves a support
+    // round-trip diagnosing slow frame staging on Windows.
+    if (!warnedSymlinkFallback) {
+      warnedSymlinkFallback = true;
+      defaultLogger.info(
+        `[Render] Linking extracted frames was rejected (${code}); copying them into the compiled dir instead.`,
+      );
+    }
+    fileSystem.cpSync(src, dest, { recursive: true });
+  }
+}
+
+function stageExtractedFrameDir(
+  fileSystem: MaterializeFileSystem,
+  src: string,
+  dest: string,
+  materializeSymlinks: boolean,
+): void {
+  try {
+    stageExtractedFrameDirOnce(fileSystem, src, dest, materializeSymlinks);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw err;
+    // A stale entry already sits at `dest` — typically a DANGLING symlink left
+    // after the extraction cache was GC'd (its target removed), or a Windows
+    // machine reusing a dir a prior Linux run populated with symlinks (the eager
+    // cpSync then collides with the existing link). The caller's existsSync()
+    // guard follows the link, so the dead link reads as absent and we reach
+    // here; the entry itself still exists, so re-staging collides with EEXIST.
+    // Clear the stale entry and re-stage. Applies to BOTH the symlink and
+    // eager-copy paths so a cross-platform dir reuse self-heals either way.
+    fileSystem.rmSync?.(dest, { recursive: true, force: true });
+    stageExtractedFrameDirOnce(fileSystem, src, dest, materializeSymlinks);
+  }
+}
+
+// One staging attempt: eager copy for the distributed self-contained dir,
+// otherwise a symlink (degrading to a copy on no-symlink-privilege errors).
+function stageExtractedFrameDirOnce(
+  fileSystem: MaterializeFileSystem,
+  src: string,
+  dest: string,
+  materializeSymlinks: boolean,
+): void {
+  if (materializeSymlinks) {
+    fileSystem.cpSync(src, dest, { recursive: true });
+    return;
+  }
+  linkOrCopyFrameDir(fileSystem, src, dest);
+}
+
 export function materializeExtractedFramesForCompiledDir(
   extracted: MaterializedExtractedFrames[],
   compiledDir: string,
@@ -405,11 +652,12 @@ export function materializeExtractedFramesForCompiledDir(
     const linkPath = pathModule.join(compiledFrameRoot, ext.videoId);
     if (!fileSystem.existsSync(linkPath)) {
       fileSystem.mkdirSync(pathModule.dirname(linkPath), { recursive: true });
-      if (options.materializeSymlinks) {
-        fileSystem.cpSync(resolvedOut, linkPath, { recursive: true });
-      } else {
-        fileSystem.symlinkSync(resolvedOut, linkPath);
-      }
+      stageExtractedFrameDir(
+        fileSystem,
+        resolvedOut,
+        linkPath,
+        options.materializeSymlinks === true,
+      );
     }
 
     const remapped = new Map<number, string>();

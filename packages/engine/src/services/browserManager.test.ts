@@ -1,18 +1,130 @@
+// fallow-ignore-file code-duplication
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import type { Browser, PuppeteerNode } from "puppeteer-core";
+import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
+
+import type { CaptureMode } from "./browserLeasePool.js";
 
 import {
   _resetAutoBrowserGpuModeCacheForTests,
   _resetBrowserPoolForTests,
+  _closeBrowserAfterFailedProbeForTests,
+  _createBrowserLaunchFingerprintForTests,
+  _probeBeginFrameSupportForTests,
   _setPuppeteerForTests,
   acquireBrowser,
   buildChromeArgs,
+  compositionRequiresWebGpu,
+  assertWebGpuAdapterAvailable,
+  usesSoftwareWebGpu,
+  WebGpuUnavailableError,
   drainBrowserPool,
   forceReleaseBrowser,
   releaseBrowser,
+  resolveHeadlessShellPath,
   resolveBrowserGpuMode,
+  resolveFullChromePath,
 } from "./browserManager.js";
+
+describe("BeginFrame capability probe", () => {
+  it("waits for a document and validates a PNG-returning frame", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ hasDamage: true, screenshotData: png.toString("base64") });
+    const detach = vi.fn().mockResolvedValue(undefined);
+    const goto = vi.fn().mockResolvedValue(null);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const browser = {
+      newPage: vi.fn().mockResolvedValue({
+        goto,
+        createCDPSession: vi.fn().mockResolvedValue({ send, detach }),
+        close,
+      }),
+    } as unknown as Browser;
+
+    const result = await _probeBeginFrameSupportForTests(browser);
+
+    expect(result.supported).toBe(true);
+    expect(goto).toHaveBeenCalledWith(expect.stringContaining("hf-beginframe-probe"), {
+      waitUntil: "domcontentloaded",
+      timeout: 2000,
+    });
+    expect(send.mock.calls.map(([method]) => method)).toEqual([
+      "HeadlessExperimental.enable",
+      "HeadlessExperimental.beginFrame",
+      "HeadlessExperimental.beginFrame",
+    ]);
+    expect(detach).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("reports an empty screenshot as unsupported", async () => {
+    const send = vi.fn().mockResolvedValue({ hasDamage: false });
+    const browser = {
+      newPage: vi.fn().mockResolvedValue({
+        goto: vi.fn().mockResolvedValue(null),
+        createCDPSession: vi.fn().mockResolvedValue({
+          send,
+          detach: vi.fn().mockResolvedValue(undefined),
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    } as unknown as Browser;
+
+    const result = await _probeBeginFrameSupportForTests(browser);
+
+    expect(result.supported).toBe(false);
+    expect(result.detail).toContain("returned 0 bytes after 10 attempts");
+  });
+
+  it("bounds a screenshot-bearing CDP call that never resolves", async () => {
+    const never = new Promise<never>(() => {});
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockReturnValueOnce(never);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const browser = {
+      newPage: vi.fn().mockResolvedValue({
+        goto: vi.fn().mockResolvedValue(null),
+        createCDPSession: vi.fn().mockResolvedValue({
+          send,
+          detach: vi.fn().mockResolvedValue(undefined),
+        }),
+        close,
+      }),
+    } as unknown as Browser;
+
+    const result = await _probeBeginFrameSupportForTests(browser, 25);
+
+    expect(result.supported).toBe(false);
+    expect(result.detail).toContain("timeout during screenshot beginFrame attempt 1");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("force-kills and disconnects when graceful browser cleanup never resolves", async () => {
+    const kill = vi.fn();
+    const disconnect = vi.fn().mockResolvedValue(undefined);
+    const browser = {
+      close: vi.fn().mockReturnValue(new Promise<never>(() => {})),
+      process: vi.fn().mockReturnValue({ kill }),
+      disconnect,
+    } as unknown as Browser;
+
+    await _closeBrowserAfterFailedProbeForTests(browser, 25);
+
+    expect(kill).toHaveBeenCalledWith("SIGKILL");
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+});
 
 describe("buildChromeArgs browser GPU mode", () => {
   const base = { width: 1920, height: 1080 };
@@ -20,14 +132,34 @@ describe("buildChromeArgs browser GPU mode", () => {
   it("uses SwiftShader software GL by default for reproducible local renders", () => {
     const args = buildChromeArgs(base);
     expect(args).toContain("--enable-features=CanvasDrawElement");
+    expect(args).not.toContain("--enable-unsafe-webgpu");
     expect(args).toContain("--use-gl=angle");
     expect(args).toContain("--use-angle=swiftshader");
     expect(args).toContain("--enable-unsafe-swiftshader");
     expect(args).not.toContain("--enable-gpu-rasterization");
   });
 
+  // HF#3049: the stale-raster accumulation lives in SwiftShader's compositor,
+  // which every capture mode reads from — so the gate is the GPU mode alone.
+  // Swept over the whole CaptureMode union so a future mode can't quietly opt
+  // out of the workaround the way `screenshot` did.
+  const captureModes: CaptureMode[] = ["beginframe", "screenshot", "drawelement"];
+
+  it.each(captureModes)("disables GPU compositing for software %s capture", (captureMode) => {
+    expect(
+      buildChromeArgs({ ...base, captureMode, platform: "linux" }, { browserGpuMode: "software" }),
+    ).toContain("--disable-gpu-compositing");
+  });
+
+  it.each(captureModes)("leaves hardware %s capture on the GPU compositor", (captureMode) => {
+    expect(
+      buildChromeArgs({ ...base, captureMode, platform: "linux" }, { browserGpuMode: "hardware" }),
+    ).not.toContain("--disable-gpu-compositing");
+  });
+
   it("uses Metal-backed ANGLE for hardware browser GPU mode on macOS", () => {
     const args = buildChromeArgs({ ...base, platform: "darwin" }, { browserGpuMode: "hardware" });
+    expect(args).toContain("--enable-unsafe-webgpu");
     expect(args).toContain("--use-gl=angle");
     expect(args).toContain("--use-angle=metal");
     expect(args).toContain("--enable-gpu-rasterization");
@@ -42,13 +174,22 @@ describe("buildChromeArgs browser GPU mode", () => {
     expect(args).not.toContain("--use-angle=swiftshader");
   });
 
-  it("uses EGL for hardware browser GPU mode on Linux", () => {
+  it("uses ANGLE-EGL for hardware browser GPU mode on Linux", () => {
     const args = buildChromeArgs({ ...base, platform: "linux" }, { browserGpuMode: "hardware" });
-    expect(args).toContain("--use-gl=egl");
+    expect(args).toContain("--use-gl=angle");
+    expect(args).toContain("--use-angle=gl-egl");
     expect(args).toContain("--enable-gpu-rasterization");
-    expect(args).not.toContain("--use-gl=angle");
+    expect(args).toContain("--ignore-gpu-blocklist");
+    expect(args).toContain("--disable-software-rasterizer");
     expect(args).not.toContain("--use-angle=swiftshader");
   });
+
+  it.each(["darwin", "win32", "linux"] as const)(
+    "pins the capture surface to 1 device pixel per CSS pixel on %s",
+    (platform) => {
+      expect(buildChromeArgs({ ...base, platform })).toContain("--force-device-scale-factor=1");
+    },
+  );
 
   it("keeps --disable-gpu authoritative when requested", () => {
     const args = buildChromeArgs(
@@ -59,16 +200,206 @@ describe("buildChromeArgs browser GPU mode", () => {
     expect(args).toContain("--use-angle=swiftshader");
     expect(args).not.toContain("--use-angle=metal");
   });
+
+  it("adds the WebGPU flag for a declaring composition even in software mode", () => {
+    const args = buildChromeArgs({ ...base, requiresWebGpu: true }, { browserGpuMode: "software" });
+    expect(args).toContain("--enable-unsafe-webgpu");
+    expect(args).toContain("--use-angle=swiftshader");
+  });
+
+  it("is byte-identical to the requiresWebGpu-absent case for a non-declaring composition", () => {
+    expect(buildChromeArgs({ ...base, requiresWebGpu: false })).toEqual(buildChromeArgs(base));
+  });
+
+  it("runs an opted-in WebGPU composition on SwiftShader's Vulkan with GPU compositing on", () => {
+    const args = buildChromeArgs(
+      { ...base, platform: "linux", requiresWebGpu: true },
+      { browserGpuMode: "software", allowSoftwareWebGpu: true },
+    );
+    expect(args).toContain("--enable-features=CanvasDrawElement,Vulkan");
+    expect(args).not.toContain("--enable-features=CanvasDrawElement");
+    expect(args).toContain("--use-vulkan=swiftshader");
+    expect(args).toContain("--enable-unsafe-webgpu");
+    expect(args).not.toContain("--disable-gpu-compositing");
+  });
+
+  it.each([
+    ["without the opt-in", true, { browserGpuMode: "software" }],
+    [
+      "for a composition without WebGPU",
+      false,
+      { browserGpuMode: "software", allowSoftwareWebGpu: true },
+    ],
+    ["on a GPU", true, { browserGpuMode: "hardware", allowSoftwareWebGpu: true }],
+    ["under --disable-gpu", true, { disableGpu: true, allowSoftwareWebGpu: true }],
+  ] as const)("leaves the launch as it was %s", (_, requiresWebGpu, config) => {
+    expect(usesSoftwareWebGpu(requiresWebGpu, config)).toBe(false);
+    expect(buildChromeArgs({ ...base, platform: "linux", requiresWebGpu }, config)).toEqual(
+      buildChromeArgs(
+        { ...base, platform: "linux", requiresWebGpu },
+        { ...config, allowSoftwareWebGpu: false },
+      ),
+    );
+  });
+});
+
+describe("compositionRequiresWebGpu", () => {
+  it("detects the explicit WebGPU capability marker on the composition root", () => {
+    expect(
+      compositionRequiresWebGpu(
+        '<div data-requires-webgpu data-composition-id="gpu" data-duration="2"></div>',
+      ),
+    ).toBe(true);
+    expect(compositionRequiresWebGpu('<div data-composition-id="dom"></div>')).toBe(false);
+  });
+
+  it("finds the root after an inlined script whose code holds '<' and the marker name", () => {
+    const runtime = `<script>if(n<32)q="[data-composition-id]";if(a>b)go()</script>`;
+    expect(
+      compositionRequiresWebGpu(`${runtime}<div data-composition-id="main" data-requires-webgpu>`),
+    ).toBe(true);
+    expect(
+      compositionRequiresWebGpu(`<div title="data-composition-id" data-requires-webgpu>`),
+    ).toBe(false);
+  });
+
+  it("reads only the composition root tag and stays linear on repeated '<'", () => {
+    expect(
+      compositionRequiresWebGpu('<p data-requires-webgpu></p><div data-composition-id="a"></div>'),
+    ).toBe(false);
+    expect(
+      compositionRequiresWebGpu('<div data-composition-id="a" title="x<y" data-requires-webgpu>'),
+    ).toBe(true);
+    const started = performance.now();
+    expect(compositionRequiresWebGpu("<".repeat(200_000))).toBe(false);
+    expect(compositionRequiresWebGpu("<a'".repeat(100_000))).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+describe("assertWebGpuAdapterAvailable", () => {
+  const pageWithAdapter = (hasAdapter: boolean) =>
+    ({ evaluate: vi.fn().mockResolvedValue(hasAdapter) }) as unknown as Page;
+
+  it("no-ops for a composition that does not require WebGPU, regardless of adapter", () => {
+    const page = pageWithAdapter(false);
+    return expect(assertWebGpuAdapterAvailable(page, false)).resolves.toBeUndefined();
+  });
+
+  it("resolves when a WebGPU adapter is obtainable", () => {
+    const page = pageWithAdapter(true);
+    return expect(assertWebGpuAdapterAvailable(page, true)).resolves.toBeUndefined();
+  });
+
+  it("throws naming the requirement when no adapter is obtainable", async () => {
+    const page = pageWithAdapter(false);
+    await expect(assertWebGpuAdapterAvailable(page, true)).rejects.toThrow("data-requires-webgpu");
+  });
+
+  describe("in-page adapter check (real callback, stubbed navigator.gpu)", () => {
+    const runInPage = {
+      evaluate: (fn: (...args: unknown[]) => unknown, ...args: unknown[]) => fn(...args),
+    } as unknown as Page;
+    const stubAdapter = (adapter: unknown) =>
+      vi.stubGlobal("navigator", { gpu: { requestAdapter: async () => adapter } });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("accepts a hardware adapter", async () => {
+      stubAdapter({ info: { isFallbackAdapter: false } });
+      await expect(assertWebGpuAdapterAvailable(runInPage, true)).resolves.toBeUndefined();
+    });
+
+    it("refuses a software fallback adapter such as swiftshader", async () => {
+      stubAdapter({ info: { isFallbackAdapter: true } });
+      await expect(assertWebGpuAdapterAvailable(runInPage, true)).rejects.toBeInstanceOf(
+        WebGpuUnavailableError,
+      );
+    });
+
+    it("accepts a software fallback adapter only on a launch that runs software WebGPU", async () => {
+      stubAdapter({ info: { isFallbackAdapter: true } });
+      await expect(assertWebGpuAdapterAvailable(runInPage, true, true)).resolves.toBeUndefined();
+      await expect(assertWebGpuAdapterAvailable(runInPage, true, false)).rejects.toBeInstanceOf(
+        WebGpuUnavailableError,
+      );
+    });
+
+    it("refuses a host with no navigator.gpu", async () => {
+      vi.stubGlobal("navigator", {});
+      await expect(assertWebGpuAdapterAvailable(runInPage, true)).rejects.toBeInstanceOf(
+        WebGpuUnavailableError,
+      );
+    });
+  });
+});
+
+describe("browser launch capture-mode contract", () => {
+  it("derives BeginFrame from the actual launch flags, not forceScreenshot alone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-browser-fingerprint-"));
+    const chromePath = join(dir, "chrome-headless-shell");
+    writeFileSync(chromePath, "");
+    try {
+      const withoutControl = _createBrowserLaunchFingerprintForTests([], {
+        chromePath,
+        forceScreenshot: false,
+      });
+      const withControl = _createBrowserLaunchFingerprintForTests(
+        ["--enable-begin-frame-control"],
+        { chromePath, forceScreenshot: false },
+      );
+
+      expect(withoutControl.requestedCaptureMode).toBe("screenshot");
+      expect(withControl.requestedCaptureMode).toBe(
+        process.platform === "linux" ? "beginframe" : "screenshot",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("resolveBrowserGpuMode", () => {
+  const setMockWebGlProbe = (info: { hasWebGL: boolean; vendor: string; renderer: string }) => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const evaluate = vi.fn().mockResolvedValue(info);
+    const launch = vi.fn().mockResolvedValue({
+      newPage: vi.fn().mockResolvedValue({ evaluate }),
+      close,
+    });
+    _setPuppeteerForTests({ launch } as unknown as PuppeteerNode);
+    return { close, launch };
+  };
+
+  const notWsl = {
+    platform: "linux" as const,
+    release: "6.8.0-45-generic",
+    readProcVersion: () => "Linux version 6.8.0-45-generic",
+    renderNodeAccess: () => ({ state: "read-write" as const }),
+  };
+
   beforeEach(() => {
     _resetAutoBrowserGpuModeCacheForTests();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    _setPuppeteerForTests(undefined);
     _resetAutoBrowserGpuModeCacheForTests();
+  });
+
+  it("lets a host own GPU probe launch and cleanup", async () => {
+    const { launch } = setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA" });
+    const close = vi.fn(async (browser: Browser) => {
+      await browser.close();
+    });
+    const managedLaunch = vi.fn(
+      async (ppt: PuppeteerNode, options: Parameters<PuppeteerNode["launch"]>[0]) =>
+        ppt.launch(options),
+    );
+    await resolveBrowserGpuMode("auto", { probeLifecycle: { launch: managedLaunch, close } });
+    expect(managedLaunch).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("passes 'software' through unchanged without probing", async () => {
@@ -76,9 +407,222 @@ describe("resolveBrowserGpuMode", () => {
     expect(mode).toBe("software");
   });
 
-  it("passes 'hardware' through unchanged without probing", async () => {
+  it("passes 'hardware' through unchanged", async () => {
+    setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA GeForce RTX 3070" });
     const mode = await resolveBrowserGpuMode("hardware");
     expect(mode).toBe("hardware");
+  });
+
+  it("warns when explicit 'hardware' probes to software, but still honours it", async () => {
+    // heygen-com/hyperframes#2967: `--browser-gpu` inside a container with no
+    // GPU passthrough rendered 19186 frames on CPU with no diagnostic.
+    setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "Google Inc. (Google)",
+      renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))",
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mode = await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost: notWsl });
+    expect(mode).toBe("hardware");
+    const warning = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(warning).toContain("browserGpuMode=hardware was requested");
+    expect(warning).toContain("--gpus all");
+    // Once per process, not once per worker — the render path resolves the
+    // mode for the probe browser plus every parallel worker.
+    await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost: notWsl });
+    await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost: notWsl });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet when explicit 'hardware' probes to hardware", async () => {
+    setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA GeForce RTX 3070" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await resolveBrowserGpuMode("hardware")).toBe("hardware");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("gives non-linux hosts the generic remediation, not the Docker one", async () => {
+    setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "Google Inc. (Google)",
+      renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))",
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await resolveBrowserGpuMode("hardware", { platform: "darwin", wslHost: notWsl })).toBe(
+      "hardware",
+    );
+    const warning = String(warn.mock.calls[0]?.[0]);
+    expect(warning).toContain("host exposes a GPU");
+    expect(warning).not.toContain("--gpus all");
+  });
+
+  it("does not blame the GPU when the probe itself failed to launch", async () => {
+    // A probe that could not run is NO evidence about the GPU. Sending this
+    // operator to `--gpus all` would hide a broken Chrome install behind a
+    // phantom passthrough problem.
+    _setPuppeteerForTests({
+      launch: vi.fn().mockRejectedValue(new Error("spawn ENOENT /bad/chrome")),
+    } as unknown as PuppeteerNode);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost: notWsl })).toBe(
+      "hardware",
+    );
+    const warning = String(warn.mock.calls[0]?.[0]);
+    expect(warning).toContain("GPU probe could not run");
+    expect(warning).toContain("hyperframes doctor");
+    expect(warning).not.toContain("--gpus all");
+  });
+
+  describe("under WSL (heygen-com/hyperframes#5548)", () => {
+    const wslHost = {
+      platform: "linux" as const,
+      release: "5.15.167.4-microsoft-standard-WSL2",
+      readProcVersion: () => "",
+      renderNodeAccess: () => ({ state: "denied" as const, group: "render", userInGroup: false }),
+    };
+    const output = (spy: { mock: { calls: unknown[][] } }) =>
+      spy.mock.calls.map((call) => String(call[0])).join("\n");
+    const neverAnsweringProbe = () => {
+      const launch = vi.fn().mockResolvedValue({
+        newPage: vi.fn().mockResolvedValue({ evaluate: () => new Promise(() => {}) }),
+        close: () => new Promise(() => {}),
+        process: () => ({ kill: vi.fn() }),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+      });
+      _setPuppeteerForTests({ launch } as unknown as PuppeteerNode);
+    };
+
+    it("auto mode says it fell back to software, why, and the fix, once", async () => {
+      setMockWebGlProbe({ hasWebGL: false, vendor: "", renderer: "" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      expect(await resolveBrowserGpuMode("auto", { platform: "linux", wslHost })).toBe("software");
+      await resolveBrowserGpuMode("auto", { platform: "linux", wslHost });
+      const text = output(error);
+      expect(text).toContain("browserGpuMode probe → software (WebGL unavailable)");
+      expect(text).toContain(
+        "WSL: the GPU check found no hardware GPU, so this render uses software",
+      );
+      expect(text).toContain('is not in its group ("render")');
+      expect(text).toContain("sudo usermod -aG render $USER");
+      expect(text.match(/usermod/g)).toHaveLength(1);
+    });
+
+    it("auto mode says the check did not finish when the probe page times out", async () => {
+      vi.useFakeTimers();
+      try {
+        neverAnsweringProbe();
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+        const mode = resolveBrowserGpuMode("auto", { platform: "linux", wslHost });
+        await vi.advanceTimersByTimeAsync(15_000 + 250);
+        await expect(mode).resolves.toBe("software");
+        const text = output(error);
+        expect(text).toContain("did not answer within 15000ms");
+        expect(text).toContain("WSL: the GPU check could not finish");
+        expect(text).not.toContain("found no hardware GPU");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("explicit 'hardware' after a timeout stays unverified and never claims software", async () => {
+      vi.useFakeTimers();
+      try {
+        neverAnsweringProbe();
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const mode = resolveBrowserGpuMode("hardware", { platform: "linux", wslHost });
+        await vi.advanceTimersByTimeAsync(15_000 + 250);
+        await expect(mode).resolves.toBe("hardware");
+        const warning = output(warn);
+        expect(warning).toContain("hardware acceleration is UNVERIFIED");
+        expect(warning).toContain("hyperframes doctor");
+        expect(warning).toContain("sudo usermod -aG render $USER");
+        expect(warning).not.toContain("found no hardware GPU");
+        expect(output(error)).not.toContain("this render uses software");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("explicit 'hardware' with a broken Chrome keeps the Chrome-install advice", async () => {
+      _setPuppeteerForTests({
+        launch: vi.fn().mockRejectedValue(new Error("spawn ENOENT /bad/chrome")),
+      } as unknown as PuppeteerNode);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost })).toBe(
+        "hardware",
+      );
+      const warning = output(warn);
+      expect(warning).toContain("GPU probe could not run");
+      expect(warning).toContain("hyperframes doctor");
+      expect(warning).not.toContain("--gpus all");
+      expect(output(error)).not.toContain("this render uses software");
+    });
+
+    it("explicit 'hardware' with no hardware GPU gives the WSL fix, not Docker passthrough", async () => {
+      setMockWebGlProbe({ hasWebGL: false, vendor: "", renderer: "" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(await resolveBrowserGpuMode("hardware", { platform: "linux", wslHost })).toBe(
+        "hardware",
+      );
+      const warning = output(warn);
+      expect(warning).toContain("sudo usermod -aG render $USER");
+      expect(warning).not.toContain("--gpus all");
+      expect(output(error)).not.toContain("this render uses software");
+    });
+
+    it("stays quiet when WSL hands Chrome a hardware GPU", async () => {
+      setMockWebGlProbe({
+        hasWebGL: true,
+        vendor: "Google Inc. (Microsoft Corporation)",
+        renderer: "ANGLE (Microsoft Corporation, D3D12 (Intel(R) Graphics), OpenGL ES 3.0)",
+      });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      expect(await resolveBrowserGpuMode("auto", { platform: "linux", wslHost })).toBe("hardware");
+      expect(output(error)).not.toContain("WSL");
+    });
+  });
+
+  it("finds no full Chrome, without throwing, when its cache cannot be read", () => {
+    const home = mkdtempSync(join(tmpdir(), "hf-full-chrome-cache-"));
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    try {
+      mkdirSync(join(home, ".cache", "puppeteer"), { recursive: true });
+      writeFileSync(join(home, ".cache", "puppeteer", "chrome"), "not a folder");
+      Object.assign(process.env, { HOME: home, USERPROFILE: home });
+      expect(resolveFullChromePath()).toBeUndefined();
+    } finally {
+      Object.assign(process.env, saved);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to 'software' within the probe budget when the probe page never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const kill = vi.fn();
+      const launch = vi.fn().mockResolvedValue({
+        newPage: vi.fn().mockResolvedValue({ evaluate: () => new Promise(() => {}) }),
+        close: () => new Promise(() => {}),
+        process: () => ({ kill }),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+      });
+      _setPuppeteerForTests({ launch } as unknown as PuppeteerNode);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const mode = resolveBrowserGpuMode("auto", { browserTimeout: 120_000 });
+      await vi.advanceTimersByTimeAsync(15_000 + 250);
+
+      await expect(mode).resolves.toBe("software");
+      expect(launch).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 120_000, waitForInitialPage: false }),
+      );
+      expect(kill).toHaveBeenCalledWith("SIGKILL");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to 'software' when the probe browser cannot launch", async () => {
@@ -107,31 +651,431 @@ describe("resolveBrowserGpuMode", () => {
     expect(second).toBe("software");
     // Reset and re-probe to confirm the test-only reset works.
     _resetAutoBrowserGpuModeCacheForTests();
-    const third = await resolveBrowserGpuMode("hardware");
+    setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA GeForce RTX 3070" });
+    const third = await resolveBrowserGpuMode("auto");
     expect(third).toBe("hardware");
   });
 
-  it("deduplicates concurrent auto-mode probes by caching the in-flight Promise", async () => {
+  it("deduplicates concurrent probes so only one Chrome launches", async () => {
     // Parallel coordinator fires N workers via Promise.all — without Promise-
     // level caching, a `--workers 4` render against a no-GPU host would launch
-    // 4 simultaneous probe Chromes. Verify all concurrent callers get the
-    // exact same Promise reference (proving the probe runs once, not N times).
-    const p1 = resolveBrowserGpuMode("auto", {
-      chromePath: "/definitely/not/a/real/chrome/binary",
-      browserTimeout: 2000,
+    // 4 simultaneous probe Chromes. Assert the launch count directly rather
+    // than Promise identity: `"auto"` and `"hardware"` now each adapt the
+    // shared cached Promise via `.then`, so identity is no longer the
+    // invariant — "the probe browser starts exactly once" is.
+    const { launch } = setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "Google Inc. (Google)",
+      renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))",
     });
-    const p2 = resolveBrowserGpuMode("auto", {
-      chromePath: "/definitely/not/a/real/chrome/binary",
-      browserTimeout: 2000,
-    });
-    const p3 = resolveBrowserGpuMode("auto", {
-      chromePath: "/definitely/not/a/real/chrome/binary",
-      browserTimeout: 2000,
-    });
-    expect(p1).toBe(p2);
-    expect(p2).toBe(p3);
-    const results = await Promise.all([p1, p2, p3]);
+    const results = await Promise.all([
+      resolveBrowserGpuMode("auto", { browserTimeout: 2000 }),
+      resolveBrowserGpuMode("auto", { browserTimeout: 2000 }),
+      resolveBrowserGpuMode("auto", { browserTimeout: 2000 }),
+    ]);
     expect(results).toEqual(["software", "software", "software"]);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares the one probe across mixed 'auto' and 'hardware' callers", async () => {
+    const { launch } = setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "NVIDIA",
+      renderer: "NVIDIA GeForce RTX 3070",
+    });
+    const results = await Promise.all([
+      resolveBrowserGpuMode("auto"),
+      resolveBrowserGpuMode("hardware"),
+      resolveBrowserGpuMode("auto"),
+    ]);
+    expect(results).toEqual(["hardware", "hardware", "hardware"]);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "llvmpipe",
+      "Google Inc. (Mesa/X.org)",
+      "ANGLE (Mesa/X.org, llvmpipe (LLVM 12.0.0 256 bits), OpenGL ES 3.2)",
+    ],
+    [
+      "Microsoft Basic Render Driver",
+      "Google Inc. (Microsoft)",
+      "ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0)",
+    ],
+    ["Mesa offscreen", "Google Inc. (Mesa)", "ANGLE (Mesa, Mesa offscreen, OpenGL ES 3.2)"],
+    [
+      "lavapipe",
+      "Google Inc. (Mesa)",
+      "ANGLE (Mesa, llvmpipe/lavapipe Vulkan software rasterizer)",
+    ],
+  ])("treats %s WebGL as software in auto mode", async (_label, vendor, renderer) => {
+    const { close, launch } = setMockWebGlProbe({
+      hasWebGL: true,
+      vendor,
+      renderer,
+    });
+
+    const mode = await resolveBrowserGpuMode("auto", {
+      chromePath: "/mock/chrome-headless-shell",
+      browserTimeout: 2000,
+    });
+
+    expect(mode).toBe("software");
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats empty WebGL renderer metadata as software in auto mode", async () => {
+    const { close, launch } = setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "",
+      renderer: "",
+    });
+
+    const mode = await resolveBrowserGpuMode("auto", {
+      chromePath: "/mock/chrome-headless-shell",
+      browserTimeout: 2000,
+    });
+
+    expect(mode).toBe("software");
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps real hardware WebGL as hardware in auto mode", async () => {
+    const { close, launch } = setMockWebGlProbe({
+      hasWebGL: true,
+      vendor: "Google Inc. (NVIDIA Corporation)",
+      renderer: "ANGLE (NVIDIA, NVIDIA A10G, OpenGL 4.6)",
+    });
+
+    const mode = await resolveBrowserGpuMode("auto", {
+      chromePath: "/mock/chrome-headless-shell",
+      browserTimeout: 2000,
+    });
+
+    expect(mode).toBe("hardware");
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+// CodeQL js/bad-code-sanitization: values must never be woven into the eval
+// string itself. This script is a fixed constant; every variable (module
+// URL, faked platform/arch, faked os.release) crosses as an env var instead.
+const RESOLVE_HEADLESS_SHELL_SUBPROCESS_SCRIPT = `
+  if (process.env.HF_TEST_PLATFORM) {
+    Object.defineProperty(process, "platform", { value: process.env.HF_TEST_PLATFORM });
+  }
+  if (process.env.HF_TEST_ARCH) {
+    Object.defineProperty(process, "arch", { value: process.env.HF_TEST_ARCH });
+  }
+  if (process.env.HF_TEST_OS_RELEASE) {
+    const os = require("node:os");
+    os.release = () => process.env.HF_TEST_OS_RELEASE;
+    require("node:module").syncBuiltinESMExports();
+  }
+  import(process.env.HF_TEST_MODULE_URL).then(({ resolveHeadlessShellPath }) => {
+    process.stdout.write(resolveHeadlessShellPath({}) ?? "");
+  });
+`;
+
+/** Runs resolveHeadlessShellPath in a subprocess with a faked platform/arch/os.release. */
+function resolveHeadlessShellInSubprocess(
+  env: NodeJS.ProcessEnv,
+  fakes: { platform?: string; arch?: string; osRelease?: string } = {},
+): string {
+  const moduleUrl = new URL("./browserManager.ts", import.meta.url).href;
+  return execFileSync("bun", ["--eval", RESOLVE_HEADLESS_SHELL_SUBPROCESS_SCRIPT], {
+    encoding: "utf8",
+    env: {
+      ...env,
+      HF_TEST_MODULE_URL: moduleUrl,
+      ...(fakes.platform ? { HF_TEST_PLATFORM: fakes.platform } : {}),
+      ...(fakes.arch ? { HF_TEST_ARCH: fakes.arch } : {}),
+      ...(fakes.osRelease ? { HF_TEST_OS_RELEASE: fakes.osRelease } : {}),
+    },
+  });
+}
+
+describe("resolveHeadlessShellPath", () => {
+  const originalHeadlessShellPath = process.env.PRODUCER_HEADLESS_SHELL_PATH;
+  const originalHyperframesBrowserPath = process.env.HYPERFRAMES_BROWSER_PATH;
+
+  afterEach(() => {
+    if (originalHeadlessShellPath === undefined) delete process.env.PRODUCER_HEADLESS_SHELL_PATH;
+    else process.env.PRODUCER_HEADLESS_SHELL_PATH = originalHeadlessShellPath;
+    if (originalHyperframesBrowserPath === undefined) delete process.env.HYPERFRAMES_BROWSER_PATH;
+    else process.env.HYPERFRAMES_BROWSER_PATH = originalHyperframesBrowserPath;
+  });
+
+  it("throws a clear error when PRODUCER_HEADLESS_SHELL_PATH points at a missing binary", () => {
+    process.env.PRODUCER_HEADLESS_SHELL_PATH = "/missing/chrome-headless-shell.exe";
+
+    expect(() => resolveHeadlessShellPath({})).toThrow(
+      /Chrome binary not found at PRODUCER_HEADLESS_SHELL_PATH/,
+    );
+  });
+
+  it("uses HYPERFRAMES_BROWSER_PATH when the CLI resolved a browser explicitly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-env-"));
+    try {
+      const binary = join(dir, "chrome-headless-shell");
+      writeFileSync(binary, "");
+      delete process.env.PRODUCER_HEADLESS_SHELL_PATH;
+      process.env.HYPERFRAMES_BROWSER_PATH = binary;
+
+      expect(resolveHeadlessShellPath({})).toBe(binary);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      hostPlatform: "darwin",
+      hostArch: "arm64",
+      expectedDirectory: "chrome-headless-shell-mac-arm64",
+      expectedExecutable: "chrome-headless-shell",
+    },
+    {
+      hostPlatform: "darwin",
+      hostArch: "x64",
+      expectedDirectory: "chrome-headless-shell-mac-x64",
+      expectedExecutable: "chrome-headless-shell",
+    },
+    {
+      hostPlatform: "linux",
+      hostArch: "x64",
+      expectedDirectory: "chrome-headless-shell-linux64",
+      expectedExecutable: "chrome-headless-shell",
+    },
+    {
+      hostPlatform: "win32",
+      hostArch: "ia32",
+      expectedDirectory: "chrome-headless-shell-win32",
+      expectedExecutable: "chrome-headless-shell.exe",
+    },
+    {
+      hostPlatform: "win32",
+      hostArch: "x64",
+      expectedDirectory: "chrome-headless-shell-win64",
+      expectedExecutable: "chrome-headless-shell.exe",
+    },
+  ])(
+    "selects only the host-compatible cached shell on $hostPlatform/$hostArch when every platform is present",
+    ({ hostPlatform, hostArch, expectedDirectory, expectedExecutable }) => {
+      const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-platform-"));
+      try {
+        const cacheVersion = join(
+          home,
+          ".cache",
+          "puppeteer",
+          "chrome-headless-shell",
+          "host-152.0.7928.2",
+        );
+        const candidates = [
+          ["chrome-headless-shell-linux64", "chrome-headless-shell"],
+          ["chrome-headless-shell-mac-arm64", "chrome-headless-shell"],
+          ["chrome-headless-shell-mac-x64", "chrome-headless-shell"],
+          ["chrome-headless-shell-win32", "chrome-headless-shell.exe"],
+          ["chrome-headless-shell-win64", "chrome-headless-shell.exe"],
+        ] as const;
+        for (const [directory, executable] of candidates) {
+          const binary = join(cacheVersion, directory, executable);
+          mkdirSync(join(binary, ".."), { recursive: true });
+          writeFileSync(binary, "shell");
+        }
+        const expectedBinary = join(cacheVersion, expectedDirectory, expectedExecutable);
+
+        const env = { ...process.env, HOME: home, USERPROFILE: home };
+        delete env.PRODUCER_HEADLESS_SHELL_PATH;
+        delete env.HYPERFRAMES_BROWSER_PATH;
+        const stdout = resolveHeadlessShellInSubprocess(env, {
+          platform: hostPlatform,
+          arch: hostArch,
+          osRelease: "24.0.0",
+        });
+
+        expect(stdout).toBe(expectedBinary);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { hostPlatform: "linux", hostArch: "arm64" },
+    { hostPlatform: "win32", hostArch: "arm64" },
+  ])(
+    "does not select a foreign cached shell on unsupported $hostPlatform/$hostArch",
+    ({ hostPlatform, hostArch }) => {
+      const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-unsupported-"));
+      try {
+        const cacheVersion = join(
+          home,
+          ".cache",
+          "puppeteer",
+          "chrome-headless-shell",
+          "host-152.0.7928.2",
+        );
+        for (const [directory, executable] of [
+          ["chrome-headless-shell-linux64", "chrome-headless-shell"],
+          ["chrome-headless-shell-win64", "chrome-headless-shell.exe"],
+        ] as const) {
+          const binary = join(cacheVersion, directory, executable);
+          mkdirSync(join(binary, ".."), { recursive: true });
+          writeFileSync(binary, "shell");
+        }
+
+        const env = { ...process.env, HOME: home, USERPROFILE: home };
+        delete env.PRODUCER_HEADLESS_SHELL_PATH;
+        delete env.HYPERFRAMES_BROWSER_PATH;
+        const stdout = resolveHeadlessShellInSubprocess(env, {
+          platform: hostPlatform,
+          arch: hostArch,
+          osRelease: "24.0.0",
+        });
+
+        expect(stdout).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("reuses chrome-headless-shell from the HyperFrames-managed cache", () => {
+    const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-cache-"));
+    try {
+      const binary = join(
+        home,
+        ".cache",
+        "hyperframes",
+        "chrome",
+        "chrome-headless-shell",
+        "linux-152.0.7928.2",
+        "chrome-headless-shell-linux64",
+        "chrome-headless-shell",
+      );
+      mkdirSync(join(binary, ".."), { recursive: true });
+      writeFileSync(binary, "shell");
+      const olderBinary = binary.replace("linux-152.0.7928.2", "linux-99.0.1.1");
+      mkdirSync(join(olderBinary, ".."), { recursive: true });
+      writeFileSync(olderBinary, "shell");
+
+      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      delete env.PRODUCER_HEADLESS_SHELL_PATH;
+      delete env.HYPERFRAMES_BROWSER_PATH;
+      const stdout = resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" });
+
+      expect(stdout).toBe(binary);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a cached shell that is a folder or empty and uses the next older build", () => {
+    const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-empty-"));
+    try {
+      const shell = (version: string) =>
+        join(
+          home,
+          ".cache",
+          "hyperframes",
+          "chrome",
+          "chrome-headless-shell",
+          `linux-${version}`,
+          "chrome-headless-shell-linux64",
+          "chrome-headless-shell",
+        );
+      mkdirSync(shell("153.0.7990.1"), { recursive: true });
+      for (const [version, content] of [
+        ["152.0.7977.30", ""],
+        ["150.0.7871.124", "shell"],
+      ]) {
+        mkdirSync(join(shell(version), ".."), { recursive: true });
+        writeFileSync(shell(version), content);
+      }
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      delete env.PRODUCER_HEADLESS_SHELL_PATH;
+      delete env.HYPERFRAMES_BROWSER_PATH;
+      const stdout = resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" });
+
+      expect(stdout).toBe(shell("150.0.7871.124"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Permission bits do not stop root, and Windows ignores them.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "keeps scanning past a cached build it cannot read",
+    () => {
+      const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-unreadable-"));
+      const shell = (version: string) =>
+        join(
+          home,
+          ".cache",
+          "hyperframes",
+          "chrome",
+          "chrome-headless-shell",
+          `linux-${version}`,
+          "chrome-headless-shell-linux64",
+          "chrome-headless-shell",
+        );
+      const lockedDir = join(shell("152.0.7977.30"), "..");
+      try {
+        for (const version of ["152.0.7977.30", "150.0.7871.124"]) {
+          mkdirSync(join(shell(version), ".."), { recursive: true });
+          writeFileSync(shell(version), "shell");
+        }
+        chmodSync(lockedDir, 0o000);
+        const env = { ...process.env, HOME: home, USERPROFILE: home };
+        delete env.PRODUCER_HEADLESS_SHELL_PATH;
+        delete env.HYPERFRAMES_BROWSER_PATH;
+        const stdout = resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" });
+
+        expect(stdout).toBe(shell("150.0.7871.124"));
+      } finally {
+        chmodSync(lockedDir, 0o755);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("skips managed-cache builds newer than Chrome 150 on macOS 12", () => {
+    const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-macos12-"));
+    try {
+      const shell = (version: string) =>
+        join(
+          home,
+          ".cache",
+          "hyperframes",
+          "chrome",
+          "chrome-headless-shell",
+          `mac-${version}`,
+          "chrome-headless-shell-mac-x64",
+          "chrome-headless-shell",
+        );
+      for (const version of ["152.0.7977.30", "150.0.7871.124"]) {
+        mkdirSync(join(shell(version), ".."), { recursive: true });
+        writeFileSync(shell(version), "shell");
+      }
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      delete env.PRODUCER_HEADLESS_SHELL_PATH;
+      delete env.HYPERFRAMES_BROWSER_PATH;
+      const stdout = resolveHeadlessShellInSubprocess(env, {
+        platform: "darwin",
+        arch: "x64",
+        osRelease: "21.6.0",
+      });
+
+      expect(stdout).toBe(shell("150.0.7871.124"));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -203,8 +1147,8 @@ describe("browser pool", () => {
     expect(first.browser).toBe(second.browser);
     expect(launchFn).toHaveBeenCalledTimes(1);
 
-    await releaseBrowser(first.browser, poolCfg);
-    await releaseBrowser(second.browser, poolCfg);
+    await first.release();
+    await second.release();
   });
 
   it("concurrent acquires via Promise.all trigger exactly one launch", async () => {
@@ -218,14 +1162,14 @@ describe("browser pool", () => {
     expect(a.browser).toBe(b.browser);
     expect(b.browser).toBe(c.browser);
 
-    await releaseBrowser(a.browser, poolCfg);
-    await releaseBrowser(b.browser, poolCfg);
-    await releaseBrowser(c.browser, poolCfg);
+    await a.release();
+    await b.release();
+    await c.release();
   });
 
   it("pool recovers from a disconnected browser", async () => {
     const first = await acquireBrowser(["--no-sandbox"], poolCfg);
-    await releaseBrowser(first.browser, poolCfg);
+    await first.release();
 
     // Simulate Chrome crash
     (first.browser as unknown as { connected: boolean }).connected = false;
@@ -238,15 +1182,40 @@ describe("browser pool", () => {
     expect(second.browser).not.toBe(first.browser);
     expect(launchFn).toHaveBeenCalledTimes(2);
 
-    await releaseBrowser(second.browser, poolCfg);
+    await second.release();
   });
 
   it("release at refCount 0 closes the browser", async () => {
     const result = await acquireBrowser(["--no-sandbox"], poolCfg);
     const closeFn = result.browser.close as ReturnType<typeof vi.fn>;
 
-    await releaseBrowser(result.browser, poolCfg);
+    await result.release();
     expect(closeFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("releaseBrowser preserves the sole-owner legacy path", async () => {
+    const result = await acquireBrowser(["--no-sandbox"], poolCfg);
+    const closeFn = result.browser.close as ReturnType<typeof vi.fn>;
+
+    await releaseBrowser(result.browser);
+
+    expect(closeFn).toHaveBeenCalledTimes(1);
+    await result.release();
+    expect(closeFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("releaseBrowser rejects an ambiguous pooled browser handle", async () => {
+    const first = await acquireBrowser(["--no-sandbox"], poolCfg);
+    const second = await acquireBrowser(["--no-sandbox"], poolCfg);
+    const closeFn = first.browser.close as ReturnType<typeof vi.fn>;
+
+    await expect(releaseBrowser(first.browser)).rejects.toThrow(
+      "Cannot release a pooled browser by handle while 2 leases are active",
+    );
+    expect(closeFn).not.toHaveBeenCalled();
+
+    await first.release();
+    await second.release();
   });
 
   it("pool returns a separate browser when forceScreenshot mismatches pooled mode", async () => {
@@ -258,8 +1227,8 @@ describe("browser pool", () => {
     expect(second.browser).toBe(first.browser);
     expect(launchFn).toHaveBeenCalledTimes(1);
 
-    await releaseBrowser(first.browser, poolCfg);
-    await releaseBrowser(second.browser, poolCfg);
+    await first.release();
+    await second.release();
   });
 
   it("forceReleaseBrowser does not kill Chrome when other sessions hold refs", async () => {
@@ -273,8 +1242,9 @@ describe("browser pool", () => {
     // Should NOT have disconnected — other session still holds a ref
     expect(disconnectFn).not.toHaveBeenCalled();
 
-    // Release the remaining ref normally
-    await releaseBrowser(second.browser, poolCfg);
+    // Each owner releases its own identity; neither can consume the other.
+    result.forceRelease();
+    await second.release();
   });
 
   it("drainBrowserPool is safe to call when no browser is pooled", async () => {

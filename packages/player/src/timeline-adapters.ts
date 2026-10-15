@@ -1,5 +1,5 @@
 /**
- * Types and type-guards for the two playback adapter paths the player supports:
+ * Types and type-guards for the playback adapter paths the player supports:
  *
  *  - `RuntimeDurationAdapter` — the HyperFrames runtime exposes `window.__player`
  *    with a `getDuration()` method. This is the standard path for compositions
@@ -21,7 +21,9 @@ export interface RuntimeDurationAdapter {
 export interface DirectTimelineAdapter {
   duration: () => number;
   time: () => number;
-  seek: (timeInSeconds: number) => unknown;
+  // suppressEvents mirrors GSAP's timeline.seek(position, suppressEvents); pass
+  // false to fire onUpdate (so imperative-visibility compositions repaint on seek).
+  seek: (timeInSeconds: number, suppressEvents?: boolean) => unknown;
   play: () => unknown;
   pause: () => unknown;
   /** Optional: set playback rate (e.g. GSAP's timeScale). Called when the player's playbackRate changes. */
@@ -29,6 +31,7 @@ export interface DirectTimelineAdapter {
 }
 
 export type PlaybackDurationAdapter =
+  | { kind: "document"; getDuration: () => number }
   | { kind: "runtime"; getDuration: () => number }
   | { kind: "direct-timeline"; timeline: DirectTimelineAdapter; getDuration: () => number };
 

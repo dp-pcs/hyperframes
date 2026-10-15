@@ -1,7 +1,8 @@
-import { useState, useCallback, type MouseEvent } from "react";
+import { useMemo, useState, useCallback, useRef, type MouseEvent } from "react";
 import { useMountEffect } from "./useMountEffect";
 import { liveTime, usePlayerStore } from "../player";
 import { buildFrameCaptureFilename, buildFrameCaptureUrl } from "../utils/frameCapture";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
 interface UseFrameCaptureParams {
   projectId: string | null;
@@ -16,23 +17,41 @@ export function useFrameCapture({
   showToast,
   waitForPendingDomEditSaves,
 }: UseFrameCaptureParams) {
-  const [captureFrameTime, setCaptureFrameTime] = useState(0);
+  const [captureFrameTime, setCaptureFrameTime] = useState(
+    () => usePlayerStore.getState().currentTime,
+  );
+  const [capturing, setCapturing] = useState(false);
+  const capturingRef = useRef(false);
+  const livePlayheadRef = useRef(captureFrameTime);
 
-  useMountEffect(() => {
-    setCaptureFrameTime(usePlayerStore.getState().currentTime);
-    return liveTime.subscribe(setCaptureFrameTime);
-  });
+  useMountEffect(() =>
+    liveTime.subscribe((time) => {
+      livePlayheadRef.current = time;
+    }),
+  );
 
-  const refreshCaptureFrameTime = useCallback(() => {
-    setCaptureFrameTime(usePlayerStore.getState().currentTime);
+  const playheadTime = useCallback(() => {
+    const { isPlaying, currentTime } = usePlayerStore.getState();
+    return isPlaying ? livePlayheadRef.current : currentTime;
   }, []);
+
+  const [captureStamp, setCaptureStamp] = useState(Date.now);
+  const refreshCaptureFrameTime = useCallback(() => {
+    setCaptureFrameTime(playheadTime());
+    setCaptureStamp(Date.now());
+  }, [playheadTime]);
 
   const handleCaptureFrameClick = useCallback(
     async (event: MouseEvent<HTMLAnchorElement>) => {
       if (!projectId) return;
       event.preventDefault();
+      // A capture can take up to ~35s (save drain + server render) — ignore
+      // re-entrant clicks instead of firing parallel captures.
+      if (capturingRef.current) return;
+      capturingRef.current = true;
+      setCapturing(true);
       try {
-        const time = usePlayerStore.getState().currentTime;
+        const time = playheadTime();
         setCaptureFrameTime(time);
         await Promise.race([
           waitForPendingDomEditSaves(),
@@ -49,7 +68,10 @@ export function useFrameCapture({
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
         try {
-          const response = await fetch(href, { cache: "no-store", signal: controller.signal });
+          const response = await studioApiFetch(href, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
           clearTimeout(timeout);
           if (!response.ok) {
             let msg = `Capture failed (${response.status})`;
@@ -69,28 +91,36 @@ export function useFrameCapture({
           document.body.appendChild(link);
           link.click();
           link.remove();
-          setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         } catch (fetchErr) {
           clearTimeout(timeout);
           if (fetchErr instanceof DOMException && fetchErr.name === "AbortError") {
-            throw new Error("Capture timed out — the server took too long to respond");
+            throw new Error("Capture timed out: the server took too long to respond");
           }
           throw fetchErr;
         }
       } catch (err) {
         showToast(err instanceof Error ? err.message : "Capture failed", "error");
+      } finally {
+        capturingRef.current = false;
+        setCapturing(false);
       }
     },
-    [activeCompPath, projectId, showToast, waitForPendingDomEditSaves],
+    [activeCompPath, playheadTime, projectId, showToast, waitForPendingDomEditSaves],
   );
 
-  const captureFrameHref = projectId
-    ? buildFrameCaptureUrl({
-        projectId,
-        compositionPath: activeCompPath,
-        currentTime: captureFrameTime,
-      })
-    : "#";
+  const captureFrameHref = useMemo(
+    () =>
+      projectId
+        ? buildFrameCaptureUrl({
+            projectId,
+            compositionPath: activeCompPath,
+            currentTime: captureFrameTime,
+            version: captureStamp,
+          })
+        : "#",
+    [projectId, activeCompPath, captureFrameTime, captureStamp],
+  );
   const captureFrameFilename = buildFrameCaptureFilename(activeCompPath, captureFrameTime);
 
   return {
@@ -98,5 +128,6 @@ export function useFrameCapture({
     captureFrameFilename,
     handleCaptureFrameClick,
     refreshCaptureFrameTime,
+    capturing,
   };
 }

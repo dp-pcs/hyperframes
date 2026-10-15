@@ -3,8 +3,10 @@
  *
  *   1. png-sequence: no encoder. Captured PNGs are renamed to
  *      `frame_NNNNNN.png` and copied to `outputPath`. Audio (if any) is
- *      written as an `audio.aac` sidecar.
- *   2. mp4 / webm / mov: invokes `encodeFramesFromDir` (or the chunked-
+ *      written as a `MIXED_AUDIO_FILENAME` sidecar.
+ *   2. gif: runs a two-pass FFmpeg palette encode and writes directly to
+ *      `outputPath`. GIF has no mux/faststart stage and ignores audio.
+ *   3. mp4 / webm / mov: invokes `encodeFramesFromDir` (or the chunked-
  *      concat variant when `enableChunkedEncode` is on) to produce
  *      `videoOnlyPath`. The mux + faststart pass lives in `assembleStage`.
  *
@@ -26,16 +28,44 @@
  *     `success: false`.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import {
   encodeFramesChunkedConcat,
   encodeFramesFromDir,
+  formatFfmpegError,
   getEncoderPreset,
+  MIXED_AUDIO_FILENAME,
+  resolveConfig,
+  runFfmpeg,
+  type EngineConfig,
+  type EncodeResult,
 } from "@hyperframes/engine";
+import {
+  clearGifFramesBeforeNext,
+  gifClearsAfterLeavingFrameInPlace,
+  type Fps,
+} from "@hyperframes/core";
 import type { ProducerLogger } from "../../../logger.js";
+import { formatExportFrameName } from "../../../utils/paths.js";
 import type { ProgressCallback, RenderJob } from "../../renderOrchestrator.js";
-import { updateJobStatus } from "../shared.js";
+import {
+  buildGifPalettegenArgs,
+  buildGifPaletteuseArgs,
+  type GifEncodeArgsInput,
+} from "./gifEncodeArgs.js";
+import { reportEncodeProgress, updateJobStatus } from "../shared.js";
+import { encoderFailureError } from "../encoderInterruption.js";
+import { frameFileExtension } from "@hyperframes/engine";
 
 export interface EncodeStageInput {
   job: RenderJob;
@@ -51,6 +81,12 @@ export interface EncodeStageInput {
   height: number;
   /** True when the output format requires an alpha channel; selects frame extension. */
   needsAlpha: boolean;
+  /**
+   * Format the frames on disk were captured in. Drives the encoder's input pattern, which
+   * must match what `writeCapturedFrame` named them. Not derivable from `needsAlpha`:
+   * motion blur also forces PNG capture on an opaque output.
+   */
+  captureImageFormat: "jpeg" | "png";
   /** True iff the composition has audio. Drives the sidecar copy. */
   hasAudio: boolean;
   /**
@@ -62,6 +98,8 @@ export interface EncodeStageInput {
   audioOutputPath?: string;
   /** Mp4 vs png-sequence vs … gates the entire stage branch. */
   isPngSequence: boolean;
+  /** GIF writes directly to `outputPath` via a two-pass palette encode. */
+  isGif: boolean;
   /** Encoder preset (codec, preset, pixelFormat, hdr). Only used on the non-png path. */
   preset: ReturnType<typeof getEncoderPreset>;
   effectiveQuality: number;
@@ -69,24 +107,151 @@ export interface EncodeStageInput {
   /** Producer config — enables the chunked-concat encoder when on. */
   enableChunkedEncode: boolean;
   chunkedEncodeSize: number;
+  /** Already-resolved engine config from the orchestrator; direct callers fall back below. */
+  engineConfig?: Pick<EngineConfig, "ffmpegEncodeTimeout" | "vp9CpuUsed">;
   abortSignal: AbortSignal | undefined;
   assertNotAborted: () => void;
   onProgress?: ProgressCallback;
   /**
    * Pass-through of `EncoderOptions.lockGopForChunkConcat`. When `true`,
-   * the encode emits closed-GOP keyframes at every `gopSize` boundary so
-   * downstream `ffmpeg -f concat -c copy` round-trips losslessly. Only the
-   * distributed chunk worker (`renderChunk`) sets this — the in-process
-   * renderer's call site omits it, preserving the existing open-GOP output.
+   * the encode emits closed-GOP keyframes at every `gopSize` boundary so a
+   * downstream `-c copy` stream-copy can cut the stream on those boundaries.
+   *
+   * Two callers set it: the distributed chunk worker (`renderChunk`), so
+   * `ffmpeg -f concat -c copy` round-trips losslessly, and an in-process
+   * `format: "hls"` render, so `-hls_time` segments land exactly on the
+   * segment boundary. Every other render omits it, preserving the existing
+   * open-GOP output.
    */
   lockGopForChunkConcat?: boolean;
-  /** Required when `lockGopForChunkConcat === true`. Number of frames per GOP — set to the chunk's frame count by `renderChunk`. */
+  /**
+   * Required when `lockGopForChunkConcat === true`. Frames per GOP — the
+   * chunk's frame count for `renderChunk`, `hlsSegmentSeconds × fps` for HLS.
+   */
   gopSize?: number;
 }
 
 export interface EncodeStageResult {
   /** Wall-clock ms for the encode (or png-copy) phase. */
   encodeMs: number;
+}
+
+function resolveGifLoop(loop: number | undefined): number {
+  const resolved = loop ?? 0;
+  if (!Number.isInteger(resolved) || resolved < 0 || resolved > 65_535) {
+    throw new Error(`[Render] gifLoop must be an integer between 0 and 65535 (got ${resolved})`);
+  }
+  return resolved;
+}
+
+function gifEncodeFailure(
+  startTime: number,
+  outputPath: string,
+  error: string,
+  failureReason?: EncodeResult["failureReason"],
+): EncodeResult {
+  return {
+    success: false,
+    outputPath,
+    durationMs: Date.now() - startTime,
+    framesEncoded: 0,
+    fileSize: 0,
+    error,
+    failureReason,
+  };
+}
+
+async function reencodeWithClearedWholeFrames(
+  argsInput: GifEncodeArgsInput,
+  run: { signal?: AbortSignal; timeout: number },
+  startTime: number,
+): Promise<EncodeResult | null> {
+  const { outputPath } = argsInput;
+  const result = await runFfmpeg(buildGifPaletteuseArgs({ ...argsInput, wholeFrames: true }), run);
+  if (!result.success) {
+    const error = formatFfmpegError(result.exitCode, result.stderr);
+    return gifEncodeFailure(startTime, outputPath, error, result.failureReason);
+  }
+  const gif = readFileSync(outputPath);
+  if (!clearGifFramesBeforeNext(gif)) {
+    const error = "[FFmpeg] GIF output could not be parsed to clear its frames";
+    return gifEncodeFailure(startTime, outputPath, error);
+  }
+  writeFileSync(outputPath, gif);
+  return null;
+}
+
+async function encodeGifFromDir(
+  framesDir: string,
+  framePattern: string,
+  outputPath: string,
+  input: {
+    fps: Fps;
+    loop: number;
+    palettePath: string;
+    preserveAlpha: boolean;
+    signal?: AbortSignal;
+    timeout: number;
+  },
+): Promise<EncodeResult> {
+  const startTime = Date.now();
+  const files = readdirSync(framesDir).filter((file) => file.match(/\.(jpg|jpeg|png)$/i));
+  const frameCount = files.length;
+  if (frameCount === 0) {
+    return gifEncodeFailure(startTime, outputPath, "[FFmpeg] No frame files found in directory");
+  }
+
+  const argsInput: GifEncodeArgsInput = {
+    framesDir,
+    framePattern,
+    palettePath: input.palettePath,
+    outputPath,
+    fps: input.fps,
+    loop: input.loop,
+    preserveAlpha: input.preserveAlpha,
+  };
+  try {
+    const run = { signal: input.signal, timeout: input.timeout };
+    for (const args of [buildGifPalettegenArgs(argsInput), buildGifPaletteuseArgs(argsInput)]) {
+      const result = await runFfmpeg(args, run);
+      if (!result.success) {
+        const error = formatFfmpegError(result.exitCode, result.stderr);
+        return gifEncodeFailure(startTime, outputPath, error, result.failureReason);
+      }
+    }
+    if (
+      input.preserveAlpha &&
+      gifClearsAfterLeavingFrameInPlace(readFileSync(outputPath)) !== false
+    ) {
+      const failure = await reencodeWithClearedWholeFrames(argsInput, run, startTime);
+      if (failure) return failure;
+    }
+
+    const fileSize = existsSync(outputPath) ? statSync(outputPath).size : 0;
+    return {
+      success: true,
+      outputPath,
+      durationMs: Date.now() - startTime,
+      framesEncoded: frameCount,
+      fileSize,
+    };
+  } finally {
+    // The GIF palette is a temp file; remove it after success or any encode failure.
+    rmSync(input.palettePath, { force: true });
+  }
+}
+
+function startEncodeProgress(
+  job: EncodeStageInput["job"],
+  stage: string,
+  onProgress: EncodeStageInput["onProgress"],
+): (frames?: number) => void {
+  const total = job.totalFrames ?? 0;
+  updateJobStatus(job, "encoding", stage, 75, onProgress, {
+    code: "encode",
+    ...(total > 0 && { done: 0, total }),
+  });
+  return (frames = total) => reportEncodeProgress(job, frames, total, onProgress, 75);
 }
 
 export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeStageResult> {
@@ -102,6 +267,7 @@ export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeSta
     hasAudio,
     audioOutputPath,
     isPngSequence,
+    isGif,
     preset,
     effectiveQuality,
     effectiveBitrate,
@@ -120,7 +286,7 @@ export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeSta
     // alpha and are the deliverable. We rename to `frame_NNNNNN.png`
     // (zero-padded) so consumers (After Effects, Nuke, Fusion, ffmpeg
     // image2 demuxer) can globbed-import without surprises.
-    updateJobStatus(job, "encoding", "Writing PNG sequence", 75, onProgress);
+    const encoded = startEncodeProgress(job, "Writing PNG sequence", onProgress);
     if (!existsSync(outputPath)) mkdirSync(outputPath, { recursive: true });
     const captured = readdirSync(framesDir)
       .filter((name) => name.endsWith(".png"))
@@ -131,23 +297,65 @@ export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeSta
       );
     }
     captured.forEach((name, i) => {
-      const dst = join(outputPath, `frame_${String(i + 1).padStart(6, "0")}.png`);
+      const dst = join(outputPath, formatExportFrameName(i, "png"));
       copyFileSync(join(framesDir, name), dst);
     });
     if (hasAudio && audioOutputPath && existsSync(audioOutputPath)) {
       // Sidecar audio for callers that need to re-mux later. png-sequence
       // has no container of its own, so this is the only place audio
       // can land alongside the frames.
-      copyFileSync(audioOutputPath, join(outputPath, "audio.aac"));
-      log.info(`[Render] png-sequence: audio.aac sidecar written to ${outputPath}/audio.aac`);
+      copyFileSync(audioOutputPath, join(outputPath, MIXED_AUDIO_FILENAME));
+      log.info(
+        `[Render] png-sequence: ${MIXED_AUDIO_FILENAME} sidecar written to ${outputPath}/${MIXED_AUDIO_FILENAME}`,
+      );
     }
+    encoded();
+    return { encodeMs: Date.now() - stage5Start };
+  }
+
+  const engineCfg = input.engineConfig ?? job.config.producerConfig ?? resolveConfig();
+
+  if (isGif) {
+    // ── Stage 5 (gif): two-pass palette encode ───────────────────────
+    const encoded = startEncodeProgress(job, "Encoding GIF", onProgress);
+    if (hasAudio) {
+      log.warn("[Render] GIF output does not support audio; audio tracks will be ignored.");
+    }
+    const frameExt = frameFileExtension(input.captureImageFormat);
+    const framePattern = `frame_%06d.${frameExt}`;
+    const loop = resolveGifLoop(job.config.gifLoop);
+    const encodeResult = await encodeGifFromDir(framesDir, framePattern, outputPath, {
+      fps: job.config.fps,
+      loop,
+      palettePath: join(dirname(videoOnlyPath), "gif-palette.png"),
+      preserveAlpha: needsAlpha,
+      signal: abortSignal,
+      timeout: engineCfg.ffmpegEncodeTimeout,
+    });
+    assertNotAborted();
+    if (!encodeResult.success) {
+      throw encoderFailureError("Encoding failed", encodeResult);
+    }
+    encoded();
     return { encodeMs: Date.now() - stage5Start };
   }
 
   // ── Stage 5: Encode ───────────────────────────────────────────────
-  updateJobStatus(job, "encoding", "Encoding video", 75, onProgress);
+  const onFramesEncoded = startEncodeProgress(job, "Encoding video", onProgress);
 
-  const frameExt = needsAlpha ? "png" : "jpg";
+  // ffmpegEncodeTimeout is a total wall-clock cap, not an inactivity timeout.
+  // A fixed ten-minute cap reliably kills long high-quality disk-frame encodes
+  // that are still making progress. High-quality CPU presets are substantially
+  // slower, so reserve 24x source duration there while retaining the established
+  // 4x budget for draft/standard and preserving larger operator overrides.
+  const baseScaledEncodeTimeout = Math.ceil((job.duration ?? 0) * 4_000);
+  const scaledEncodeTimeout = baseScaledEncodeTimeout * (job.config.quality === "high" ? 6 : 1);
+  const videoEngineCfg =
+    scaledEncodeTimeout > engineCfg.ffmpegEncodeTimeout
+      ? { ...engineCfg, ffmpegEncodeTimeout: scaledEncodeTimeout }
+      : engineCfg;
+
+  const frameExt = frameFileExtension(input.captureImageFormat);
   const framePattern = `frame_%06d.${frameExt}`;
   const encoderOpts = {
     fps: job.config.fps,
@@ -158,6 +366,7 @@ export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeSta
     quality: effectiveQuality,
     bitrate: effectiveBitrate,
     pixelFormat: preset.pixelFormat,
+    vp9CpuUsed: engineCfg.vp9CpuUsed,
     useGpu: job.config.useGpu,
     hdr: preset.hdr,
     // Distributed chunk renders pass these so the encoder writes closed-GOP
@@ -174,13 +383,24 @@ export async function runEncodeStage(input: EncodeStageInput): Promise<EncodeSta
         encoderOpts,
         chunkedEncodeSize,
         abortSignal,
+        videoEngineCfg,
+        onFramesEncoded,
       )
-    : await encodeFramesFromDir(framesDir, framePattern, videoOnlyPath, encoderOpts, abortSignal);
+    : await encodeFramesFromDir(
+        framesDir,
+        framePattern,
+        videoOnlyPath,
+        encoderOpts,
+        abortSignal,
+        videoEngineCfg,
+        onFramesEncoded,
+      );
   assertNotAborted();
 
   if (!encodeResult.success) {
-    throw new Error(`Encoding failed: ${encodeResult.error}`);
+    throw encoderFailureError("Encoding failed", encodeResult);
   }
+  onFramesEncoded();
 
   return { encodeMs: Date.now() - stage5Start };
 }

@@ -47,15 +47,17 @@ await startServer({ port: 8080 });
 
 `RenderConfig` controls the render pipeline:
 
-| Option       | Default      | Description                                                                                                                          |
-| ------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `inputPath`  | —            | Path to the HTML composition                                                                                                         |
-| `outputPath` | —            | Output video file path (or directory, for `format: "png-sequence"`)                                                                  |
-| `width`      | 1920         | Frame width in pixels                                                                                                                |
-| `height`     | 1080         | Frame height in pixels                                                                                                               |
-| `fps`        | 30           | Frames per second (24, 30, or 60)                                                                                                    |
-| `quality`    | `"standard"` | Encoder preset (`"draft"`, `"standard"`, `"high"`)                                                                                   |
-| `format`     | `"mp4"`      | Output container — `"mp4"`, `"webm"`, `"mov"`, or `"png-sequence"`. See [Transparent Video Output](#transparent-video-output) below. |
+| Option              | Default      | Description                                                                                                                                                                          |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `inputPath`         | —            | Path to the HTML composition                                                                                                                                                         |
+| `outputPath`        | —            | Output video file path (or directory, for `format: "png-sequence"` and `format: "hls"`)                                                                                              |
+| `width`             | 1920         | Frame width in pixels                                                                                                                                                                |
+| `height`            | 1080         | Frame height in pixels                                                                                                                                                               |
+| `fps`               | 30           | Frames per second (24, 30, or 60)                                                                                                                                                    |
+| `quality`           | `"standard"` | Encoder preset (`"draft"`, `"standard"`, `"high"`)                                                                                                                                   |
+| `format`            | `"mp4"`      | Output container — `"mp4"`, `"webm"`, `"mov"`, `"gif"`, `"png-sequence"`, or `"hls"`. See [Transparent Video Output](#transparent-video-output) and [HLS Output](#hls-output) below. |
+| `hlsSegmentSeconds` | `4`          | HLS target segment length in whole seconds. Ignored for every other format.                                                                                                          |
+| `videoFrameFormat`  | `"auto"`     | Source video frame extraction format — `"auto"`, `"jpg"`, or `"png"`. Use `"png"` for UI recordings, screen captures, and color-sensitive source videos.                             |
 
 ## Transparent Video Output
 
@@ -67,6 +69,7 @@ The producer can render HTML compositions to formats that carry a **true alpha c
 | `"webm"`          | VP9 + yuva420p                    | **True alpha**          | Opus                | Web playback as overlay (`<video>` over background); supported in Chrome, Edge, Firefox |
 | `"mov"`           | ProRes 4444 + yuva444p10le        | **True alpha + 10-bit** | AAC                 | Editor ingest (Premiere, Final Cut Pro, DaVinci Resolve)                                |
 | `"png-sequence"`  | Numbered RGBA PNGs in a directory | **Lossless alpha**      | Sidecar `audio.aac` | After Effects / Nuke / Fusion, or pipelines that post-process frames before encoding    |
+| `"hls"`           | H.264 (yuv420p) in MPEG-TS        | No                      | AAC rendition       | VOD streaming — see [HLS Output](#hls-output)                                           |
 
 ### Example
 
@@ -89,7 +92,7 @@ await executeRenderJob(job);
 
 The producer captures Chrome screenshots with the page background forced transparent (`html, body, [data-composition-id] { background: transparent !important }`) and the CDP default background override set to RGBA 0,0,0,0. The captured PNGs carry a real alpha channel and that channel is preserved end-to-end:
 
-- VP9 (`webm`) is encoded with `-pix_fmt yuva420p`, `-auto-alt-ref 0`, and `alpha_mode=1` metadata.
+- VP9 (`webm`) is encoded with `-pix_fmt yuva420p`, `-auto-alt-ref 0`, `-cpu-used 4` by default, and `alpha_mode=1` metadata. Tune the speed/quality tradeoff with `PRODUCER_VP9_CPU_USED` (`-8` to `8`) or local CLI `--vp9-cpu-used`.
 - ProRes 4444 (`mov`) is encoded with `-pix_fmt yuva444p10le`.
 - PNG sequences are written without re-encoding (zero-padded `frame_NNNNNN.png`).
 
@@ -106,35 +109,72 @@ This is not chroma keying. There is no green/blue background to remove and no "k
 
 Don't paint a fullscreen background in your HTML. The default body background is overridden to transparent automatically — any `body { background: ... }`, `#root { background: ... }`, or `[data-composition-id] { background: ... }` rule is force-overridden during alpha rendering. Backgrounds on inner elements (cards, scenes, components) are kept.
 
+## HLS Output
+
+`format: "hls"` packages the same H.264 + AAC encode as `mp4` as an HLS VOD
+stream. `outputPath` is a **directory**:
+
+```
+master.m3u8      # references both renditions
+video.m3u8       # video media playlist
+video_00000.ts   # MPEG-TS segments, one IDR frame at the start of each
+audio.m3u8       # written only when the composition has audio
+audio_00000.ts
+```
+
+```typescript
+const job = createRenderJob({
+  inputPath: "./my-composition.html",
+  outputPath: "./renders/stream",
+  format: "hls",
+  hlsSegmentSeconds: 4,
+});
+```
+
+Segments are exactly `hlsSegmentSeconds` long except the last: the encoder's GOP
+is locked to `round(fps × hlsSegmentSeconds)` frames so the packaging pass can
+stream-copy (`-c copy`) and still cut on keyframes. There is no second encode.
+
+Constraints:
+
+- **SDR only.** `hdrMode: "force-hdr"` is rejected; HDR10 would need fMP4
+  segments and HEVC. Use `format: "mp4"` for HDR.
+- **Software encoder only.** `useGpu: true` is rejected — GPU encoders ignore
+  the forced-keyframe lock that fixed-length segments depend on.
+- **Not available in distributed rendering**, including Lambda and Cloud Run.
+- MPEG-TS carries no mov-family metadata, so the render provenance tags written
+  into MP4 output are absent.
+
 ## Distributed rendering
 
 For renders too large for a single machine, the producer ships a public set of distributed-render primitives. They are pure functions over local file paths — networking and orchestration live in adapter packages (Temporal, AWS Lambda + Step Functions, Cloud Run Jobs, K8s Jobs).
 
-```typescript
-import { plan, renderChunk, assemble } from "@hyperframes/producer/distributed";
+Plan v2 is recommended for new integrations. It publishes an immutable
+manifest plus content-addressed artifacts and materializes only each worker's
+declared dependencies:
 
-// Controller-side: produce a self-contained planDir + content-addressed planHash.
-const planResult = await plan(
+```typescript
+import { planV2, renderChunkV2, assembleV2 } from "@hyperframes/producer/distributed";
+
+// Controller-side: produce a v2 manifest + local content-addressed store.
+const planResult = await planV2(
   projectDir,
   { fps: 30, width: 1920, height: 1080, format: "mp4" },
-  "/tmp/plan",
+  "/tmp/plan-v2",
 );
 
-// Worker-side: render one chunk. Byte-identical retries on the same
-// `(planDir, chunkIndex)` — Temporal / Step Functions retry policies are safe
-// to point at this.
-const chunk = await renderChunk("/tmp/plan", 0, "/tmp/chunks/0.mp4");
+const chunk = await renderChunkV2("/tmp/plan-v2", 0, "/tmp/chunks/0.mp4");
 
 // Controller-side: stitch chunks into the final deliverable.
-await assemble(
-  "/tmp/plan",
-  ["/tmp/chunks/0.mp4", "/tmp/chunks/1.mp4"],
-  "/tmp/plan/audio.aac",
-  "/tmp/output.mp4",
-);
+await assembleV2("/tmp/plan-v2", ["/tmp/chunks/0.mp4", "/tmp/chunks/1.mp4"], "/tmp/output.mp4");
 ```
 
-The three activity functions plus their result types are also re-exported from `@hyperframes/producer` so callers that pin the main package don't need a separate subpath import. Supported formats: `mp4` SDR, `mov` ProRes 4444, and `png-sequence`. webm and HDR mp4 trip a typed `FormatNotSupportedInDistributedError` — use the in-process renderer (`executeRenderJob`) for those.
+Cloud adapters should use `planV2WithPublisher()` so artifacts publish
+directly to object storage. The legacy `plan()` / `renderChunk()` /
+`assemble()` v1 layout remains supported, and cloud SDKs still interpret an
+omitted protocol as v1 for backwards compatibility.
+
+The activity functions plus their result types are also re-exported from `@hyperframes/producer` so callers that pin the main package don't need a separate subpath import. Supported formats: `mp4` SDR, `mov` ProRes 4444, and `png-sequence`. webm and HDR mp4 trip a typed `FormatNotSupportedInDistributedError` — use the in-process renderer (`executeRenderJob`) for those.
 
 ## How it works
 
@@ -142,7 +182,27 @@ The three activity functions plus their result types are also re-exported from `
 2. **Capture** — opens the page in headless Chrome, seeks frame-by-frame via `HeadlessExperimental.beginFrame` (or `Page.captureScreenshot` for transparent / non-Linux renders), captures screenshots
 3. **Encode** — pipes frames through FFmpeg (with GPU encoder detection and chunked concat). Skipped for `format: "png-sequence"`.
 4. **Mix** — extracts `<audio>` elements and mixes them into the final video. For `png-sequence`, audio is written as an `audio.aac` sidecar.
-5. **Finalize** — applies faststart for streaming-friendly MP4 (no-op for WebM, MOV, and `png-sequence`)
+5. **Finalize** — applies faststart for streaming-friendly MP4 (no-op for WebM, MOV, and `png-sequence`). For `hls`, stream-copies the encode into playlists and MPEG-TS segments instead.
+
+### Where each step lives
+
+`executeRenderJob` in `src/services/renderOrchestrator.ts` runs the stages in
+`src/services/render/stages/`, in this order:
+
+- `compileStage.ts`, `probeStage.ts`, `extractVideosStage.ts`, `audioStage.ts`
+- `src/services/render/captureCost.ts` sizes the worker count
+  (`runCaptureCalibration`, then `resolveRenderWorkerCount`)
+- `createCapturePlan` in `src/services/render/capturePlan.ts` picks the capture
+  kind: streaming, disk, segmented or HDR layered
+- capture: `captureStreamingStage.ts`, `captureSegmentedStage.ts` and
+  `captureHdrStage.ts` encode as they capture; disk capture (`captureStage.ts`)
+  encodes afterwards in `encodeStage.ts`
+- `assembleStage.ts`, except for PNG sequences and GIF, which are written
+  directly
+
+The job's `producerConfig` is used when present; otherwise `resolveConfig` in
+`packages/engine/src/config.ts` builds it. Capture, encoding and browser
+primitives are engine services (see `packages/engine/README.md`).
 
 ## Documentation
 

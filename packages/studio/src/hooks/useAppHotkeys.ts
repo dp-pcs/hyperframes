@@ -2,371 +2,278 @@ import { useCallback, useEffect, useRef } from "react";
 import { usePlayerStore } from "../player";
 import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
-import type { LeftSidebarHandle } from "../components/sidebar/LeftSidebar";
-import { STUDIO_MOTION_PATH } from "../components/editor/studioMotion";
-import { shouldHandleTimelineToggleHotkey, isEditableTarget } from "../utils/timelineDiscovery";
-import { shouldIgnoreHistoryShortcut } from "../utils/studioHelpers";
+import { dispatchLinkShortcut, type LinkShortcutCallbacks } from "./linkShortcuts";
+import { useCaptionStore } from "../captions/store";
+import {
+  applyCaptionModelToIframe,
+  isCaptionPreviewVisible,
+} from "../captions/components/CaptionOverlayUtils";
+import { type HotkeyCallbacks, dispatchModifierKey, dispatchPlainKey } from "./appHotkeysDispatch";
+import {
+  useEditHistoryActions,
+  type EditHistoryHandle,
+  type UseEditHistoryActionsOptions,
+} from "./useEditHistoryActions";
+import { useStableHandlers } from "./useStableHandlers";
+
+function iframeContentWindow(iframe: HTMLIFrameElement | null): Window | null {
+  try {
+    return iframe?.contentWindow ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function safeAddListener(t: EventTarget | null, type: string, h: EventListener, capture = false) {
+  try {
+    t?.addEventListener(type, h, capture);
+  } catch {
+    /* cross-origin */
+  }
+}
+function safeRemoveListener(
+  t: EventTarget | null,
+  type: string,
+  h: EventListener,
+  capture = false,
+) {
+  try {
+    t?.removeEventListener(type, h, capture);
+  } catch {
+    /* cross-origin */
+  }
+}
+
+// Beat edits live in an in-memory stack interleaved with file history by
+// timestamp. Undo steps to the NEWER op (beatAt >= fileAt); redo replays the
+// inverse, stepping to the OLDER op (beatAt <= fileAt). Returns true when it
+// handled the keystroke (so the file-history path is skipped).
+// fallow-ignore-next-line complexity
+function tryApplyBeatHistory(
+  direction: "undo" | "redo",
+  fileState: {
+    undo: ReadonlyArray<{ createdAt: number }>;
+    redo: ReadonlyArray<{ createdAt: number }>;
+  },
+  showToast: (message: string, tone?: "error" | "info") => void,
+): boolean {
+  const ps = usePlayerStore.getState();
+  const beatStack = direction === "undo" ? ps.beatUndo : ps.beatRedo;
+  const beatAt = beatStack[beatStack.length - 1]?.at ?? null;
+  if (beatAt === null) return false;
+  const fileStack = fileState[direction];
+  const fileAt = fileStack[fileStack.length - 1]?.createdAt ?? null;
+  if (fileAt !== null && (direction === "undo" ? beatAt < fileAt : beatAt > fileAt)) return false;
+  const label = direction === "undo" ? ps.undoBeatEdits() : ps.redoBeatEdits();
+  if (label) showToast(`${direction === "undo" ? "Undid" : "Redid"} ${label}`, "info");
+  return true;
+}
 
 // ── Types ──
 
-interface EditHistoryHandle {
-  undo: (callbacks: {
-    readFile: (path: string) => Promise<string>;
-    writeFile: (path: string, content: string) => Promise<void>;
-  }) => Promise<{
-    ok: boolean;
-    reason?: string;
-    label?: string;
-    paths?: string[];
-  }>;
-  redo: (callbacks: {
-    readFile: (path: string) => Promise<string>;
-    writeFile: (path: string, content: string) => Promise<void>;
-  }) => Promise<{
-    ok: boolean;
-    reason?: string;
-    label?: string;
-    paths?: string[];
-  }>;
-}
-
 interface UseAppHotkeysParams {
-  toggleTimelineVisibility: () => void;
-  handleTimelineElementDelete: (element: TimelineElement) => Promise<void>;
-  handleDomEditElementDelete: (selection: DomEditSelection) => Promise<void>;
+  projectId?: string | null;
+  handleTimelineElementsDelete: (elements: TimelineElement[]) => Promise<void>;
+  handleLinkEdit?: LinkShortcutCallbacks["handleLinkEdit"];
+  handleTimelineElementDeleteOnly?: LinkShortcutCallbacks["handleTimelineElementDeleteOnly"];
+  handleTimelineElementSplit: (element: TimelineElement, splitTime: number) => Promise<void>;
+  handleDomEditElementDelete: (
+    selection: DomEditSelection,
+    options?: { expandGroup?: boolean },
+  ) => Promise<void>;
   domEditSelectionRef: React.MutableRefObject<DomEditSelection | null>;
   clearDomSelectionRef: React.MutableRefObject<() => void>;
   editHistory: EditHistoryHandle;
   readOptionalProjectFile: (path: string) => Promise<string>;
   readProjectFile: (path: string) => Promise<string>;
   writeProjectFile: (path: string, content: string) => Promise<void>;
-  domEditSaveTimestampRef: React.MutableRefObject<number>;
   showToast: (message: string, tone?: "error" | "info") => void;
-  syncHistoryPreviewAfterApply: (paths: string[] | undefined) => Promise<void>;
-  waitForPendingDomEditSaves: () => Promise<void>;
-  leftSidebarRef: React.RefObject<LeftSidebarHandle | null>;
+  syncHistoryPreviewAfterApply: UseEditHistoryActionsOptions["syncHistoryPreviewAfterApply"];
+  showHistoryRestoreNow?: UseEditHistoryActionsOptions["showHistoryRestoreNow"];
+  settlePendingEdits: () => Promise<void>;
   handleCopy: () => boolean;
   handlePaste: () => Promise<void>;
   handleCut: () => Promise<boolean>;
+  handleDuplicate: () => Promise<boolean>;
+  onResetKeyframes: () => boolean;
+  onDeleteSelectedKeyframes: () => void;
+  onAfterUndoRedo?: UseEditHistoryActionsOptions["onAfterUndoRedo"];
+  onToggleRecording?: () => void;
+  /** Group the current multi-selection into a data-hf-group wrapper (⌘G). */
+  onGroupSelection?: () => void;
+  /** Ungroup the selected group wrapper (⌘⇧G). */
+  onUngroupSelection?: () => void;
+  /** Active composition path — used to decide whether undo/redo must resync the SDK session. */
+  activeCompPath?: string | null;
+  /** Clicks still select and report; the preview cannot move, edit or delete anything. */
+  readOnlyPreview: boolean;
+  /**
+   * Force-reload the SDK session after undo/redo reverts the active comp file,
+   * bypassing the self-write suppress window. Without this, the suppress window
+   * blocks the file-change reload and the SDK session stays on pre-undo content.
+   */
+  forceReloadSdkSession?: () => void;
 }
 
 // ── Hook ──
 
 export function useAppHotkeys({
-  toggleTimelineVisibility,
-  handleTimelineElementDelete,
+  projectId,
+  handleTimelineElementsDelete,
+  handleLinkEdit,
+  handleTimelineElementDeleteOnly,
+  handleTimelineElementSplit,
   handleDomEditElementDelete,
   domEditSelectionRef,
   editHistory,
   readOptionalProjectFile,
   readProjectFile,
   writeProjectFile,
-  domEditSaveTimestampRef,
   showToast,
   syncHistoryPreviewAfterApply,
-  waitForPendingDomEditSaves,
-  leftSidebarRef,
+  showHistoryRestoreNow,
+  settlePendingEdits,
   handleCopy,
   handlePaste,
   handleCut,
+  handleDuplicate,
+  onResetKeyframes,
+  onDeleteSelectedKeyframes,
+  onAfterUndoRedo,
+  onToggleRecording,
+  onGroupSelection,
+  onUngroupSelection,
+  activeCompPath,
+  forceReloadSdkSession,
+  readOnlyPreview,
 }: UseAppHotkeysParams) {
-  const previewHotkeyWindowRef = useRef<Window | null>(null);
-  const handleAppKeyDownRef = useRef<((event: KeyboardEvent) => void) | undefined>(undefined);
-  const previewHistoryHotkeyCleanupRef = useRef<(() => void) | null>(null);
-
-  // ── Timeline toggle hotkey ──
-
-  const handleTimelineToggleHotkey = useCallback(
-    (event: KeyboardEvent) => {
-      if (!shouldHandleTimelineToggleHotkey(event)) return;
-      event.preventDefault();
-      toggleTimelineVisibility();
-    },
-    [toggleTimelineVisibility],
-  );
-
-  // ── History file read/write helpers ──
-
-  const readHistoryProjectFile = useCallback(
-    async (path: string): Promise<string> => {
-      return path === STUDIO_MOTION_PATH ? readOptionalProjectFile(path) : readProjectFile(path);
-    },
-    [readOptionalProjectFile, readProjectFile],
-  );
-
-  const writeHistoryProjectFile = useCallback(
-    async (path: string, content: string): Promise<void> => {
-      domEditSaveTimestampRef.current = Date.now();
-      await writeProjectFile(path, content);
-    },
-    [domEditSaveTimestampRef, writeProjectFile],
-  );
+  const previewHistoryCleanupRef = useRef<(() => void) | null>(null);
 
   // ── Undo / Redo ──
 
-  const handleUndo = useCallback(async () => {
-    await waitForPendingDomEditSaves();
-    const result = await editHistory.undo({
-      readFile: readHistoryProjectFile,
-      writeFile: writeHistoryProjectFile,
-    });
-    if (!result.ok && result.reason === "content-mismatch") {
-      showToast("File changed outside Studio. Undo history was not applied.", "info");
-      return;
-    }
-    if (result.ok && result.label) {
-      await syncHistoryPreviewAfterApply(result.paths);
-      showToast(`Undid ${result.label}`, "info");
-    }
-  }, [
+  const fileHistory = useEditHistoryActions({
     editHistory,
-    readHistoryProjectFile,
+    readOptionalProjectFile,
+    readProjectFile,
+    writeProjectFile,
     showToast,
     syncHistoryPreviewAfterApply,
-    waitForPendingDomEditSaves,
-    writeHistoryProjectFile,
-  ]);
+    showHistoryRestoreNow,
+    waitForPendingDomEditSaves: settlePendingEdits,
+    onAfterUndoRedo,
+    activeCompPath,
+    forceReloadSdkSession,
+  });
 
-  const handleRedo = useCallback(async () => {
-    await waitForPendingDomEditSaves();
-    const result = await editHistory.redo({
-      readFile: readHistoryProjectFile,
-      writeFile: writeHistoryProjectFile,
-    });
-    if (!result.ok && result.reason === "content-mismatch") {
-      showToast("File changed outside Studio. Redo history was not applied.", "info");
-      return;
-    }
-    if (result.ok && result.label) {
-      await syncHistoryPreviewAfterApply(result.paths);
-      showToast(`Redid ${result.label}`, "info");
-    }
-  }, [
-    editHistory,
-    readHistoryProjectFile,
+  const applyHistory = useCallback(
+    async (direction: "undo" | "redo") => {
+      // Caption edits live in their own in-memory stack. While caption edit
+      // mode is active, ⌘Z must revert the caption edit — not an unrelated
+      // earlier file edit (which would ALSO leave the caption change intact).
+      const captionState = useCaptionStore.getState();
+      // Only when the caption preview is actually visible: isEditMode stays
+      // true while the preview is hidden, and eating ⌘Z
+      // there would pop invisible caption edits instead of file history.
+      if (captionState.isEditMode && isCaptionPreviewVisible()) {
+        const restored = direction === "undo" ? captionState.undo() : captionState.redo();
+        if (restored) {
+          applyCaptionModelToIframe(restored);
+          showToast(`${direction === "undo" ? "Undid" : "Redid"} caption edit`, "info");
+          return;
+        }
+        // Empty caption stack: fall through to beat/file history as usual.
+      }
+
+      // Beat edits interleave with file history by timestamp; handle them first.
+      if (tryApplyBeatHistory(direction, editHistory.state, showToast)) return;
+
+      await fileHistory[direction]();
+    },
+    [editHistory.state, fileHistory, showToast],
+  );
+
+  const handleUndo = useCallback(() => applyHistory("undo"), [applyHistory]);
+  const handleRedo = useCallback(() => applyHistory("redo"), [applyHistory]);
+
+  // ── Stable callback ref (one ref replaces fifteen) ──
+
+  const cbRef = useRef<HotkeyCallbacks>(null!);
+  cbRef.current = {
+    handleTimelineElementsDelete,
+    handleLinkEdit,
+    handleTimelineElementDeleteOnly,
+    handleTimelineElementSplit,
+    handleDomEditElementDelete,
+    handleUndo,
+    handleRedo,
+    handleCopy,
+    handlePaste,
+    handleCut,
+    handleDuplicate,
+    onResetKeyframes,
+    onDeleteSelectedKeyframes,
+    onToggleRecording,
+    onGroupSelection,
+    onUngroupSelection,
+    domEditSelectionRef,
     showToast,
-    syncHistoryPreviewAfterApply,
-    waitForPendingDomEditSaves,
-    writeHistoryProjectFile,
-  ]);
-
-  // ── Stable refs for the consolidated keydown handler ──
-
-  const handleToggleRef = useRef(handleTimelineToggleHotkey);
-  handleToggleRef.current = handleTimelineToggleHotkey;
-  const handleDeleteRef = useRef(handleTimelineElementDelete);
-  handleDeleteRef.current = handleTimelineElementDelete;
-  const handleDomEditDeleteRef = useRef(handleDomEditElementDelete);
-  handleDomEditDeleteRef.current = handleDomEditElementDelete;
-  const handleUndoRef = useRef(handleUndo);
-  handleUndoRef.current = handleUndo;
-  const handleRedoRef = useRef(handleRedo);
-  handleRedoRef.current = handleRedo;
-  const handleCopyRef = useRef(handleCopy);
-  handleCopyRef.current = handleCopy;
-  const handlePasteRef = useRef(handlePaste);
-  handlePasteRef.current = handlePaste;
-  const handleCutRef = useRef(handleCut);
-  handleCutRef.current = handleCut;
-
-  // ── Consolidated keydown handler ──
-
-  handleAppKeyDownRef.current = (event: KeyboardEvent) => {
-    // Shift+T — toggle timeline
-    handleToggleRef.current(event);
-
-    // Cmd/Ctrl+Z — undo, Cmd/Ctrl+Shift+Z or Ctrl+Y — redo
-    if (event.metaKey || event.ctrlKey) {
-      if (!shouldIgnoreHistoryShortcut(event.target)) {
-        const key = event.key.toLowerCase();
-        if (key === "z" && !event.shiftKey) {
-          event.preventDefault();
-          void handleUndoRef.current();
-          return;
-        }
-        if ((key === "z" && event.shiftKey) || (event.ctrlKey && !event.metaKey && key === "y")) {
-          event.preventDefault();
-          void handleRedoRef.current();
-          return;
-        }
-      }
-
-      // Cmd/Ctrl+1 — sidebar: Compositions tab
-      if (event.key === "1") {
-        event.preventDefault();
-        leftSidebarRef.current?.selectTab("compositions");
-        return;
-      }
-
-      // Cmd/Ctrl+2 — sidebar: Assets tab
-      if (event.key === "2") {
-        event.preventDefault();
-        leftSidebarRef.current?.selectTab("assets");
-        return;
-      }
-
-      // Cmd/Ctrl+C — copy (only preventDefault if we actually have something to copy)
-      const copyPasteKey = event.key.toLowerCase();
-      if (
-        copyPasteKey === "c" &&
-        !event.shiftKey &&
-        !event.altKey &&
-        !isEditableTarget(event.target)
-      ) {
-        if (handleCopyRef.current()) {
-          event.preventDefault();
-        }
-        return;
-      }
-
-      // Cmd/Ctrl+V — paste
-      if (
-        copyPasteKey === "v" &&
-        !event.shiftKey &&
-        !event.altKey &&
-        !isEditableTarget(event.target)
-      ) {
-        event.preventDefault();
-        void handlePasteRef.current();
-        return;
-      }
-
-      // Cmd/Ctrl+X — cut (only preventDefault if there's a selected element to cut)
-      if (
-        copyPasteKey === "x" &&
-        !event.shiftKey &&
-        !event.altKey &&
-        !isEditableTarget(event.target)
-      ) {
-        const hasSelection =
-          !!usePlayerStore.getState().selectedElementId || !!domEditSelectionRef.current;
-        if (hasSelection) {
-          event.preventDefault();
-          void handleCutRef.current();
-        }
-        return;
-      }
-    }
-
-    // Delete / Backspace — remove selected element (timeline clip or preview selection)
-    if (
-      (event.key === "Delete" || event.key === "Backspace") &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey &&
-      !isEditableTarget(event.target)
-    ) {
-      const { selectedElementId, elements } = usePlayerStore.getState();
-      if (selectedElementId) {
-        const element = elements.find((el) => (el.key ?? el.id) === selectedElementId);
-        if (element) {
-          event.preventDefault();
-          void handleDeleteRef.current(element);
-          return;
-        }
-      }
-      const domSelection = domEditSelectionRef.current;
-      if (domSelection) {
-        event.preventDefault();
-        void handleDomEditDeleteRef.current(domSelection);
-      }
-    }
+    readOnlyPreview,
   };
 
-  // ── Window keydown listener ──
+  // ── Keydown dispatch ──
+
+  const handleAppKeyDown = useCallback((event: KeyboardEvent) => {
+    const cb = cbRef.current;
+    const key = event.key.toLowerCase();
+    if (dispatchLinkShortcut(event, cb)) return;
+    if (event.metaKey || event.ctrlKey) {
+      dispatchModifierKey(event, key, cb);
+      return;
+    }
+    dispatchPlainKey(event, key, cb);
+  }, []);
 
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
-    function handleAppKeyDown(event: KeyboardEvent) {
-      handleAppKeyDownRef.current?.(event);
-    }
     window.addEventListener("keydown", handleAppKeyDown, true);
     return () => window.removeEventListener("keydown", handleAppKeyDown, true);
-  }, []);
+  }, [handleAppKeyDown]);
 
-  // ── Preview iframe keydown forwarding ──
+  // ── Preview iframe forwarding ──
 
-  const previewAppKeyDownHandler = useCallback((event: KeyboardEvent) => {
-    handleAppKeyDownRef.current?.(event);
-  }, []);
-
-  const syncPreviewTimelineHotkey = useCallback(
+  /**
+   * Give the preview iframe the app's hotkeys: clicking the canvas puts focus in there.
+   * Runs on every iframe LOAD: a reload keeps the element and WindowProxy but replaces the
+   * inner window holding the listeners, which once left Delete dead after the first reload.
+   */
+  const syncPreviewHotkeys = useCallback(
     (iframe: HTMLIFrameElement | null) => {
-      const nextWindow = iframe?.contentWindow ?? null;
-      if (previewHotkeyWindowRef.current === nextWindow) return;
-      if (previewHotkeyWindowRef.current) {
-        previewHotkeyWindowRef.current.removeEventListener("keydown", previewAppKeyDownHandler);
-      }
-      previewHotkeyWindowRef.current = nextWindow;
-      nextWindow?.addEventListener("keydown", previewAppKeyDownHandler, true);
+      previewHistoryCleanupRef.current?.();
+      previewHistoryCleanupRef.current = null;
+      const win = iframeContentWindow(iframe);
+      if (!win) return;
+      const appHandler = handleAppKeyDown as EventListener;
+      // Window only: a capture listener on the document too would run it twice per press.
+      safeAddListener(win, "keydown", appHandler, true);
+      previewHistoryCleanupRef.current = () => safeRemoveListener(win, "keydown", appHandler, true);
     },
-    [previewAppKeyDownHandler],
+    [handleAppKeyDown],
   );
 
   useEffect(
     () => () => {
-      if (previewHotkeyWindowRef.current) {
-        previewHotkeyWindowRef.current.removeEventListener("keydown", previewAppKeyDownHandler);
-        previewHotkeyWindowRef.current = null;
-      }
-    },
-    [previewAppKeyDownHandler],
-  );
-
-  // ── History hotkey for iframe forwarding ──
-
-  const handleHistoryHotkey = useCallback((event: KeyboardEvent) => {
-    if (!(event.metaKey || event.ctrlKey)) return;
-    if (shouldIgnoreHistoryShortcut(event.target)) return;
-    const key = event.key.toLowerCase();
-    if (key === "z" && !event.shiftKey) {
-      event.preventDefault();
-      void handleUndoRef.current();
-      return;
-    }
-    if ((key === "z" && event.shiftKey) || (event.ctrlKey && !event.metaKey && key === "y")) {
-      event.preventDefault();
-      void handleRedoRef.current();
-    }
-  }, []);
-
-  const syncPreviewHistoryHotkey = useCallback(
-    (iframe: HTMLIFrameElement | null) => {
-      previewHistoryHotkeyCleanupRef.current?.();
-      previewHistoryHotkeyCleanupRef.current = null;
-
-      const win = iframe?.contentWindow ?? null;
-      let doc: Document | null = null;
-      try {
-        doc = iframe?.contentDocument ?? null;
-      } catch {
-        doc = null;
-      }
-      if (!win && !doc) return;
-
-      win?.addEventListener("keydown", handleHistoryHotkey, true);
-      doc?.addEventListener("keydown", handleHistoryHotkey, true);
-      previewHistoryHotkeyCleanupRef.current = () => {
-        win?.removeEventListener("keydown", handleHistoryHotkey, true);
-        doc?.removeEventListener("keydown", handleHistoryHotkey, true);
-      };
-    },
-    [handleHistoryHotkey],
-  );
-
-  useEffect(
-    () => () => {
-      previewHistoryHotkeyCleanupRef.current?.();
-      previewHistoryHotkeyCleanupRef.current = null;
+      previewHistoryCleanupRef.current?.();
+      previewHistoryCleanupRef.current = null;
     },
     [],
   );
 
-  return {
-    handleUndo,
-    handleRedo,
-    syncPreviewTimelineHotkey,
-    syncPreviewHistoryHotkey,
-    handleTimelineToggleHotkey,
-  };
+  return useStableHandlers(
+    {
+      handleUndo,
+      handleRedo,
+      syncPreviewHotkeys,
+    },
+    projectId,
+  );
 }

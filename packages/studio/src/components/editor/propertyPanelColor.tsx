@@ -11,6 +11,8 @@ import {
 } from "./colorValue";
 import { resolveFloatingPanelPosition, type FloatingPosition } from "./floatingPanel";
 import { colorFromCss, FIELD, LABEL } from "./propertyPanelHelpers";
+import { useTrackDesignInput } from "../../contexts/DesignPanelInputContext";
+import { useInspectorGestureTransaction } from "./useInspectorGestureTransaction";
 
 const COLOR_PICKER_SIZE = { width: 292, height: 386 };
 
@@ -28,7 +30,10 @@ function ColorSlider({
   background,
   thumbColor,
   disabled,
-  onCommit,
+  onPreview,
+  onInteractionStart,
+  onInteractionEnd,
+  onInteractionCancel,
 }: {
   label: string;
   value: number;
@@ -39,21 +44,24 @@ function ColorSlider({
   background: string;
   thumbColor: string;
   disabled?: boolean;
-  onCommit: (nextValue: number) => void;
+  onPreview: (nextValue: number) => void;
+  onInteractionStart: () => void;
+  onInteractionEnd: () => void;
+  onInteractionCancel: () => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const percent = ((value - min) / (max - min)) * 100;
 
-  const commitFromClientX = (clientX: number) => {
+  const previewFromClientX = (clientX: number) => {
     const rect = trackRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
     const rawValue = min + ((clientX - rect.left) / rect.width) * (max - min);
     const stepped = Math.round(rawValue / step) * step;
-    onCommit(Math.max(min, Math.min(max, stepped)));
+    onPreview(Math.max(min, Math.min(max, stepped)));
   };
 
-  const commitKeyboardValue = (nextValue: number) => {
-    onCommit(Math.max(min, Math.min(max, nextValue)));
+  const previewKeyboardValue = (nextValue: number) => {
+    onPreview(Math.max(min, Math.min(max, nextValue)));
   };
 
   return (
@@ -71,35 +79,58 @@ function ColorSlider({
         aria-valuemax={max}
         aria-valuenow={value}
         aria-disabled={disabled}
-        className={`relative h-4 rounded-full border border-neutral-700 shadow-[inset_0_1px_2px_rgba(0,0,0,0.55)] outline-none focus:border-[#f5a400] focus:ring-2 focus:ring-[#f5a400]/40 ${
+        className={`relative h-4 rounded-full border border-neutral-700 shadow-[inset_0_1px_2px_rgba(0,0,0,0.55)] outline-hidden focus:border-panel-accent focus:ring-2 focus:ring-panel-accent/40 ${
           disabled ? "cursor-not-allowed opacity-50" : "cursor-ew-resize"
         }`}
         style={{ background }}
         onPointerDown={(event) => {
           if (disabled) return;
+          onInteractionStart();
           event.currentTarget.setPointerCapture(event.pointerId);
-          commitFromClientX(event.clientX);
+          previewFromClientX(event.clientX);
         }}
+        onPointerUp={(event) => {
+          onInteractionEnd();
+          event.currentTarget.blur();
+        }}
+        onPointerCancel={onInteractionCancel}
         onPointerMove={(event) => {
           if (disabled || event.buttons !== 1) return;
-          commitFromClientX(event.clientX);
+          previewFromClientX(event.clientX);
         }}
         onKeyDown={(event) => {
           if (disabled) return;
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onInteractionCancel();
+            return;
+          }
           if (event.key === "ArrowRight" || event.key === "ArrowUp") {
             event.preventDefault();
-            commitKeyboardValue(value + step);
+            onInteractionStart();
+            previewKeyboardValue(value + step);
           } else if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
             event.preventDefault();
-            commitKeyboardValue(value - step);
+            onInteractionStart();
+            previewKeyboardValue(value - step);
           } else if (event.key === "Home") {
             event.preventDefault();
-            commitKeyboardValue(min);
+            onInteractionStart();
+            previewKeyboardValue(min);
           } else if (event.key === "End") {
             event.preventDefault();
-            commitKeyboardValue(max);
+            onInteractionStart();
+            previewKeyboardValue(max);
           }
         }}
+        onKeyUp={(event) => {
+          if (
+            ["ArrowRight", "ArrowUp", "ArrowLeft", "ArrowDown", "Home", "End"].includes(event.key)
+          ) {
+            onInteractionEnd();
+          }
+        }}
+        onBlur={onInteractionEnd}
       >
         <div
           className="pointer-events-none absolute top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.85),0_6px_14px_rgba(0,0,0,0.5)]"
@@ -118,18 +149,29 @@ export function ColorField({
   label,
   value,
   disabled,
+  onReset,
+  flat,
+  mixed,
+  onPreview,
   onCommit,
 }: {
   label: string;
   value: string;
   disabled?: boolean;
+  onReset?: () => void;
+  flat?: boolean;
+  mixed?: boolean;
+  onPreview?: (nextValue: string) => void;
   onCommit: (nextValue: string) => void;
 }) {
+  const track = useTrackDesignInput();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [panelPosition, setPanelPosition] = useState<FloatingPosition | null>(null);
   const [draftColor, setDraftColor] = useState<ParsedColor>(() => colorFromCss(value));
+  const draftColorRef = useRef(draftColor);
+  draftColorRef.current = draftColor;
   const [hexDraft, setHexDraft] = useState(() => toHexColor(colorFromCss(value)).toUpperCase());
   const hsv = rgbToHsv(draftColor);
   const hueColor = formatCssColor({
@@ -141,6 +183,54 @@ export function ColorField({
   const saturationPercent = Math.round(hsv.saturation * 100);
   const brightnessPercent = Math.round(hsv.value * 100);
   const alphaPercent = Math.round(draftColor.alpha * 100);
+
+  const updateColorDraft = useCallback((nextValue: string, source: "hex" | "picker") => {
+    const nextColor = parseCssColor(nextValue);
+    if (!nextColor) return;
+    setDraftColor(nextColor);
+    if (source === "picker") setHexDraft(toHexColor(nextColor).toUpperCase());
+  }, []);
+  const resolveColorGestureValue = useCallback((nextValue: string) => {
+    const source = nextValue.startsWith("#") ? "hex" : "picker";
+    // Only a COMPLETE hex resolves, so a half-typed one neither previews nor
+    // commits. 3 and 6 digits count as complete (the field edits RGB only): gating on
+    // 6 alone silently dropped #F00 and friends, which the old onBlur committed.
+    if (source === "hex" && !/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(nextValue)) return null;
+    const nextColor = parseCssColor(nextValue);
+    if (!nextColor) return null;
+    return {
+      source,
+      value: formatCssColor({
+        ...nextColor,
+        alpha: source === "hex" ? draftColorRef.current.alpha : nextColor.alpha,
+      }),
+    } as const;
+  }, []);
+  const persistColorValue = useCallback(
+    (nextValue: string) => {
+      if (nextValue !== value) track("color", label);
+      onCommit(nextValue);
+    },
+    [label, onCommit, track, value],
+  );
+  const {
+    begin: beginColorGesture,
+    preview: previewColorGesture,
+    settle: settleColorGesture,
+    cancel: cancelColorGesture,
+  } = useInspectorGestureTransaction({
+    sourceValue: formatCssColor(colorFromCss(value)),
+    onPreview: (nextValue) => {
+      const resolved = resolveColorGestureValue(nextValue);
+      if (!resolved) return;
+      updateColorDraft(resolved.value, resolved.source);
+      onPreview?.(resolved.value);
+    },
+    onCommit: (nextValue) => {
+      const resolved = resolveColorGestureValue(nextValue);
+      if (resolved) persistColorValue(resolved.value);
+    },
+  });
 
   useEffect(() => {
     const nextColor = colorFromCss(value);
@@ -178,14 +268,23 @@ export function ColorField({
 
   useEffect(() => {
     if (!open) return;
+    // Move focus into the picker on open and restore it on close so Escape
+    // and keyboard editing work without a pointer round-trip.
+    panelRef.current?.focus();
+    const restoreTarget = buttonRef.current;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
       if (panelRef.current?.contains(target) || buttonRef.current?.contains(target)) return;
+      settleColorGesture();
       setOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        cancelColorGesture();
+        setOpen(false);
+        restoreTarget?.focus();
+      }
     };
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
@@ -193,12 +292,10 @@ export function ColorField({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open]);
+  }, [cancelColorGesture, open, settleColorGesture]);
 
-  const commitColor = (nextColor: ParsedColor) => {
-    setDraftColor(nextColor);
-    setHexDraft(toHexColor(nextColor).toUpperCase());
-    onCommit(formatCssColor(nextColor));
+  const previewColor = (nextColor: ParsedColor) => {
+    previewColorGesture(formatCssColor(nextColor));
   };
 
   const commitHsv = (nextHsv: { hue?: number; saturation?: number; value?: number }) => {
@@ -207,7 +304,7 @@ export function ColorField({
       saturation: nextHsv.saturation ?? hsv.saturation,
       value: nextHsv.value ?? hsv.value,
     });
-    commitColor({ ...rgb, alpha: draftColor.alpha });
+    previewColor({ ...rgb, alpha: draftColorRef.current.alpha });
   };
 
   const updateSaturationValue = (clientX: number, clientY: number, target: HTMLDivElement) => {
@@ -217,19 +314,21 @@ export function ColorField({
     commitHsv({ saturation, value: nextValue });
   };
 
-  const handleHexCommit = (nextHex: string) => {
+  const handleHexChange = (nextHex: string) => {
     setHexDraft(nextHex);
     const normalized = nextHex.trim().startsWith("#") ? nextHex.trim() : `#${nextHex.trim()}`;
-    const parsed = parseCssColor(normalized);
-    if (!parsed) return;
-    commitColor({ ...parsed, alpha: draftColor.alpha });
+    beginColorGesture();
+    previewColorGesture(normalized);
   };
 
   const picker = open
     ? createPortal(
         <div
           ref={panelRef}
-          className="fixed z-[9999] w-[292px] overflow-hidden rounded-2xl border border-neutral-700 bg-neutral-950 shadow-2xl shadow-black/50"
+          role="dialog"
+          aria-label={`${label} color picker`}
+          tabIndex={-1}
+          className="fixed z-9999 w-[292px] overflow-hidden rounded-2xl border border-neutral-700 bg-neutral-950 shadow-2xl shadow-black/50 outline-hidden"
           style={{
             left: panelPosition?.left ?? -9999,
             top: panelPosition?.top ?? -9999,
@@ -242,7 +341,10 @@ export function ColorField({
             </div>
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => {
+                settleColorGesture();
+                setOpen(false);
+              }}
               className="flex h-7 w-7 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:bg-neutral-900 hover:text-neutral-200"
               aria-label="Close color picker"
             >
@@ -254,6 +356,7 @@ export function ColorField({
               className="relative h-36 cursor-crosshair overflow-hidden rounded-xl border border-neutral-700 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
               style={{ backgroundColor: hueColor }}
               onPointerDown={(event) => {
+                beginColorGesture();
                 event.currentTarget.setPointerCapture(event.pointerId);
                 updateSaturationValue(event.clientX, event.clientY, event.currentTarget);
               }}
@@ -261,9 +364,11 @@ export function ColorField({
                 if (event.buttons !== 1) return;
                 updateSaturationValue(event.clientX, event.clientY, event.currentTarget);
               }}
+              onPointerUp={settleColorGesture}
+              onPointerCancel={cancelColorGesture}
             >
-              <div className="absolute inset-0 bg-gradient-to-r from-white to-transparent" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black to-transparent" />
+              <div className="absolute inset-0 bg-linear-to-r from-white to-transparent" />
+              <div className="absolute inset-0 bg-linear-to-t from-black to-transparent" />
               <div
                 className="pointer-events-none absolute top-0 h-full w-px -translate-x-1/2 bg-white/70 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] mix-blend-difference"
                 style={{ left: `${hsv.saturation * 100}%` }}
@@ -284,14 +389,14 @@ export function ColorField({
 
             <div className="flex min-w-0 items-center gap-3">
               <div
-                className="h-9 w-9 flex-shrink-0 rounded-xl border border-neutral-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                className="h-9 w-9 shrink-0 rounded-xl border border-neutral-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
                 style={{ backgroundColor: currentColor }}
               />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[11px] font-medium text-neutral-100">
                   {currentColor}
                 </div>
-                <div className="mt-0.5 text-[9px] uppercase tracking-[0.12em] text-neutral-600">
+                <div className="mt-0.5 text-[9px] text-neutral-600">
                   S {saturationPercent}% · B {brightnessPercent}% · A {alphaPercent}%
                 </div>
               </div>
@@ -307,7 +412,10 @@ export function ColorField({
               background="linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)"
               thumbColor={hueColor}
               disabled={disabled}
-              onCommit={(nextHue) => commitHsv({ hue: nextHue })}
+              onInteractionStart={beginColorGesture}
+              onPreview={(nextHue) => commitHsv({ hue: nextHue })}
+              onInteractionEnd={settleColorGesture}
+              onInteractionCancel={cancelColorGesture}
             />
 
             <ColorSlider
@@ -320,15 +428,21 @@ export function ColorField({
               background={`linear-gradient(90deg, transparent, ${opaqueColor})`}
               thumbColor={currentColor}
               disabled={disabled}
-              onCommit={(nextAlpha) => commitColor({ ...draftColor, alpha: nextAlpha })}
+              onInteractionStart={beginColorGesture}
+              onPreview={(nextAlpha) =>
+                previewColor({ ...draftColorRef.current, alpha: nextAlpha })
+              }
+              onInteractionEnd={settleColorGesture}
+              onInteractionCancel={cancelColorGesture}
             />
 
             <label className="grid gap-1.5">
               <span className={LABEL}>Hex</span>
               <input
                 value={hexDraft}
-                onChange={(event) => handleHexCommit(event.target.value)}
-                className={`${FIELD} h-10 w-full text-[11px] font-medium outline-none`}
+                onChange={(event) => handleHexChange(event.target.value)}
+                onBlur={settleColorGesture}
+                className={`${FIELD} h-10 w-full text-[11px] font-medium outline-hidden`}
                 spellCheck={false}
               />
             </label>
@@ -340,15 +454,62 @@ export function ColorField({
 
   const openPicker = () => {
     if (disabled) return;
+    if (open) settleColorGesture();
     setOpen((current) => !current);
     if (!open) {
       requestAnimationFrame(updatePanelPosition);
     }
   };
 
+  if (flat) {
+    return (
+      <div className="flex min-h-[30px] items-center justify-between">
+        <span className="text-[11px] text-panel-text-2">{label}</span>
+        <button
+          type="button"
+          data-flat-color-trigger="true"
+          disabled={disabled}
+          aria-label={`Pick ${label.toLowerCase()} color`}
+          ref={buttonRef}
+          onClick={openPicker}
+          className="flex items-center gap-2 disabled:cursor-not-allowed"
+        >
+          <span
+            className="h-4 w-4 shrink-0 rounded-[4px]"
+            style={{ backgroundColor: open ? currentColor : value || "transparent" }}
+          />
+          <span className="font-mono text-[11px] text-panel-text-0">
+            {open ? currentColor : value}
+          </span>
+          {mixed && (
+            <span
+              data-color-mixed-indicator="true"
+              className="rounded-sm bg-panel-hover px-1.5 py-0.5 text-[9px] font-medium text-panel-text-4"
+            >
+              Mixed
+            </span>
+          )}
+        </button>
+        {picker}
+      </div>
+    );
+  }
+
   return (
     <div className="grid min-w-0 gap-1.5">
-      <span className={LABEL}>{label}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className={LABEL}>{label}</span>
+        {onReset && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onReset}
+            className="rounded-sm bg-panel-hover px-1.5 py-0.5 text-[9px] font-medium text-panel-text-4 transition-colors hover:text-panel-text-0 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Reset
+          </button>
+        )}
+      </div>
       <button
         type="button"
         disabled={disabled}
@@ -358,12 +519,20 @@ export function ColorField({
         className={`${FIELD} flex items-center gap-3 text-left hover:border-neutral-700 disabled:cursor-not-allowed ${open ? "border-neutral-600" : ""}`}
       >
         <div
-          className="relative h-7 w-7 flex-shrink-0 overflow-hidden rounded-lg border border-neutral-700 bg-neutral-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+          className="relative h-7 w-7 shrink-0 overflow-hidden rounded-lg border border-neutral-700 bg-neutral-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
           style={{ backgroundColor: value || "transparent" }}
         />
         <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-neutral-100">
           {value}
         </span>
+        {mixed && (
+          <span
+            data-color-mixed-indicator="true"
+            className="rounded-sm bg-panel-hover px-1.5 py-0.5 text-[9px] font-medium text-panel-text-4"
+          >
+            Mixed
+          </span>
+        )}
       </button>
       {picker}
     </div>

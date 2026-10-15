@@ -1,7 +1,11 @@
-import { useEffect } from "react";
+import { useLivePreviewIframe } from "../player/store/previewIframeStore";
+import { buildProjectApiPath } from "../utils/projectRouting";
+import { useEffect, useRef } from "react";
 import { useCaptionStore } from "../captions/store";
+import { acceptStudioRuntimeMessage } from "../player/lib/runtimeProtocol";
 import { useCaptionSync } from "../captions/hooks/useCaptionSync";
 import { parseCaptionComposition } from "../captions/parser";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
 interface UseCaptionDetectionParams {
   projectId: string | null;
@@ -24,6 +28,25 @@ export function useCaptionDetection({
   captionSync,
   setRightCollapsed,
 }: UseCaptionDetectionParams) {
+  const livePreviewIframe = useLivePreviewIframe();
+  // Switching compositions must drop the previous comp's caption state — a
+  // stale model + full-canvas overlay otherwise blocks normal element editing
+  // on the new composition (and edit mode could never be exited).
+  const prevCompPathRef = useRef<string | null>(activeCompPath);
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
+    if (prevCompPathRef.current !== activeCompPath) {
+      prevCompPathRef.current = activeCompPath;
+      const store = useCaptionStore.getState();
+      if (store.model || store.isEditMode) {
+        // Flush the last debounced caption edit before the reset destroys the
+        // model — otherwise a save landing after the switch writes nothing.
+        store.retrySave?.();
+        store.reset();
+      }
+    }
+  }, [activeCompPath]);
+
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     if (!projectId) return;
@@ -31,7 +54,9 @@ export function useCaptionDetection({
     let activating = false;
 
     const tryActivateCaptions = () => {
-      if (useCaptionStore.getState().isEditMode || activating) {
+      const captionState = useCaptionStore.getState();
+      // `dismissed` = user explicitly exited caption editing; don't re-trap them.
+      if (captionState.isEditMode || captionState.dismissed || activating) {
         return;
       }
 
@@ -86,7 +111,7 @@ export function useCaptionDetection({
 
       activating = true;
       const srcPath = captionSrcPath;
-      fetch(`/api/projects/${projectId}/files/${encodeURIComponent(srcPath)}`)
+      studioApiFetch(buildProjectApiPath(projectId, `/files/${encodeURIComponent(srcPath)}`))
         .then((r) => r.json())
         .then((data: { content?: string }) => {
           if (!data.content || !doc || !win || useCaptionStore.getState().isEditMode) return;
@@ -109,8 +134,10 @@ export function useCaptionDetection({
     };
 
     const handleMessage = (e: MessageEvent) => {
+      if (!e.source || e.source !== previewIframeRef.current?.contentWindow) return;
       const data = e.data;
       if (data?.source === "hf-preview" && (data?.type === "state" || data?.type === "timeline")) {
+        if (!acceptStudioRuntimeMessage(data)) return;
         tryActivateCaptions();
       }
     };
@@ -121,7 +148,7 @@ export function useCaptionDetection({
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [activeCompPath, projectId, compIdToSrc, captionSync, previewIframeRef]);
+  }, [activeCompPath, projectId, compIdToSrc, captionSync, previewIframeRef, livePreviewIframe]);
 
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {

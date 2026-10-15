@@ -8,6 +8,7 @@ import {
   TEXT_STYLES,
   ZOOM_CONTAINER_STYLES,
 } from "./constants.js";
+import { gsapCdnDist } from "../gsapCdn.js";
 
 describe("generateBaseHtml", () => {
   it("generates valid HTML structure with DOCTYPE", () => {
@@ -76,6 +77,10 @@ describe("getStageStyles", () => {
 });
 
 describe("constants", () => {
+  it("GSAP_CDN is the default gsap from the one gsap-cdn owner", () => {
+    expect(GSAP_CDN).toBe(`${gsapCdnDist()}gsap.min.js`);
+  });
+
   it("GSAP_CDN is a valid URL", () => {
     expect(GSAP_CDN).toMatch(/^https:\/\//);
     expect(GSAP_CDN).toContain("gsap");
@@ -100,6 +105,7 @@ describe("constants", () => {
   });
 
   it("TEXT_STYLES includes font and alignment", () => {
+    expect(TEXT_STYLES).toContain('font-family: "Inter"');
     expect(TEXT_STYLES).toContain("font-size: 48px");
     expect(TEXT_STYLES).toContain("font-weight: bold");
     expect(TEXT_STYLES).toContain("color: white");

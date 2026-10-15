@@ -1,14 +1,42 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { __testing } from "./videoFrameInjector.js";
+import { dirname, join } from "node:path";
+import { type Page } from "puppeteer-core";
+import { COMPLETE_SENTINEL } from "./extractionCache.js";
+
+// Hoist mocks before importing the module under test so the mock factory wins.
+// The cache-hygiene block exercises createVideoFrameInjector against stubbed
+// page-side primitives so we can assert on Node-side state (cache poisoning)
+// without standing up a real browser.
+const { injectVideoFramesBatchMock, syncVideoFrameVisibilityMock } = vi.hoisted(() => ({
+  injectVideoFramesBatchMock: vi.fn<
+    (page: Page, updates: Array<{ videoId: string; dataUri: string }>) => Promise<string[]>
+  >(async (_page, updates) => updates.map((u) => u.videoId)),
+  syncVideoFrameVisibilityMock: vi.fn<(page: Page, ids: string[]) => Promise<void>>(
+    async () => undefined,
+  ),
+}));
+
+vi.mock("./screenshotService.js", () => ({
+  injectVideoFramesBatch: injectVideoFramesBatchMock,
+  syncVideoFrameVisibility: syncVideoFrameVisibilityMock,
+}));
+
+import { __testing, createVideoFrameInjector } from "./videoFrameInjector.js";
+import { type ExtractedFrames, FrameLookupTable } from "./videoFrameExtractor.js";
+import { type BeforeCaptureHook } from "./frameCapture.js";
 import { DEFAULT_CONFIG } from "../config.js";
 
-const { createFrameSourceCache } = __testing;
+const { createFrameSourceCache, CACHE_TOUCH_THROTTLE_MS } = __testing;
 
 const SHARED_STATS = { evictions: 0, oversizedRejections: 0 };
+
+// Bypass the on-disk frame cache by handing back a synthetic data URI.
+function inlineResolver(framePath: string): string {
+  return `data:image/png;base64,fake-${framePath}`;
+}
 
 describe("frame source cache eviction", () => {
   let dir: string;
@@ -141,5 +169,304 @@ describe("frame source cache eviction", () => {
   it("stats() exposes counters used by telemetry", async () => {
     const cache = createFrameSourceCache(1, Number.MAX_SAFE_INTEGER);
     expect(cache.stats()).toMatchObject({ ...SHARED_STATS, entries: 0, bytes: 0 });
+  });
+});
+
+describe("createVideoFrameInjector cache hygiene against page-side skips", () => {
+  // Build a minimal FrameLookupTable stand-in that returns one fixed payload
+  // for every time so we can drive the hook deterministically. The real
+  // table is exercised exhaustively in videoFrameExtractor.test.ts.
+  function fakeTable(payload: { videoId: string; framePath: string; frameIndex: number }) {
+    return {
+      frameDirs: () => [],
+      getActiveFramePayloads: () =>
+        new Map([
+          [payload.videoId, { framePath: payload.framePath, frameIndex: payload.frameIndex }],
+        ]),
+    } as unknown as FrameLookupTable;
+  }
+
+  function makeGpuInjector() {
+    const evaluate = vi.fn(async () => undefined);
+    const page = { evaluate } as unknown as Page;
+    const hook = createVideoFrameInjector(
+      fakeTable({ videoId: "facet", framePath: "/f", frameIndex: 3 }),
+      { frameSrcResolver: inlineResolver },
+    );
+    return { evaluate, page, hook };
+  }
+
+  beforeEach(() => {
+    injectVideoFramesBatchMock.mockReset();
+    syncVideoFrameVisibilityMock.mockReset();
+    syncVideoFrameVisibilityMock.mockResolvedValue(undefined);
+  });
+
+  it("does not poison the lastInjected cache when the page reports zero ids injected", async () => {
+    // Regression for the agentic-finecut scenario after PR #1028's ancestor
+    // skip: when injectVideoFramesBatch silently drops a video (its sub-comp
+    // host is hidden), the caller used to record `lastInjectedFrame[v] = N`
+    // anyway. On the next frame, if the source frameIndex is unchanged
+    // (low-fps source, multiple output frames per source frame, or
+    // non-frame-aligned host start), the cache short-circuits the second
+    // call and the host's first visible frame paints blank because the
+    // replacement <img> was never created.
+    //
+    // Pin the contract: when the page returns `[]` (no ids actually
+    // injected), the cache must not record those frameIndexes, so a follow-
+    // up call at the same frameIndex still issues an inject.
+    // The injector calls page.evaluate after injecting frames (GPU reseek);
+    // stub it so these cache-hygiene cases exercise the real code path.
+    const fakePage = { evaluate: async () => undefined } as unknown as Page;
+    const hook = createVideoFrameInjector(
+      fakeTable({ videoId: "pip", framePath: "/p", frameIndex: 5 }),
+      {
+        frameSrcResolver: inlineResolver,
+      },
+    );
+    expect(hook).not.toBeNull();
+
+    // First call: simulate the ancestor-hidden skip — page-side reports it
+    // injected nothing.
+    injectVideoFramesBatchMock.mockResolvedValueOnce([]);
+    await hook!(fakePage, 0);
+    expect(injectVideoFramesBatchMock).toHaveBeenCalledTimes(1);
+    expect(injectVideoFramesBatchMock).toHaveBeenLastCalledWith(fakePage, [
+      { videoId: "pip", dataUri: "data:image/png;base64,fake-/p" },
+    ]);
+
+    // Second call: same frameIndex, but the previous call did not really
+    // paint. The cache must NOT short-circuit; the inject must run again.
+    injectVideoFramesBatchMock.mockResolvedValueOnce(["pip"]);
+    await hook!(fakePage, 0);
+    expect(injectVideoFramesBatchMock).toHaveBeenCalledTimes(2);
+    expect(injectVideoFramesBatchMock).toHaveBeenLastCalledWith(fakePage, [
+      { videoId: "pip", dataUri: "data:image/png;base64,fake-/p" },
+    ]);
+  });
+
+  it("does cache normally when the page reports the id as injected", async () => {
+    // Counter-test: when injection succeeds for a videoId, the cache must
+    // record it and a second call at the same frameIndex must short-circuit.
+    // This pins the happy path so a future refactor can't trade the skip
+    // bug for a never-cache regression.
+    // The injector calls page.evaluate after injecting frames (GPU reseek);
+    // stub it so these cache-hygiene cases exercise the real code path.
+    const fakePage = { evaluate: async () => undefined } as unknown as Page;
+    const hook = createVideoFrameInjector(
+      fakeTable({ videoId: "pip", framePath: "/p", frameIndex: 5 }),
+      {
+        frameSrcResolver: inlineResolver,
+      },
+    );
+
+    injectVideoFramesBatchMock.mockResolvedValueOnce(["pip"]);
+    await hook!(fakePage, 0);
+    expect(injectVideoFramesBatchMock).toHaveBeenCalledTimes(1);
+
+    await hook!(fakePage, 0);
+    // Cache hit — no second inject for the same frameIndex.
+    expect(injectVideoFramesBatchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reinjects frame zero when a whole-chunk retry uses a fresh hook and page", async () => {
+    const table = fakeTable({ videoId: "hero", framePath: "/frame-0", frameIndex: 0 });
+    const beginFramePage = { evaluate: async () => undefined } as unknown as Page;
+    const screenshotPage = { evaluate: async () => undefined } as unknown as Page;
+    const beginFrameHook = createVideoFrameInjector(table, {
+      frameSrcResolver: inlineResolver,
+    });
+    const screenshotRetryHook = createVideoFrameInjector(table, {
+      frameSrcResolver: inlineResolver,
+    });
+
+    injectVideoFramesBatchMock.mockResolvedValue(["hero"]);
+    await beginFrameHook!(beginFramePage, 0);
+    await screenshotRetryHook!(screenshotPage, 0);
+
+    expect(injectVideoFramesBatchMock).toHaveBeenCalledTimes(2);
+    expect(injectVideoFramesBatchMock.mock.calls[0]?.[0]).toBe(beginFramePage);
+    expect(injectVideoFramesBatchMock.mock.calls[1]?.[0]).toBe(screenshotPage);
+  });
+
+  // Regression: WebGL/WebGPU compositions that sample a <video> as a texture
+  // render on `hf-seek` BEFORE frames are injected. After injecting the
+  // decoded frames, the hook must re-render the GPU adapters at the same time
+  // (window.__hfReseekGpu) so they re-upload their textures from the fresh
+  // frames — otherwise the facet flickers / goes black non-deterministically.
+  it("re-renders GPU adapters after injecting frames (post-injection reseek)", async () => {
+    const { evaluate, page, hook } = makeGpuInjector();
+
+    injectVideoFramesBatchMock.mockResolvedValueOnce(["facet"]);
+    await hook!(page, 1.5);
+
+    const reseekCall = evaluate.mock.calls.find((call) => call[1] === 1.5);
+    expect(reseekCall).toBeDefined();
+    // The evaluated page function invokes window.__hfReseekGpu(time).
+    const pageFn = reseekCall![0] as (t: number) => void;
+    const reseek = vi.fn();
+    (globalThis as unknown as { window?: unknown }).window = { __hfReseekGpu: reseek };
+    pageFn(1.5);
+    delete (globalThis as unknown as { window?: unknown }).window;
+    expect(reseek).toHaveBeenCalledWith(1.5);
+  });
+
+  it("does not reseek GPU when the page injected no frames", async () => {
+    const { evaluate, page, hook } = makeGpuInjector();
+
+    // Page dropped the video (e.g. hidden host) → nothing injected → no reseek.
+    injectVideoFramesBatchMock.mockResolvedValueOnce([]);
+    await hook!(page, 1.5);
+
+    expect(evaluate.mock.calls.some((call) => call[1] === 1.5)).toBe(false);
+  });
+});
+
+describe("createVideoFrameInjector holds video frames for motion blur (#5144)", () => {
+  // Scene A's video plays until 1 s, scene B's from 1 s; frame index = 10 × time.
+  const clips = [
+    { videoId: "a", start: 0, end: 1 },
+    { videoId: "b", start: 1, end: 2 },
+  ];
+  const table = {
+    frameDirs: () => [],
+    getActiveFramePayloads: (time: number) =>
+      new Map(
+        clips
+          .filter((clip) => time >= clip.start && time < clip.end)
+          .map((clip) => {
+            const frameIndex = Math.floor(time * 10);
+            return [clip.videoId, { framePath: `/${clip.videoId}/${frameIndex}`, frameIndex }];
+          }),
+      ),
+  } as unknown as FrameLookupTable;
+  const page = { evaluate: vi.fn(async () => undefined) } as unknown as Page;
+
+  beforeEach(() => {
+    injectVideoFramesBatchMock.mockReset();
+    injectVideoFramesBatchMock.mockImplementation(async (_page, updates) =>
+      updates.map((u) => u.videoId),
+    );
+    syncVideoFrameVisibilityMock.mockReset();
+    syncVideoFrameVisibilityMock.mockResolvedValue(undefined);
+  });
+
+  it("shows the held frame of a video on screen at both times", async () => {
+    const hook = createVideoFrameInjector(table, { frameSrcResolver: inlineResolver });
+
+    // The sample alone would pick frame 14; the held frame time picks 15.
+    await hook!(page, 1.42, 1.5);
+
+    expect(syncVideoFrameVisibilityMock).toHaveBeenLastCalledWith(page, ["b"]);
+    expect(injectVideoFramesBatchMock.mock.calls[0]?.[1]).toEqual([
+      { videoId: "b", dataUri: inlineResolver("/b/15") },
+    ]);
+  });
+
+  it("follows the sample time across a cut, so neither scene's video drops out", async () => {
+    const hook = createVideoFrameInjector(table, { frameSrcResolver: inlineResolver });
+
+    // Frame 1.0 is scene B's first frame; a sample just before it still shows scene A.
+    await hook!(page, 0.98, 1.0);
+
+    expect(syncVideoFrameVisibilityMock).toHaveBeenLastCalledWith(page, ["a"]);
+    expect(injectVideoFramesBatchMock.mock.calls[0]?.[1]).toEqual([
+      { videoId: "a", dataUri: inlineResolver("/a/9") },
+    ]);
+  });
+});
+
+describe("createVideoFrameInjector extraction-cache lease renewal", () => {
+  // Regression: a render can hold a compiled-dir symlink into a shared
+  // extraction-cache entry far longer than the entry's one-time cache-hit
+  // touch keeps it alive, so another render's GC sweep can evict a directory
+  // this render still reads from. Every active frame must renew the entry's
+  // LRU clock, throttled.
+  //
+  // Fake timers drive both halves of each assertion: they advance `Date.now()`
+  // for the injector's throttle AND the `new Date()` touchCacheDir stamps onto
+  // the sentinel, so renewal is observable without depending on real
+  // wall-clock resolution between two same-millisecond touches.
+  const fakePage = { evaluate: async () => undefined } as unknown as Page;
+  let cacheDir: string;
+  let sentinelPath: string;
+
+  function makeHook(framePath: string): BeforeCaptureHook {
+    const table = {
+      frameDirs: () => [dirname(framePath)],
+      getActiveFramePayloads: () => new Map([["v", { framePath, frameIndex: 0 }]]),
+    } as unknown as FrameLookupTable;
+    const hook = createVideoFrameInjector(table, { frameSrcResolver: inlineResolver });
+    if (!hook) throw new Error("expected an injector hook for a non-null lookup table");
+    return hook;
+  }
+
+  function sentinelMtimeMs(): number {
+    return statSync(sentinelPath).mtimeMs;
+  }
+
+  beforeEach(() => {
+    injectVideoFramesBatchMock.mockReset();
+    syncVideoFrameVisibilityMock.mockReset();
+    syncVideoFrameVisibilityMock.mockResolvedValue(undefined);
+    injectVideoFramesBatchMock.mockResolvedValue(["v"]);
+
+    cacheDir = mkdtempSync(join(tmpdir(), "hf-cache-entry-"));
+    sentinelPath = join(cacheDir, COMPLETE_SENTINEL);
+    writeFileSync(sentinelPath, "", "utf-8");
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(sentinelPath, hourAgo, hourAgo);
+
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  it("renews the cache entry's sentinel mtime on the first active frame", async () => {
+    const before = sentinelMtimeMs();
+    const hook = makeHook(join(cacheDir, "frame_00001.jpg"));
+
+    await hook(fakePage, 0);
+
+    expect(sentinelMtimeMs()).toBeGreaterThan(before);
+  });
+
+  it("renews the entry of a clip that is not on screen yet", async () => {
+    const table = new FrameLookupTable();
+    const lateClip = { videoId: "late", outputDir: cacheDir, framePaths: new Map() };
+    table.addVideo(lateClip as unknown as ExtractedFrames, 3600, 3660, 0);
+    const hook = createVideoFrameInjector(table, { frameSrcResolver: inlineResolver });
+    const before = sentinelMtimeMs();
+
+    await hook?.(fakePage, 0);
+
+    expect(sentinelMtimeMs()).toBeGreaterThan(before);
+  });
+
+  it("throttles renewal so repeated frames don't hammer the filesystem clock", async () => {
+    const hook = makeHook(join(cacheDir, "frame_00001.jpg"));
+
+    await hook(fakePage, 0);
+    const firstTouch = sentinelMtimeMs();
+
+    vi.advanceTimersByTime(CACHE_TOUCH_THROTTLE_MS / 2);
+    await hook(fakePage, 1);
+    expect(sentinelMtimeMs()).toBe(firstTouch);
+
+    vi.advanceTimersByTime(CACHE_TOUCH_THROTTLE_MS);
+    await hook(fakePage, 2);
+    expect(sentinelMtimeMs()).toBeGreaterThan(firstTouch);
+  });
+
+  it("does not throw when the frame path is outside any cache directory", async () => {
+    // The resolver bypasses the frame read, but renewal still runs against
+    // dirname(framePath) — a non-cache dir has no sentinel to touch, and
+    // touchCacheDir's best-effort contract must swallow that.
+    const hook = makeHook("/no/such/cache/dir/frame_00001.jpg");
+
+    await expect(hook(fakePage, 0)).resolves.toBeUndefined();
   });
 });

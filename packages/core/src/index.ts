@@ -1,4 +1,5 @@
 // Types
+export type { RuntimeTimelineClipIdentity } from "./runtime/types.js";
 export type {
   ExecutionMode,
   Orientation,
@@ -12,6 +13,7 @@ export type {
   MediaElementType,
   CanvasResolution,
   Fps,
+  FpsInput,
   FpsParseResult,
   MediaFile,
   CompositionAPI,
@@ -34,14 +36,40 @@ export type {
   CompositionVariable,
   CompositionSpec,
   WaveformData,
+  OutputResolutionCompatibility,
+  OutputResolutionIssueKind,
 } from "./core.types";
+
+export type {
+  SlideshowManifest,
+  SlideRef,
+  SlideHotspot,
+  SlideSequence,
+  ResolvedSlide,
+  ResolvedSlideSequence,
+  ResolvedSlideshow,
+} from "./slideshow/index.js";
+
+export { parseSlideshowManifest, resolveSlideshow } from "./slideshow/index.js";
+
+export type {
+  AuthoredTimingValue,
+  RawAuthoredTiming,
+  AuthoredTimingWindow,
+} from "./runtime/authoredTiming.js";
+export { resolveAuthoredTimingWindow } from "./runtime/authoredTiming.js";
 
 export {
   CANVAS_DIMENSIONS,
   VALID_CANVAS_RESOLUTIONS,
   normalizeResolutionFlag,
+  isAspectAgnosticResolutionAlias,
+  resolveResolutionFlagPair,
+  checkOutputResolutionCompatibility,
+  suggestMatchingPreset,
   parseFps,
   parseFpsWithDefault,
+  toFps,
   fpsToNumber,
   fpsToFfmpegArg,
   TIMELINE_COLORS,
@@ -51,11 +79,6 @@ export {
   isMediaElement,
   isCompositionElement,
   getDefaultStageZoom,
-  isStringVariable,
-  isNumberVariable,
-  isColorVariable,
-  isBooleanVariable,
-  isEnumVariable,
 } from "./core.types";
 
 // Templates
@@ -69,24 +92,18 @@ export {
   ZOOM_CONTAINER_STYLES,
 } from "./templates/constants";
 
-// Parsers
-export type { GsapAnimation, GsapMethod, ParsedGsap } from "./parsers/gsapParser";
+// Parsers — GSAP helpers. The AST parser (parseGsapScriptAcorn and write ops)
+// is browser-safe; mutation helpers are in gsapWriterAcorn.
+export type { GsapAnimation, GsapMethod, ParsedGsap } from "@hyperframes/parsers";
 
 export {
-  parseGsapScript,
   serializeGsapAnimations,
-  updateAnimationInScript,
-  addAnimationToScript,
-  removeAnimationFromScript,
-  getAnimationsForElement,
+  getAnimationsForElementId,
   validateCompositionGsap,
   keyframesToGsapAnimations,
   gsapAnimationsToKeyframes,
-  SUPPORTED_PROPS,
-  SUPPORTED_EASES,
-} from "./parsers/gsapParser";
-
-export type { ParsedHtml, CompositionMetadata } from "./parsers/htmlParser";
+} from "@hyperframes/parsers";
+export type { ParsedHtml, CompositionMetadata } from "@hyperframes/parsers";
 
 export {
   parseHtml,
@@ -95,7 +112,7 @@ export {
   removeElementFromHtml,
   validateCompositionHtml,
   extractCompositionMetadata,
-} from "./parsers/htmlParser";
+} from "@hyperframes/parsers";
 
 // Generators
 export type { SerializeOptions } from "./generators/hyperframes";
@@ -114,27 +131,145 @@ export type {
   CompilationResult,
 } from "./compiler/timingCompiler";
 
+// Timing resolver — shared pure resolver for word-anchored elastic timing (WS-C).
+export type {
+  WordTiming,
+  ElementAnchor,
+  AuthoredTiming,
+  ResolvedTiming,
+  ResolveTimingsInput,
+  ResolveTimingsResult,
+} from "./compiler/timingResolver";
+export { resolveTimings } from "./compiler/timingResolver";
+
 export {
   compileTimingAttrs,
   injectDurations,
   extractResolvedMedia,
   clampDurations,
   shouldClampMediaDuration,
+  shouldClampResolvedMediaDuration,
+  MEDIA_DURATION_CLAMP_EPSILON_SECONDS,
 } from "./compiler/timingCompiler";
 
-// Lint
-export type {
-  HyperframeLintSeverity,
-  HyperframeLintFinding,
-  HyperframeLintResult,
-  HyperframeLinterOptions,
-} from "./lint/types";
-export { lintHyperframeHtml } from "./lint/hyperframeLinter";
+export {
+  AUDIO_GROUP_RENDER_ID_ATTR,
+  MEDIA_RENDER_ID_ATTR,
+  assignMediaRenderIds,
+} from "./compiler/mediaRenderIds";
+
+export {
+  RENDER_FRAME_ID_PREFIX,
+  RENDER_FRAME_ID_SUFFIX,
+  renderFrameIdForRenderId,
+} from "./runtime/renderFrameSibling";
+
+// Lint moved to @hyperframes/lint. Import lint APIs from @hyperframes/lint
+// directly, or via the back-compat stub at @hyperframes/core/lint. Not
+// re-exported here — doing so would cycle core's main entry through the lint
+// package (which imports core utilities back).
 export {
   rewriteAssetPaths,
   rewriteAssetPath,
   rewriteCssAssetUrls,
+  rewriteInlineStyleAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
+export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
+export {
+  checkSubCompositionUsability,
+  type ParsableDocumentLike,
+  type SubCompositionValidity,
+  type SubCompositionValidityReason,
+} from "./compiler/subCompositionValidity";
+export { RUNTIME_BOOTSTRAP_ATTR, stripEmbeddedRuntimeScripts } from "./compiler/htmlDocument";
+export { COMPOSITION_SOURCE_URL } from "./compiler/scriptRuns";
+export { queryByAttr } from "./utils/cssSelector";
+export {
+  AUDIBLE_MEDIA_SELECTOR,
+  audibleVideoNeedsWebAudio,
+  isAudibleVideoElement,
+} from "./audibleVideo";
+export { decodeUrlPathVariants } from "./utils/urlPath";
+export {
+  clearGifFramesBeforeNext,
+  gifClearsAfterLeavingFrameInPlace,
+  parseAnimatedGifMetadata,
+  type AnimatedGifMetadata,
+} from "./media/gif";
+export {
+  HF_COLOR_GRADING_ATTR,
+  HF_COLOR_GRADING_ADJUST_KEYS,
+  HF_COLOR_GRADING_ACTIVE_EFFECT_KEYS,
+  HF_COLOR_GRADING_ANIMATABLE_PROPERTIES,
+  HF_COLOR_GRADING_CANVAS_ID_PREFIX,
+  HF_COLOR_GRADING_COLOR_SPACE,
+  HF_COLOR_GRADING_CURVE_KEYS,
+  HF_COLOR_GRADING_DETAIL_KEYS,
+  HF_COLOR_GRADING_EFFECT_APPLY_DEFAULTS,
+  HF_COLOR_GRADING_EFFECT_KEYS,
+  HF_COLOR_GRADING_EFFECT_PRESETS,
+  HF_COLOR_GRADING_GRADE_PRESETS,
+  HF_COLOR_GRADING_HUE_CURVE_KEYS,
+  HF_COLOR_GRADING_LUT_KEYS,
+  HF_COLOR_GRADING_PALETTES,
+  HF_COLOR_GRADING_PRESETS,
+  HF_COLOR_GRADING_TOP_LEVEL_KEYS,
+  HF_COLOR_GRADING_WHEEL_KEYS,
+  getHfColorGradingCapabilities,
+  hasHfColorGradingAuthoredValues,
+  isHfColorGradingActive,
+  normalizeHfColorGrading,
+  normalizeHfColorGradingWithVariables,
+  resolveHfColorGradingVariables,
+  serializeHfColorGrading,
+  type HfColorGrading,
+  type HfColorGradingAdjust,
+  type HfColorGradingAdjustKey,
+  type HfColorGradingAnimatablePath,
+  type HfColorGradingActiveEffectKey,
+  type HfColorGradingDetailKey,
+  type HfColorGradingDetails,
+  type HfColorGradingEffectKey,
+  type HfColorGradingEffects,
+  type HfColorGradingLutRef,
+  type HfColorGradingPreset,
+  type HfColorGradingPresetId,
+  type HfColorGradingTarget,
+  type HfColorGradingVariableMap,
+  type HfColorGradingCapabilities,
+  type HfColorGradingCurveKey,
+  type HfColorGradingCurves,
+  type HfColorGradingHueCurveKey,
+  type HfColorGradingHueCurves,
+  type HfColorGradingHueRange,
+  type HfColorGradingSecondary,
+  type HfColorGradingSecondaryCorrection,
+  type HfColorGradingSoftRange,
+  type HfColorGradingTonalWheel,
+  type HfColorGradingWheelKey,
+  type HfColorGradingWheels,
+  type HfColorCurvePoint,
+  type HfHueCurvePoint,
+  type NormalizedHfColorGrading,
+  type NormalizedHfColorGradingCurves,
+  type NormalizedHfColorGradingHueCurves,
+  type NormalizedHfColorGradingSecondary,
+  type NormalizedHfColorGradingWheels,
+  type ResolvedHfColorGrading,
+} from "./colorGrading";
+export { parseCubeLut, CubeLutParseError, type ParseCubeLutOptions } from "./colorLuts";
+export {
+  firstFrameColourArgs,
+  hdrToSdrToneMapFilter,
+  parseFirstFrameColour,
+  type ToneMapSourceColour,
+} from "./hdrToneMap";
+export {
+  PREVIEW_PROXY_BOX_PARAM,
+  formatPreviewProxyBox,
+  parsePreviewProxyBox,
+  type PreviewProxyBox,
+} from "./previewProxyBox";
 
 // Inline scripts
 export {
@@ -157,9 +292,23 @@ export {
 export {
   MEDIA_VISUAL_STYLE_PROPERTIES,
   copyMediaVisualStyles,
+  exportClipWindow,
+  quantizeSeekTime,
   quantizeTimeToFrame,
   type MediaVisualStyleProperty,
 } from "./inline-scripts/parityContract";
+export { redactKnownPaths, redactTelemetryString } from "./telemetryRedaction";
+export {
+  folderGone,
+  isProjectRootMissing,
+  isSafePath,
+  mkdirWithinProject,
+  ProjectRootMissingError,
+  realpath,
+  realProjectRoot,
+  resolveWithinProject,
+} from "./safePath";
+export { isHyperframesProject, PROJECT_MARKER_FILES } from "./projectRule";
 export type {
   HyperframePickerApi,
   HyperframePickerBoundingBox,
@@ -174,9 +323,49 @@ export { createGSAPFrameAdapter } from "./adapters/gsap";
 // Text measurement
 export { fitTextFontSize } from "./text/index.js";
 export type { FitTextOptions, FitTextResult } from "./text/index.js";
+export { formatRenderOutputTimestamp } from "./utils/renderOutputTimestamp.js";
 
 // Runtime helpers (composition-side)
 export { getVariables } from "./runtime/getVariables.js";
+export {
+  parseStartExpression,
+  parseNumeric,
+  type ReferenceExpression,
+} from "./runtime/startExpression.js";
+export {
+  COMPOSITION_CONTRACT_VERSION,
+  COMPOSITION_ATTRIBUTES,
+  CANONICAL_AUTHORED_TIMING_ATTRIBUTES,
+  DERIVED_TIMING_ATTRIBUTES,
+  LEGACY_TIMING_ATTRIBUTES,
+  readClipTiming,
+  writeClipTiming,
+  ClipTimingWriteError,
+  type ClipTiming,
+  type ClipTimingDiagnostic,
+  type ClipTimingDiagnosticCode,
+  type ClipTimingUpdate,
+} from "./compositionContract.js";
+// Also exposed via the ./runtime/start-resolver subpath. This root re-export
+// additionally makes tsc EMIT dist/runtime/startResolver.js: src/runtime is
+// excluded from the tsconfig include set, so runtime files only reach dist
+// when an included module imports them — without this line the subpath's
+// publishConfig entry points at a file the pack doesn't contain
+// (verify:packed-manifests catches exactly that).
+export { createRuntimeStartTimeResolver } from "./runtime/startResolver.js";
+// Also exposed via the ./runtime/clip-window subpath; re-exported here for the same dist-emit reason.
+export { hasClipStarted, isClipVisibleAt, isInClipWindow } from "./runtime/clipWindow.js";
+export {
+  normalizePlaybackRate,
+  normalizeRateSpec,
+  parseStrictFiniteTimingNumber,
+  readElementPlaybackRate,
+  readElementRateSpec,
+  readMediaStart,
+  resolveNaturalMediaTimelineDuration,
+  resolveNaturalMediaTimelineDurationFromValues,
+} from "./runtime/playbackRate.js";
+export { shiftRateLane, sourceTimeAt, timeAtSourceTime, type RateSpec } from "./speedRamp.js";
 
 // Variable validation (CLI / tooling-side)
 export {
@@ -208,3 +397,37 @@ export {
   isBlockItem,
   isComponentItem,
 } from "./registry/index.js";
+
+export {
+  canaryBucket,
+  evaluateCanary,
+  parseCanaryOverride,
+  type CanaryDecision,
+  type CanaryInput,
+  type CanaryReason,
+} from "./canary.js";
+export {
+  CANARIES,
+  canaryEnvVar,
+  findCanary,
+  overdueCanaries,
+  type CanaryDefinition,
+} from "./canaryRegistry.js";
+
+// VFX chain (data-vfx-chain) — defs, chain parse/serialize/normalize
+export {
+  HF_VFX_ATTR,
+  HF_VFX_CHAIN_VERSION,
+  HF_VFX,
+  chainCapture,
+  getVfxDef,
+  parseVfxChain,
+  serializeVfxChain,
+  normalizeVfxParams,
+  type HfVfxCapture,
+  type HfVfxChain,
+  type HfVfxDef,
+  type HfVfxNode,
+  type HfVfxParam,
+  type HfVfxParamValues,
+} from "./vfx.js";

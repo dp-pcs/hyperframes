@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication
 /**
  * Unit tests for `services/distributed/plan.ts`.
  *
@@ -18,15 +19,22 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { applyConcreteGpuScreenshotClamp, buildChromeArgs } from "@hyperframes/engine";
 import { recomputePlanHashFromPlanDir } from "../render/stages/freezePlan.js";
+import { RenderQualityError } from "../renderOrchestrator.js";
+import { CURRENT_PLAN_PROTOCOL } from "./planProtocol.js";
 import {
+  applyDistributedAudioWarningPolicy,
+  buildLocalExecutionPlan,
   buildChunkSlices,
   DEFAULT_CHUNK_SIZE,
   DEFAULT_MAX_PARALLEL_CHUNKS,
   MIN_CHUNK_SIZE,
   plan,
+  resolveDistributedEngineConfig,
   resolveChunkPlan,
 } from "./plan.js";
+import { buildSyntheticRenderJob } from "./shared.js";
 
 // Composition the tests render. `data-duration="1"` keeps the probe stage's
 // `needsBrowser` gate `false` so plan() completes without launching Chrome.
@@ -52,6 +60,124 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(runRoot, { recursive: true, force: true });
+});
+
+describe("distributed warning policy", () => {
+  const createJob = (strictness: "strict" | "best-effort") =>
+    buildSyntheticRenderJob({
+      fps: { num: 30, den: 1 },
+      format: "mp4",
+      quality: "high",
+      hdrMode: "force-sdr",
+      strictness,
+      entryFile: "index.html",
+    });
+
+  it("rejects distributed audio degradation in strict mode", () => {
+    const job = createJob("strict");
+    expect(() => applyDistributedAudioWarningPolicy(job, "mix failed")).toThrow(RenderQualityError);
+    expect(job.warnings.map((warning) => warning.code)).toEqual(["audio_processing_failed"]);
+  });
+
+  it("rejects distributed audio degradation in best-effort mode", () => {
+    const job = createJob("best-effort");
+    expect(() =>
+      applyDistributedAudioWarningPolicy(job, "mix failed", [
+        {
+          stage: "mix",
+          reason: "ffmpeg_unsupported",
+          owner: "system",
+          retryable: false,
+          detail: "Option not found",
+        },
+      ]),
+    ).toThrow(RenderQualityError);
+    expect(job.warnings.map((warning) => warning.code)).toEqual(["audio_processing_failed"]);
+    expect(job.warnings[0]?.details).toEqual(
+      expect.objectContaining({
+        failureReasons: ["ffmpeg_unsupported"],
+        failureStages: ["mix"],
+        failureOwner: "system",
+        retryable: false,
+      }),
+    );
+  });
+
+  it("only marks a multi-cause audio failure retryable when every cause is retryable", () => {
+    const job = createJob("best-effort");
+    expect(() =>
+      applyDistributedAudioWarningPolicy(job, "mixed failure", [
+        {
+          stage: "download",
+          reason: "download_failed",
+          owner: "system",
+          retryable: true,
+          detail: "temporary download failure",
+        },
+        {
+          stage: "prepare",
+          reason: "invalid_media",
+          owner: "user",
+          retryable: false,
+          detail: "invalid media",
+        },
+      ]),
+    ).toThrow(RenderQualityError);
+    expect(job.warnings[0]?.details).toEqual(
+      expect.objectContaining({
+        failureOwner: "system",
+        retryable: false,
+      }),
+    );
+  });
+
+  it("does not invent ownership or retryability for legacy untyped failures", () => {
+    const job = createJob("best-effort");
+    expect(() => applyDistributedAudioWarningPolicy(job, "legacy failure")).toThrow(
+      RenderQualityError,
+    );
+    expect(job.warnings[0]?.details?.failureOwner).toBeUndefined();
+    expect(job.warnings[0]?.details?.retryable).toBeUndefined();
+  });
+});
+
+describe("distributed synthetic render job", () => {
+  it("threads render variables into the plan browser probe job", () => {
+    const variables = {
+      voiceoverSrc: "assets/voiceover.wav",
+      narrationDurationSeconds: 56.738,
+    };
+    const job = buildSyntheticRenderJob({
+      fps: { num: 30, den: 1 },
+      format: "mp4",
+      quality: "high",
+      hdrMode: "force-sdr",
+      entryFile: "index.html",
+      variables,
+    });
+
+    expect(job.config.variables).toEqual(variables);
+  });
+
+  it("keeps the production software-GPU launch on BeginFrame control", () => {
+    const cfg = resolveDistributedEngineConfig({
+      fps: 30,
+      width: 320,
+      height: 240,
+      format: "mp4",
+    });
+    const forceScreenshot = applyConcreteGpuScreenshotClamp(
+      cfg.forceScreenshot,
+      "software",
+      cfg,
+      {},
+    );
+    const captureMode = forceScreenshot ? "screenshot" : "beginframe";
+    const args = buildChromeArgs({ width: 320, height: 240, captureMode, platform: "linux" }, cfg);
+
+    expect(forceScreenshot).toBe(false);
+    expect(args).toContain("--enable-begin-frame-control");
+  });
 });
 
 describe("resolveChunkPlan", () => {
@@ -125,6 +251,118 @@ describe("resolveChunkPlan", () => {
     expect(result.chunkCount).toBe(5);
     expect(result.effectiveChunkSize).toBe(MIN_CHUNK_SIZE);
   });
+
+  it("tightens chunkCount so an explicit small chunkSize leaves no empty trailing slice", () => {
+    // 121 frames, chunkSize=10, maxParallelChunks=12: ceil(121/10)=13 naive →
+    // capped at 12, but effectiveChunkSize rounds up to ceil(121/12)=11. Eleven
+    // 11-frame chunks already cover [0,121), so a 12th would be the empty slice
+    // [121,121) that renderChunk rejects (framesInChunk <= 0). chunkCount must
+    // tighten to 11.
+    const result = resolveChunkPlan(121, 10, 12);
+    expect(result.effectiveChunkSize).toBe(11);
+    expect(result.chunkCount).toBe(11);
+    const slices = buildChunkSlices(121, result.chunkCount, result.effectiveChunkSize);
+    expect(slices).toHaveLength(11);
+    expect(slices[slices.length - 1]).toEqual({ index: 10, startFrame: 110, endFrame: 121 });
+  });
+
+  it("never emits an empty or inverted slice across a grid of explicit chunk sizes", () => {
+    for (const totalFrames of [37, 50, 121, 333, 1000, 4001]) {
+      for (const maxParallel of [2, 4, 12, 16, 40]) {
+        for (const chunkSize of [10, 11, 15, 24, 100]) {
+          const { chunkCount, effectiveChunkSize } = resolveChunkPlan(
+            totalFrames,
+            chunkSize,
+            maxParallel,
+          );
+          expect(chunkCount).toBeLessThanOrEqual(maxParallel);
+          const slices = buildChunkSlices(totalFrames, chunkCount, effectiveChunkSize);
+          let cursor = 0;
+          for (const s of slices) {
+            expect(s.startFrame).toBe(cursor); // contiguous from 0
+            expect(s.endFrame).toBeGreaterThan(s.startFrame); // non-empty
+            cursor = s.endFrame;
+          }
+          expect(cursor).toBe(totalFrames); // union is exactly [0, totalFrames)
+        }
+      }
+    }
+  });
+
+  // ── targetChunkFrames (optional per-chunk frame ceiling) ──
+
+  it("targetChunkFrames omitted is a no-op: identical to the 3-arg auto-sized result", () => {
+    // The default path must be byte-identical whether the 4th arg is absent or
+    // explicitly undefined.
+    for (const totalFrames of [50, 660, 1466, 54000]) {
+      for (const maxParallel of [8, 16, 64]) {
+        const base = resolveChunkPlan(totalFrames, undefined, maxParallel);
+        const withUndef = resolveChunkPlan(totalFrames, undefined, maxParallel, undefined);
+        expect(withUndef).toEqual(base);
+      }
+    }
+  });
+
+  it("targetChunkFrames collapses a short video to fewer chunks than the parallelism cap", () => {
+    // 1466 frames, target 300, cap 16: ceil(1466/300)=5 chunks (not 16), each
+    // ~293 frames. Fewer chunks → less per-chunk fixed overhead.
+    const result = resolveChunkPlan(1466, undefined, 16, 300);
+    expect(result.chunkCount).toBe(5);
+    expect(result.effectiveChunkSize).toBeLessThanOrEqual(300);
+  });
+
+  it("targetChunkFrames bounds a long video's per-chunk frames, adding chunks up to the cap", () => {
+    // 54000 frames (30 min @30fps), target 1600, cap 64: ceil(54000/1600)=34
+    // chunks, each <= 1600 frames so per-chunk render time stays under budget.
+    const result = resolveChunkPlan(54000, undefined, 64, 1600);
+    expect(result.chunkCount).toBe(34);
+    expect(result.effectiveChunkSize).toBeLessThanOrEqual(1600);
+  });
+
+  it("targetChunkFrames is clamped by maxParallelChunks: an extreme length stays at the cap (still over budget)", () => {
+    // 216000 frames (2 h), target 1600, cap 64: needs 135 chunks but clamps to
+    // 64; per-chunk frames then exceed the target — the genuine tier ceiling.
+    const result = resolveChunkPlan(216000, undefined, 64, 1600);
+    expect(result.chunkCount).toBe(64);
+    expect(result.effectiveChunkSize).toBeGreaterThan(1600);
+  });
+
+  it("explicit chunkSize wins over targetChunkFrames (targetChunkFrames is a no-op)", () => {
+    const withTarget = resolveChunkPlan(54000, 240, 64, 1600);
+    const chunkSizeOnly = resolveChunkPlan(54000, 240, 64);
+    expect(withTarget).toEqual(chunkSizeOnly);
+  });
+
+  it("rejects a non-positive or non-integer targetChunkFrames", () => {
+    expect(() => resolveChunkPlan(1466, undefined, 16, 0)).toThrow(/positive integer/);
+    expect(() => resolveChunkPlan(1466, undefined, 16, -100)).toThrow(/positive integer/);
+    expect(() => resolveChunkPlan(1466, undefined, 16, 300.5)).toThrow(/positive integer/);
+  });
+
+  it("never emits an empty or inverted slice across a grid of targetChunkFrames", () => {
+    for (const totalFrames of [37, 660, 1466, 12793, 54000]) {
+      for (const maxParallel of [8, 16, 64]) {
+        for (const target of [100, 300, 1600]) {
+          const { chunkCount, effectiveChunkSize } = resolveChunkPlan(
+            totalFrames,
+            undefined,
+            maxParallel,
+            target,
+          );
+          expect(chunkCount).toBeGreaterThanOrEqual(1);
+          expect(chunkCount).toBeLessThanOrEqual(maxParallel);
+          const slices = buildChunkSlices(totalFrames, chunkCount, effectiveChunkSize);
+          let cursor = 0;
+          for (const s of slices) {
+            expect(s.startFrame).toBe(cursor);
+            expect(s.endFrame).toBeGreaterThan(s.startFrame);
+            cursor = s.endFrame;
+          }
+          expect(cursor).toBe(totalFrames);
+        }
+      }
+    }
+  });
 });
 
 describe("buildChunkSlices", () => {
@@ -160,6 +398,83 @@ describe("plan() — golden planDir + planHash determinism", () => {
   const TIMEOUT_MS = 30_000;
 
   it(
+    "fails closed when an open-ended distributed video source cannot be extracted",
+    async () => {
+      const brokenProjectDir = join(runRoot, "broken-video-project");
+      const brokenPlanDir = join(runRoot, "broken-video-plan");
+      mkdirSync(brokenProjectDir, { recursive: true });
+      mkdirSync(brokenPlanDir, { recursive: true });
+      writeFileSync(
+        join(brokenProjectDir, "index.html"),
+        `<!doctype html>
+<div data-composition-id="root" data-width="320" data-height="240" data-duration="1">
+  <video id="hero" src="missing.mp4" data-start="0"></video>
+</div>`,
+      );
+
+      let caught: unknown;
+      try {
+        await plan(
+          brokenProjectDir,
+          { fps: 30, width: 320, height: 240, format: "mp4", chunkSize: 240 },
+          brokenPlanDir,
+        );
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toHaveProperty("name", "VideoExtractionStageError");
+      expect(caught).toHaveProperty("code", "VIDEO_SOURCE_UNRENDERABLE");
+      expect(caught).toHaveProperty("retryable", false);
+      expect(existsSync(join(brokenPlanDir, "meta", "videos.json"))).toBe(false);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "maps an open-ended remote video HTTP 404 to a terminal source error",
+    async () => {
+      const brokenProjectDir = join(runRoot, "remote-404-video-project");
+      const brokenPlanDir = join(runRoot, "remote-404-video-plan");
+      mkdirSync(brokenProjectDir, { recursive: true });
+      mkdirSync(brokenPlanDir, { recursive: true });
+      writeFileSync(
+        join(brokenProjectDir, "index.html"),
+        `<!doctype html>
+<div data-composition-id="root" data-width="320" data-height="240" data-duration="1">
+  <video id="hero" src="https://cdn.example/missing.mp4" data-start="0"></video>
+</div>`,
+      );
+      const originalFetch = globalThis.fetch;
+      let fetchCalls = 0;
+      globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        return new Response(null, { status: 404, statusText: "Not Found" });
+      }) as typeof fetch;
+
+      let caught: unknown;
+      try {
+        await plan(
+          brokenProjectDir,
+          { fps: 30, width: 320, height: 240, format: "mp4", chunkSize: 240 },
+          brokenPlanDir,
+        );
+      } catch (err) {
+        caught = err;
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(fetchCalls).toBeGreaterThan(0);
+      expect(caught).toHaveProperty("name", "VideoExtractionStageError");
+      expect(caught).toHaveProperty("code", "VIDEO_SOURCE_UNRENDERABLE");
+      expect(caught).toHaveProperty("retryable", false);
+      expect(existsSync(join(brokenPlanDir, "meta", "videos.json"))).toBe(false);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
     "produces the documented planDir layout",
     async () => {
       const planDir = join(runRoot, "plan-layout");
@@ -177,8 +492,8 @@ describe("plan() — golden planDir + planHash determinism", () => {
       expect(existsSync(join(planDir, "plan.json"))).toBe(true);
       expect(existsSync(join(planDir, "compiled", "index.html"))).toBe(true);
       expect(existsSync(join(planDir, "video-frames"))).toBe(true);
-      // No audio in the fixture — audio.aac must NOT exist.
-      expect(existsSync(join(planDir, "audio.aac"))).toBe(false);
+      // No audio in the fixture — audio.m4a must NOT exist.
+      expect(existsSync(join(planDir, "audio.m4a"))).toBe(false);
       expect(existsSync(join(planDir, "meta", "composition.json"))).toBe(true);
       expect(existsSync(join(planDir, "meta", "encoder.json"))).toBe(true);
       expect(existsSync(join(planDir, "meta", "chunks.json"))).toBe(true);
@@ -187,6 +502,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
 
       // ── PlanResult contract ─────────────────────────────────────────────
       expect(result.planDir).toBe(planDir);
+      expect(result.planProtocol).toEqual(CURRENT_PLAN_PROTOCOL);
       expect(result.planHash).toMatch(/^[0-9a-f]{64}$/);
       expect(result.chunkCount).toBe(1);
       expect(result.totalFrames).toBe(30); // 1s @ 30fps
@@ -215,6 +531,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
         unknown
       >;
       expect(planJson.planHash).toBe(result.planHash);
+      expect(planJson.protocol).toEqual(CURRENT_PLAN_PROTOCOL);
       expect(planJson.hasAudio).toBe(false);
       expect(planJson.totalFrames).toBe(result.totalFrames);
     },
@@ -253,7 +570,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
   );
 
   it(
-    "produces a byte-identical planHash on a second invocation",
+    "shares one byte-identical execution plan between the builder and legacy v1 wrapper",
     async () => {
       const planDirA = join(runRoot, "plan-determinism-a");
       const planDirB = join(runRoot, "plan-determinism-b");
@@ -261,12 +578,26 @@ describe("plan() — golden planDir + planHash determinism", () => {
       mkdirSync(planDirB, { recursive: true });
 
       const config = { fps: 30 as const, width: 320, height: 240, format: "mp4" as const };
-      const a = await plan(projectDir, config, planDirA);
+      const a = await buildLocalExecutionPlan(projectDir, config, planDirA);
       const b = await plan(projectDir, config, planDirB);
 
-      expect(a.planHash).toBe(b.planHash);
+      expect(a.executionPlanDir).toBe(planDirA);
+      expect(a.executionPlanHash).toBe(b.planHash);
       expect(a.chunkCount).toBe(b.chunkCount);
       expect(a.totalFrames).toBe(b.totalFrames);
+      expect(Object.keys(b)).toEqual([
+        "planDir",
+        "planProtocol",
+        "planHash",
+        "chunkCount",
+        "totalFrames",
+        "fps",
+        "width",
+        "height",
+        "format",
+        "ffmpegVersion",
+        "producerVersion",
+      ]);
 
       // Encoder JSON must be byte-identical — its bytes feed planHash, so any
       // drift here would silently change the hash framing.
@@ -302,8 +633,18 @@ describe("plan() — golden planDir + planHash determinism", () => {
       expect(recomputed).toBe(result.planHash);
       const planJson = JSON.parse(readFileSync(join(planDir, "plan.json"), "utf-8")) as {
         planHash: string;
+        protocol?: unknown;
       };
       expect(planJson.planHash).toBe(result.planHash);
+      expect(planJson.protocol).toEqual(CURRENT_PLAN_PROTOCOL);
+
+      delete planJson.protocol;
+      writeFileSync(join(planDir, "plan.json"), `${JSON.stringify(planJson, null, 2)}\n`, "utf-8");
+      expect(recomputePlanHashFromPlanDir(planDir)).toBe(result.planHash);
+
+      planJson.protocol = CURRENT_PLAN_PROTOCOL;
+      writeFileSync(join(planDir, "plan.json"), `${JSON.stringify(planJson, null, 2)}\n`, "utf-8");
+      expect(recomputePlanHashFromPlanDir(planDir)).toBe(result.planHash);
     },
     TIMEOUT_MS,
   );
@@ -377,7 +718,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
       // Verify the audio stage actually fired (otherwise the test
       // pins the wrong path — the same false-pass mode as the
       // no-audio variant above).
-      expect(existsSync(join(planDir, "audio.aac"))).toBe(true);
+      expect(existsSync(join(planDir, "audio.m4a"))).toBe(true);
     },
     TIMEOUT_MS,
   );
@@ -397,6 +738,7 @@ describe("plan() — codec knob", () => {
       ) as Record<string, unknown>;
       expect(encoder.encoder).toBe("libx264-software");
       expect(encoder.pixelFormat).toBe("yuv420p");
+      expect(encoder).not.toHaveProperty("vp9CpuUsed");
     },
     TIMEOUT_MS,
   );
@@ -594,6 +936,32 @@ describe("plan() — webm format (distributed VP9)", () => {
       // keyframe with no alt-ref references reaching back across seams.
       expect(encoder.closedGop).toBe(true);
       expect(encoder.gopSize).toBe(encoder.chunkSize);
+      expect(encoder.vp9CpuUsed).toBe(4);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "locks the resolved VP9 cpu-used value into encoder metadata",
+    async () => {
+      const planDir = join(runRoot, "plan-webm-vp9-cpu-used");
+      mkdirSync(planDir, { recursive: true });
+      await plan(
+        projectDir,
+        {
+          fps: 30,
+          width: 320,
+          height: 240,
+          format: "webm",
+          producerConfig: { vp9CpuUsed: 2 },
+        },
+        planDir,
+      );
+
+      const encoder = JSON.parse(
+        readFileSync(join(planDir, "meta", "encoder.json"), "utf-8"),
+      ) as Record<string, unknown>;
+      expect(encoder.vp9CpuUsed).toBe(2);
     },
     TIMEOUT_MS,
   );

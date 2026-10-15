@@ -1,5 +1,6 @@
+// fallow-ignore-file complexity
 import { execFileSync } from "node:child_process";
-import { existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -9,52 +10,8 @@ import {
   inferLangFromVoiceId,
   type SupportedLang,
 } from "./manager.js";
-
-// ---------------------------------------------------------------------------
-// Python runtime detection
-// ---------------------------------------------------------------------------
-
-function findPython(): string | undefined {
-  for (const name of ["python3", "python"]) {
-    try {
-      const cmd = process.platform === "win32" ? "where" : "which";
-      const output = execFileSync(cmd, [name], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      });
-      const first = output
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .find(Boolean);
-      if (!first) continue;
-
-      // Verify it's Python 3
-      const version = execFileSync(first, ["--version"], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      }).trim();
-
-      if (version.includes("Python 3")) return first;
-    } catch {
-      // not found or not Python 3
-    }
-  }
-  return undefined;
-}
-
-function hasPythonPackage(python: string, pkg: string): boolean {
-  try {
-    execFileSync(python, ["-c", `import ${pkg}`], {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 10_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { findPython, hasPythonPackage } from "./python.js";
+import { writeNewFileSync } from "../utils/writeNewFile.js";
 
 // ---------------------------------------------------------------------------
 // Inline Python script for Kokoro synthesis
@@ -64,7 +21,7 @@ function hasPythonPackage(python: string, pkg: string): boolean {
 // We pass it conditionally so older installs that only accept `voice=`/`speed=`
 // continue to work (falling back to Kokoro's default phonemization).
 const SYNTH_SCRIPT = `
-import sys, json, inspect
+import sys, json, inspect, re
 
 model_path = sys.argv[1]
 voices_path = sys.argv[2]
@@ -84,7 +41,39 @@ supports_lang = "lang" in inspect.signature(model.create).parameters
 if lang and supports_lang:
     kwargs["lang"] = lang
 
-samples, sample_rate = model.create(text, **kwargs)
+def is_voice_token_overflow(error):
+    return bool(re.search(
+        r"index \\d+ is out of bounds for axis 0 with size 510",
+        str(error),
+        re.IGNORECASE,
+    ))
+
+def split_for_retry(value):
+    midpoint = len(value) // 2
+    boundaries = [
+        index + 1
+        for index, char in enumerate(value)
+        if (char in "。！？!?\\n" or char.isspace()) and 0 < index < len(value) - 1
+    ]
+    split_at = min(boundaries, key=lambda index: abs(index - midpoint)) if boundaries else midpoint
+    return value[:split_at], value[split_at:]
+
+def synthesize_text(value):
+    try:
+        return model.create(value, **kwargs)
+    except IndexError as error:
+        if not is_voice_token_overflow(error) or len(value) < 2:
+            raise
+        left, right = split_for_retry(value)
+        left_samples, left_rate = synthesize_text(left)
+        right_samples, right_rate = synthesize_text(right)
+        if left_rate != right_rate:
+            raise RuntimeError("Kokoro returned inconsistent sample rates across text chunks")
+        samples = list(left_samples)
+        samples.extend(right_samples)
+        return samples, left_rate
+
+samples, sample_rate = synthesize_text(text)
 sf.write(output_path, samples, sample_rate)
 
 duration = len(samples) / sample_rate
@@ -96,16 +85,23 @@ print(json.dumps({
 }))
 `;
 
+// espeak-ng maps Mandarin Chinese to ISO 639-3 "cmn", not Kokoro's own "zh"
+// voice-prefix convention. Translate at the Python/espeak boundary only —
+// keep "zh" as the public --lang value since it matches Kokoro's docs.
+const ESPEAK_LANG_OVERRIDES: Partial<Record<SupportedLang, string>> = {
+  zh: "cmn",
+};
+
 // Cache the script to avoid rewriting it on every invocation.
 // The filename carries a version suffix so older installs automatically
 // upgrade when the script body changes (e.g., adding the `lang` kwarg).
 const SCRIPT_DIR = join(homedir(), ".cache", "hyperframes", "tts");
-const SCRIPT_PATH = join(SCRIPT_DIR, "synth-v2.py");
+const SCRIPT_PATH = join(SCRIPT_DIR, "synth-v3.py");
 
 function ensureSynthScript(): string {
   if (!existsSync(SCRIPT_PATH)) {
     mkdirSync(SCRIPT_DIR, { recursive: true });
-    writeFileSync(SCRIPT_PATH, SYNTH_SCRIPT);
+    writeNewFileSync(SCRIPT_PATH, SYNTH_SCRIPT);
     // Best-effort: delete older versioned scripts left behind by previous
     // CLI releases so users don't accumulate stale files in ~/.cache.
     const currentName = basename(SCRIPT_PATH);
@@ -154,6 +150,7 @@ export interface SynthesizeResult {
 /**
  * Synthesize text to speech using Kokoro-82M via kokoro-onnx.
  */
+// fallow-ignore-next-line complexity
 export async function synthesize(
   text: string,
   outputPath: string,
@@ -168,13 +165,13 @@ export async function synthesize(
   const python = findPython();
   if (!python) {
     throw new Error(
-      "Python 3 is required for text-to-speech. Install Python 3.8+ and run: pip install kokoro-onnx soundfile",
+      "Python 3 is required for text-to-speech. Install Python 3.10+ and run: pip install kokoro-onnx soundfile (or point HYPERFRAMES_PYTHON at a venv python that has them)",
     );
   }
 
   if (!hasPythonPackage(python, "kokoro_onnx")) {
     throw new Error(
-      "The kokoro-onnx package is not installed. Run: pip install kokoro-onnx soundfile",
+      "The kokoro-onnx package is not installed. Run: pip install kokoro-onnx soundfile (or point HYPERFRAMES_PYTHON at a venv python that has them)",
     );
   }
 
@@ -197,13 +194,15 @@ export async function synthesize(
   // 5. Run synthesis
   options?.onProgress?.(`Generating speech with voice ${voice} (${lang})...`);
   try {
+    const espeakLang = ESPEAK_LANG_OVERRIDES[lang] ?? lang;
     const stdout = execFileSync(
       python,
-      [scriptPath, modelPath, voicesPath, text, voice, String(speed), outputPath, lang],
+      [scriptPath, modelPath, voicesPath, text, voice, String(speed), outputPath, espeakLang],
       {
         encoding: "utf-8",
         timeout: 300_000,
         stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, ORT_DISABLE_TELEMETRY: "1" },
       },
     );
 

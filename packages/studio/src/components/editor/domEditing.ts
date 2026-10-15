@@ -26,14 +26,19 @@ export {
 // Layers, text fields, capabilities, selection, patch ops
 export {
   buildDefaultDomEditTextField,
+  buildDomEditPatchTarget,
+  buildDomEditRichTextPatchOperation,
   buildDomEditStylePatchOperation,
   buildDomEditTextPatchOperation,
   collectDomEditLayerItems,
   countDomEditChildLayers,
+  buildTextFieldChildLocator,
   getDomEditLayerKey,
   getDomEditNonEditableReason,
   getDomEditTargetKey,
   isTextEditableSelection,
+  liveLayerElement,
+  readHfId,
   refreshDomEditSelection,
   resolveDomEditCapabilities,
   resolveDomEditSelection,
@@ -41,4 +46,10 @@ export {
 } from "./domEditingLayers";
 
 // Agent prompt
-export { buildElementAgentPrompt } from "./domEditingAgentPrompt";
+export {
+  buildElementAgentPrompt,
+  buildAgentContextPreview,
+  buildPickerAgentPrompt,
+  buildPickerAgentContextPreview,
+} from "./domEditingAgentPrompt";
+export type { AgentPromptElementInfo } from "./domEditingAgentPrompt";

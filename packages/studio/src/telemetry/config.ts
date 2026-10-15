@@ -5,43 +5,43 @@
 //   localStorage.setItem('hyperframes-studio:telemetryDisabled','1')
 // ---------------------------------------------------------------------------
 
-const ANON_ID_KEY = "hyperframes-studio:anonymousId";
+import { resolveStudioDistinctId } from "./distinctId";
+import { safeLocalStorage, safeSessionStorage } from "../utils/safeStorage";
+
 const OPT_OUT_KEY = "hyperframes-studio:telemetryDisabled";
 const NOTICE_KEY = "hyperframes-studio:telemetryNoticeShown";
 
-function safeLocalStorage(): Storage | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function newAnonymousId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `anon-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
+/**
+ * Anonymous telemetry id for `studio_*` and render events.
+ *
+ * Delegates to the single source of truth in `distinctId.ts` so this id is
+ * identical to the one used for `studio:*` events (utils/studioTelemetry.ts)
+ * and, when the CLI launched Studio, to the CLI's own `config.anonymousId`.
+ */
 export function getAnonymousId(): string {
-  const ls = safeLocalStorage();
-  if (!ls) return "anonymous";
-  const existing = ls.getItem(ANON_ID_KEY);
-  if (existing) return existing;
-  const id = newAnonymousId();
+  return resolveStudioDistinctId();
+}
+
+// safeLocalStorage() guards the REFERENCE, not the access: in a partitioned
+// or sandboxed context the object resolves and `getItem` still throws (the
+// case distinctId.ts already documents). These are read from the telemetry
+// policy, which is called from event tracking that must never throw into a
+// caller — `trackStudioEvent` sits in a post-commit catch block, so a throw
+// there reported an already-committed edit as failed.
+function readStoredFlag(key: string): boolean {
   try {
-    ls.setItem(ANON_ID_KEY, id);
+    return safeLocalStorage()?.getItem(key) === "1";
   } catch {
-    /* private browsing / quota — return the in-memory ID for this session */
+    return false;
   }
-  return id;
 }
 
 export function isOptedOut(): boolean {
-  return safeLocalStorage()?.getItem(OPT_OUT_KEY) === "1";
+  return readStoredFlag(OPT_OUT_KEY);
 }
 
 export function hasShownNotice(): boolean {
-  return safeLocalStorage()?.getItem(NOTICE_KEY) === "1";
+  return readStoredFlag(NOTICE_KEY);
 }
 
 export function markNoticeShown(): void {
@@ -56,14 +56,6 @@ export function markNoticeShown(): void {
 // route-level remounts within one tab don't refire `studio_session_start`.
 // Uses sessionStorage directly because the dedupe is per-tab, not per-browser.
 const SESSION_FIRED_KEY = "hyperframes-studio:sessionStartFired";
-
-function safeSessionStorage(): Storage | null {
-  try {
-    return typeof sessionStorage === "undefined" ? null : sessionStorage;
-  } catch {
-    return null;
-  }
-}
 
 export function hasFiredSessionStart(): boolean {
   return safeSessionStorage()?.getItem(SESSION_FIRED_KEY) === "1";

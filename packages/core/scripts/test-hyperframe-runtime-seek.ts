@@ -93,12 +93,19 @@ function testGsapAdapterPreservesTotalTime(): void {
   const { calls, timeline } = createTimeline(true);
   const adapter = createGsapAdapter({ getTimeline: () => timeline });
 
-  adapter.seek({ time: 2.033333333333333 });
+  const seekTime = 2.033333333333333;
+  adapter.seek({ time: seekTime });
 
   assert.deepEqual(
     calls,
-    [{ method: "pause" }, { method: "totalTime", time: 2.033333333333333, suppressEvents: false }],
-    "GSAP adapter should not downgrade deterministic seeks back to seek()",
+    [
+      { method: "pause" },
+      { method: "totalTime", time: seekTime, suppressEvents: false },
+      // Silent re-render arriving from below, so same-time steps apply in authored order
+      { method: "totalTime", time: seekTime - 0.001, suppressEvents: true },
+      { method: "totalTime", time: seekTime, suppressEvents: true },
+    ],
+    "GSAP adapter should seek via totalTime() then re-render from just below",
   );
 }
 

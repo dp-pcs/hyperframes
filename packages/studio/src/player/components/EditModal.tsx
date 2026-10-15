@@ -13,16 +13,43 @@ interface EditPopoverProps {
   onClose: () => void;
 }
 
+function draftKey(start: number, end: number): string {
+  return `hf-edit-draft:${start.toFixed(2)}:${end.toFixed(2)}`;
+}
+
+function readDraft(key: string): string {
+  try {
+    return sessionStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(key: string, value: string): void {
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* storage unavailable — draft persistence degrades gracefully */
+  }
+}
+
 export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }: EditPopoverProps) {
   const elements = usePlayerStore((s) => s.elements);
-  const [prompt, setPrompt] = useState("");
-  const [copiedAgentPrompt, setCopiedAgentPrompt] = useState(false);
-  const [copiedPromptOnly, setCopiedPromptOnly] = useState(false);
-  const popoverRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
   const start = Math.min(rangeStart, rangeEnd);
   const end = Math.max(rangeStart, rangeEnd);
+  // Persist the typed prompt per range so Escape/outside-click doesn't destroy it.
+  const storageKey = draftKey(start, end);
+  const [prompt, setPromptState] = useState(() => readDraft(storageKey));
+  const setPrompt = (value: string) => {
+    setPromptState(value);
+    writeDraft(storageKey, value);
+  };
+  const [copiedAgentPrompt, setCopiedAgentPrompt] = useState(false);
+  const [copiedPromptOnly, setCopiedPromptOnly] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const elementsInRange = useMemo(() => {
     return elements.filter((el) => {
@@ -64,19 +91,28 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
 
   const handleCopy = useCallback(async () => {
     const copied = await copyTextToClipboard(buildClipboardText());
-    if (!copied) return;
+    if (!copied) {
+      setCopyError(true);
+      return;
+    }
+    setCopyError(false);
+    writeDraft(storageKey, "");
     setCopiedAgentPrompt(true);
     setTimeout(() => {
       setCopiedAgentPrompt(false);
       onClose();
     }, 800);
-  }, [buildClipboardText, onClose]);
+  }, [buildClipboardText, onClose, storageKey]);
 
   const handleCopyPrompt = useCallback(async () => {
     const promptText = buildPromptCopyText(prompt);
     if (!promptText) return;
     const copied = await copyTextToClipboard(promptText);
-    if (!copied) return;
+    if (!copied) {
+      setCopyError(true);
+      return;
+    }
+    setCopyError(false);
     setCopiedPromptOnly(true);
     setTimeout(() => {
       setCopiedPromptOnly(false);
@@ -98,7 +134,7 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-studio-accent" />
             <span className="text-[11px] font-medium text-neutral-300">
-              {formatTime(start)} — {formatTime(end)}
+              {formatTime(start)} to {formatTime(end)}
             </span>
           </div>
           <span className="text-[10px] text-neutral-600">
@@ -111,7 +147,7 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
           <div className="px-4 py-2 border-b border-neutral-800/40 max-h-24 overflow-y-auto">
             {elementsInRange.map((el) => (
               <div key={el.id} className="flex items-center justify-between py-0.5">
-                <span className="text-[10px] font-mono text-studio-accent/80">#{el.id}</span>
+                <span className="text-[10px] font-mono text-accent-ink/80">#{el.id}</span>
                 <span className="text-[10px] text-neutral-600">{el.tag}</span>
               </div>
             ))}
@@ -132,18 +168,23 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
             }}
             placeholder="What should change?"
             rows={2}
-            className="w-full px-3 py-2 text-xs bg-neutral-800/60 border border-neutral-700/40 rounded-lg text-neutral-200 placeholder:text-neutral-600 resize-none focus:outline-none focus:border-studio-accent/40 transition-colors"
+            className="w-full px-3 py-2 text-xs bg-neutral-800/60 border border-neutral-700/40 rounded-lg text-neutral-200 placeholder:text-neutral-600 resize-none focus:outline-hidden focus:border-studio-accent/40 transition-colors"
           />
         </div>
 
         {/* Action */}
+        {copyError && (
+          <p className="px-3 pb-2 text-[10px] text-danger-ink" role="alert">
+            Copy failed. Check clipboard permissions and try again.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-2 px-3 pb-3">
           <button
             onClick={handleCopyPrompt}
             disabled={!buildPromptCopyText(prompt)}
             className={`py-1.5 text-[11px] font-medium rounded-lg transition-all border ${
               copiedPromptOnly
-                ? "bg-green-500/20 text-green-400 border-green-500/30"
+                ? "bg-accent/15 text-accent-ink border-accent/30"
                 : "bg-neutral-800/70 text-neutral-200 border-neutral-700/50 hover:bg-neutral-800"
             } disabled:opacity-50 disabled:cursor-not-allowed`}
           >
@@ -153,13 +194,13 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
             onClick={handleCopy}
             className={`py-1.5 text-[11px] font-medium rounded-lg transition-all ${
               copiedAgentPrompt
-                ? "bg-green-500/20 text-green-400 border border-green-500/30"
-                : "bg-studio-accent/15 text-studio-accent border border-studio-accent/25 hover:bg-studio-accent/25"
+                ? "bg-accent/15 text-accent-ink border border-accent/30"
+                : "bg-studio-accent/15 text-accent-ink border border-studio-accent/25 hover:bg-studio-accent/25"
             }`}
           >
             {copiedAgentPrompt ? "Copied!" : "Copy to Agent"}
             {!copiedAgentPrompt && (
-              <span className="text-[9px] text-studio-accent/50 ml-1.5">Cmd+Enter</span>
+              <span className="text-[9px] text-text-muted ml-1.5">Cmd+Enter</span>
             )}
           </button>
         </div>

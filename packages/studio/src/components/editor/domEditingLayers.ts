@@ -1,8 +1,13 @@
-/**
- * Layer items, text fields, capabilities, selection resolution, and patch operations
- * for dom editing.
- */
+import { PREVIEW_ONLY_ATTRS } from "@hyperframes/core/studio-preview-mark";
+import { knownSourceAnswer, probeSourceElement, type ProbeTarget } from "./probeSourceElement";
+import { isAudibleVideoNode } from "../../player/lib/timelineElementHelpers";
 import type { PatchOperation } from "../../utils/sourcePatcher";
+import {
+  resolveEditingAffordances,
+  resolveEditingSections,
+  type EditableElementFacts,
+} from "@hyperframes/core/editing";
+import { groupScopedLayerRoots, resolveGroupCapture } from "./domEditingGroups";
 import type {
   DomEditCapabilities,
   DomEditContextOptions,
@@ -11,31 +16,34 @@ import type {
   DomEditTextField,
 } from "./domEditingTypes";
 import {
+  buildElementLabel,
   buildStableSelector,
   findClosestByAttribute,
   getCuratedComputedStyles,
   getDataAttributes,
   getInlineStyles,
-  getPreferredClassSelector,
   getSelectorIndex,
   getSourceFileForElement,
-  humanizeIdentifier,
+  isEditableTextLeaf,
   isHtmlElement,
-  isIdentityTransform,
-  isTextBearingTag,
-  parsePx,
 } from "./domEditingDom";
 import {
   findElementForSelection,
-  getDomLayerPatchTarget,
-  getDirectLayerChildren,
   getSelectionCandidate,
+  isDomLayerElement,
 } from "./domEditingElement";
+import { isCompositionRootLayer } from "./domEditingRootLayer";
+import { withSelectorIndexPass } from "../../utils/sourceScopedSelectorIndex";
+import { type DomEditLayerWalkCache, readDomEditLayerWalkEntry } from "./domEditLayerWalkCache";
 
-// ─── Text fields ────────────────────────────────────────────────────────────
-
-export function isEditableTextLeaf(el: HTMLElement): boolean {
-  return isTextBearingTag(el.tagName.toLowerCase()) && el.children.length === 0;
+function sameTagChildIndex(el: HTMLElement): number {
+  let index = 0;
+  let sibling = el.previousElementSibling;
+  while (sibling) {
+    if (sibling.tagName === el.tagName) index += 1;
+    sibling = sibling.previousElementSibling;
+  }
+  return index;
 }
 
 function getTextFieldLabel(
@@ -48,11 +56,14 @@ function getTextFieldLabel(
   return `Text ${index + 1}`;
 }
 
+const NOT_COPIED_ATTRS = new Set<string>(["style", ...PREVIEW_ONLY_ATTRS]);
+
 function buildTextField(
   el: HTMLElement,
   index: number,
   total: number,
   source: "self" | "child",
+  sourceChildIndex?: number,
 ): DomEditTextField {
   const tagName = el.tagName.toLowerCase();
   const key = el.getAttribute("data-hf-text-key") ?? `${source}:${index}:${tagName}`;
@@ -62,7 +73,7 @@ function buildTextField(
     value: el.textContent ?? "",
     tagName,
     attributes: Array.from(el.attributes)
-      .filter((attribute) => attribute.name !== "style")
+      .filter((attribute) => !NOT_COPIED_ATTRS.has(attribute.name))
       .map((attribute) => ({
         name: attribute.name,
         value: attribute.value,
@@ -70,9 +81,11 @@ function buildTextField(
     inlineStyles: getInlineStyles(el),
     computedStyles: getCuratedComputedStyles(el),
     source,
+    ...(sourceChildIndex == null ? {} : { sourceChildIndex }),
   };
 }
 
+// fallow-ignore-next-line complexity
 export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
   const childElements = Array.from(el.children).filter(isHtmlElement).filter(isEditableTextLeaf);
 
@@ -100,7 +113,9 @@ export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
           });
           childIdx++;
         } else if (isHtmlElement(node) && isEditableTextLeaf(node)) {
-          fields.push(buildTextField(node, childIdx, childElements.length, "child"));
+          fields.push(
+            buildTextField(node, childIdx, childElements.length, "child", sameTagChildIndex(node)),
+          );
           childIdx++;
         }
       }
@@ -108,7 +123,7 @@ export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
     }
 
     return childElements.map((child, index) =>
-      buildTextField(child, index, childElements.length, "child"),
+      buildTextField(child, index, childElements.length, "child", sameTagChildIndex(child)),
     );
   }
 
@@ -167,119 +182,136 @@ export function buildDefaultDomEditTextField(base?: Partial<DomEditTextField>): 
   };
 }
 
-// ─── Capabilities ────────────────────────────────────────────────────────────
+export interface DomEditChildLocator {
+  childSelector: string;
+  childIndex: number;
+}
 
-export function resolveDomEditCapabilities(args: {
-  selector?: string;
-  tagName?: string;
-  className?: string;
-  inlineStyles: Record<string, string>;
-  computedStyles: Record<string, string>;
-  isCompositionHost: boolean;
-  isInsideLockedComposition: boolean;
-  isMasterView: boolean;
-}): DomEditCapabilities {
-  if (!args.selector || args.isInsideLockedComposition) {
-    return {
-      canSelect: !args.isInsideLockedComposition,
-      canEditStyles: false,
-      canMove: false,
-      canResize: false,
-      canApplyManualOffset: false,
-      canApplyManualSize: false,
-      canApplyManualRotation: false,
-      reasonIfDisabled: args.isInsideLockedComposition
-        ? "This element belongs to a locked composition."
-        : "Studio could not resolve a stable patch target for this element.",
-    };
-  }
-
-  const position = args.computedStyles.position;
-  const left = parsePx(args.inlineStyles.left) ?? parsePx(args.computedStyles.left);
-  const top = parsePx(args.inlineStyles.top) ?? parsePx(args.computedStyles.top);
-  const width = parsePx(args.inlineStyles.width) ?? parsePx(args.computedStyles.width);
-  const height = parsePx(args.inlineStyles.height) ?? parsePx(args.computedStyles.height);
-  const hasTransformDrivenGeometry = !isIdentityTransform(args.computedStyles.transform);
-
-  const canMove =
-    (position === "absolute" || position === "fixed") &&
-    left != null &&
-    top != null &&
-    !hasTransformDrivenGeometry;
-
-  const canResize = canMove && (width != null || height != null);
-  const canApplyManualGeometry = !args.isCompositionHost;
-  const canApplyManualOffset = canApplyManualGeometry;
-  const canApplyManualSize = canApplyManualGeometry;
-  const canApplyManualRotation = canApplyManualGeometry;
-  const reasonIfDisabled = canApplyManualGeometry
-    ? undefined
-    : "Select an internal layer to transform it.";
-
-  if (args.isCompositionHost && args.isMasterView) {
-    return {
-      canSelect: true,
-      canEditStyles: false,
-      canMove,
-      canResize,
-      canApplyManualOffset,
-      canApplyManualSize,
-      canApplyManualRotation,
-      reasonIfDisabled,
-    };
-  }
+export function buildTextFieldChildLocator(
+  fields: DomEditTextField[],
+  fieldKey: string,
+): DomEditChildLocator | null {
+  const field = fields.find((candidate) => candidate.key === fieldKey);
+  if (!field || field.source !== "child") return null;
+  // sourceChildIndex is only absent for a synthetic field that was never read
+  // back from the live DOM (e.g. one built by buildDefaultDomEditTextField).
+  // Guessing its position by counting same-tag "child" fields elsewhere in
+  // the array is unreliable and can silently locate the wrong element — fail
+  // closed instead so the caller falls back to the unsupported-structure path.
+  if (field.sourceChildIndex == null) return null;
 
   return {
-    canSelect: true,
-    canEditStyles: true,
-    canMove,
-    canResize,
-    canApplyManualOffset,
-    canApplyManualSize,
-    canApplyManualRotation,
-    reasonIfDisabled,
+    childSelector: `:scope > ${field.tagName}`,
+    childIndex: field.sourceChildIndex,
   };
 }
 
-// ─── Element label ────────────────────────────────────────────────────────────
-
-export function buildElementLabel(el: HTMLElement): string {
-  const compositionId = el.getAttribute("data-composition-id");
-  if (compositionId && compositionId !== "main") {
-    return humanizeIdentifier(compositionId);
-  }
-
-  const compositionSrc =
-    el.getAttribute("data-composition-src") ?? el.getAttribute("data-composition-file");
-  if (compositionSrc) {
-    return humanizeIdentifier(compositionSrc);
-  }
-
-  if (el.id) return humanizeIdentifier(el.id);
-
-  const preferredClass = getPreferredClassSelector(el);
-  if (preferredClass) {
-    return humanizeIdentifier(preferredClass.replace(/^\./, ""));
-  }
-
-  const text = (el.textContent ?? "").trim().replace(/\s+/g, " ");
-  if (text) return text.length > 40 ? `${text.slice(0, 39)}…` : text;
-  return el.tagName.toLowerCase();
+function capabilityFacts(geometry: {
+  hasStableTarget: boolean;
+  tag: string;
+  inlineStyles: Record<string, string>;
+  computedStyles: Record<string, string>;
+  isCompositionHost: boolean;
+  isCompositionRoot: boolean;
+  isInsideLockedComposition: boolean;
+  isMasterView: boolean;
+  existsInSource: boolean;
+}): EditableElementFacts {
+  return {
+    ...geometry,
+    hasEditableText: false,
+    hasTimingStart: false,
+    animationCount: 0,
+  };
 }
 
-// ─── Selection resolution ────────────────────────────────────────────────────
+/**
+ * Build core EditableElementFacts from a fully-resolved DomEditSelection.
+ * `animationCount` is supplied by the caller because live GSAP tweens arrive on
+ * a separate channel (the PropertyPanel `gsapAnimations` prop), not on the
+ * selection — `selection.gsapAnimations` is never populated.
+ */
+export function domEditSelectionToFacts(
+  selection: DomEditSelection,
+  animationCount = selection.gsapAnimations?.length ?? 0,
+): EditableElementFacts {
+  return {
+    hasStableTarget: Boolean(selection.selector || selection.hfId),
+    tag: selection.tagName,
+    inlineStyles: selection.inlineStyles,
+    computedStyles: selection.computedStyles,
+    isCompositionHost: selection.isCompositionHost,
+    isCompositionRoot: false,
+    isInsideLockedComposition: selection.isInsideLockedComposition,
+    isMasterView: false,
+    existsInSource: true,
+    hasEditableText: selection.textFields.length > 0,
+    hasTimingStart: selection.dataAttributes.start != null,
+    animationCount,
+    hasAudio: isAudibleVideoNode(selection.element),
+  };
+}
 
-export function resolveDomEditSelection(
+/**
+ * Resolve DOM edit capabilities for a given element.
+ * Thin wrapper over core resolveEditingAffordances — kept for backward
+ * compatibility (tests and the barrel import this signature directly).
+ */
+export function resolveDomEditCapabilities(args: {
+  selector?: string;
+  hfId?: string;
+  tagName?: string;
+  inlineStyles: Record<string, string>;
+  computedStyles: Record<string, string>;
+  isCompositionHost: boolean;
+  isCompositionRoot?: boolean;
+  isInsideLockedComposition: boolean;
+  isMasterView: boolean;
+  existsInSource?: boolean;
+}): DomEditCapabilities {
+  return resolveEditingAffordances(
+    capabilityFacts({
+      hasStableTarget: Boolean(args.selector || args.hfId),
+      tag: (args.tagName ?? "div").toLowerCase(),
+      inlineStyles: args.inlineStyles,
+      computedStyles: args.computedStyles,
+      isCompositionHost: args.isCompositionHost,
+      isCompositionRoot: args.isCompositionRoot ?? false,
+      isInsideLockedComposition: args.isInsideLockedComposition ?? false,
+      isMasterView: args.isMasterView,
+      existsInSource: args.existsInSource ?? true,
+    }),
+  ).capabilities;
+}
+
+// fallow-ignore-next-line complexity
+export async function resolveDomEditSelection(
   startEl: HTMLElement | null,
-  options: DomEditContextOptions,
-): DomEditSelection | null {
+  options: DomEditContextOptions & {
+    projectId?: string | null;
+    skipSourceProbe?: boolean;
+    exactTarget?: boolean;
+    previous?: DomEditSelection | null;
+  },
+): Promise<DomEditSelection | null> {
   if (!startEl) return null;
   const doc = startEl.ownerDocument;
 
-  let current: HTMLElement | null = getSelectionCandidate(startEl, options);
+  let capture = options.exactTarget
+    ? ({ kind: "unit", element: startEl } as const)
+    : resolveGroupCapture(startEl, options.activeGroupElement ?? null);
+  if (capture.kind === "out-of-scope") {
+    // Drill-in is non-sticky: clicking/hovering OUTSIDE the drilled-into group
+    // exits it and resolves the target normally, rather than selecting nothing
+    // (which felt like "can't select anything" once you'd drilled in).
+    capture = resolveGroupCapture(startEl, null);
+  }
+  let current: HTMLElement | null =
+    capture.kind === "unit" ? capture.element : getSelectionCandidate(startEl, options);
   while (current && current !== doc.body && current !== doc.documentElement) {
     const selector = buildStableSelector(current);
-    if (!selector) {
+    const hfId = readHfId(current);
+    if (!selector && !hfId) {
       current = current.parentElement;
       continue;
     }
@@ -288,36 +320,49 @@ export function resolveDomEditSelection(
       current,
       options.activeCompositionPath,
     );
-    const selectorIndex = getSelectorIndex(
-      doc,
-      current,
-      selector,
-      sourceFile,
-      options.activeCompositionPath,
-    );
+    const selectorIndex = selector
+      ? getSelectorIndex(doc, current, selector, sourceFile, options.activeCompositionPath)
+      : undefined;
     const compositionSrc =
       current.getAttribute("data-composition-src") ??
       current.getAttribute("data-composition-file") ??
       undefined;
     const inlineStyles = getInlineStyles(current);
     const computedStyles = getCuratedComputedStyles(current);
+    const isCompositionRoot =
+      (current.hasAttribute("data-composition-id") && !compositionSrc) ||
+      isCompositionRootLayer(current, doc, computedStyles);
     const textFields = collectDomEditTextFields(current);
     const isInsideLocked = Boolean(findClosestByAttribute(current, ["data-timeline-locked"]));
-    const capabilities = resolveDomEditCapabilities({
-      selector,
-      tagName: current.tagName.toLowerCase(),
-      className: current.className,
-      inlineStyles,
-      computedStyles,
-      isCompositionHost: Boolean(compositionSrc),
-      isInsideLockedComposition: isInsideLocked,
-      isMasterView: options.isMasterView,
-    });
+    const probeTarget: ProbeTarget = {};
+    if (current.id) probeTarget.id = current.id;
+    if (hfId) probeTarget.hfId = hfId;
+    if (selector) probeTarget.selector = selector;
+    if (selectorIndex != null) probeTarget.selectorIndex = selectorIndex;
+    let existsInSource = knownSourceAnswer(options.previous, current, sourceFile, probeTarget);
+    const probe = existsInSource === undefined && !options.skipSourceProbe;
+    if (probe && options.projectId && (current.id || selector || hfId)) {
+      existsInSource = await probeSourceElement(options.projectId, sourceFile, probeTarget);
+    }
+    const capabilities = resolveEditingAffordances(
+      capabilityFacts({
+        hasStableTarget: Boolean(selector || hfId),
+        tag: current.tagName.toLowerCase(),
+        inlineStyles,
+        computedStyles,
+        isCompositionHost: Boolean(compositionSrc),
+        isCompositionRoot,
+        isInsideLockedComposition: isInsideLocked,
+        isMasterView: options.isMasterView,
+        existsInSource: existsInSource ?? true,
+      }),
+    ).capabilities;
     const rect = current.getBoundingClientRect();
 
     return {
       element: current,
       id: current.id || undefined,
+      hfId,
       selector,
       selectorIndex,
       sourceFile,
@@ -339,16 +384,17 @@ export function resolveDomEditSelection(
       computedStyles,
       textFields,
       capabilities,
+      existsInSource,
     };
   }
 
   return null;
 }
 
-export function refreshDomEditSelection(
+export async function refreshDomEditSelection(
   selection: DomEditSelection,
   activeCompositionPath: string | null,
-): DomEditSelection | null {
+): Promise<DomEditSelection | null> {
   const doc = selection.element.ownerDocument;
   const nextElement = findElementForSelection(doc, selection, activeCompositionPath);
   return nextElement
@@ -379,7 +425,7 @@ export function countDomEditChildLayers(
   const visit = (el: HTMLElement) => {
     for (const child of Array.from(el.children)) {
       if (!isHtmlElement(child)) continue;
-      if (getDomLayerPatchTarget(child, options.activeCompositionPath)) {
+      if (isDomLayerElement(child)) {
         count += 1;
         if (count >= maxCount) return;
       }
@@ -392,34 +438,43 @@ export function countDomEditChildLayers(
   return count;
 }
 
+// Every editable element under `root`, in document order. `maxItems` is a
+// caller's rendering budget, not a property of the document: hit-testing
+// callers (marquee, off-canvas indicators) must see all of it, and sharing a
+// truncated list left everything past the cut unselectable however far you drag.
 export function collectDomEditLayerItems(
   root: HTMLElement | null | undefined,
   options: DomEditContextOptions,
-  maxItems = 80,
+  maxItems = Number.POSITIVE_INFINITY,
+  cache?: DomEditLayerWalkCache,
 ): DomEditLayerItem[] {
   if (!root) return [];
+  cache?.beginWalk(options.activeCompositionPath);
 
   const items: DomEditLayerItem[] = [];
+  // fallow-ignore-next-line complexity
   const visit = (el: HTMLElement, depth: number) => {
     if (items.length >= maxItems) return;
 
-    const target = getDomLayerPatchTarget(el, options.activeCompositionPath);
-    if (target) {
+    const entry = readDomEditLayerWalkEntry(el, options.activeCompositionPath, cache);
+    if (entry) {
+      const { target } = entry;
       items.push({
         key: getDomEditLayerKey(target),
         element: el,
-        label: buildElementLabel(el),
+        label: entry.label,
         tagName: el.tagName.toLowerCase(),
         depth,
-        childCount: getDirectLayerChildren(el, options).length,
+        childCount: entry.childCount,
         id: target.id ?? undefined,
+        hfId: target.hfId ?? undefined,
         selector: target.selector ?? undefined,
         selectorIndex: target.selectorIndex,
         sourceFile: target.sourceFile,
       });
     }
 
-    const nextDepth = target ? depth + 1 : depth;
+    const nextDepth = entry ? depth + 1 : depth;
     for (const child of Array.from(el.children)) {
       if (!isHtmlElement(child)) continue;
       visit(child, nextDepth);
@@ -427,26 +482,53 @@ export function collectDomEditLayerItems(
     }
   };
 
-  visit(root, 0);
+  // Every item resolves its selector's occurrence index, and unshared that is a
+  // whole-document query per element — quadratic once a composition repeats a
+  // card or tile class. The walk is one synchronous read of a document it does
+  // not mutate, so one index per selector serves the whole of it. The pass lives
+  // here rather than in each caller because this function owns the loop.
+  withSelectorIndexPass(root.ownerDocument, () => {
+    // Drilled into a group → show only its members; otherwise the whole tree.
+    for (const el of groupScopedLayerRoots(root, options.activeGroupElement ?? null)) visit(el, 0);
+  });
   return items;
+}
+
+export function liveLayerElement(
+  layer: DomEditLayerItem,
+  doc: Document | null | undefined,
+  activeCompositionPath: string | null,
+): HTMLElement {
+  if (layer.element.isConnected || !doc) return layer.element;
+  return findElementForSelection(doc, layer, activeCompositionPath) ?? layer.element;
 }
 
 // ─── Patch operations ────────────────────────────────────────────────────────
 
-export function buildDomEditStylePatchOperation(property: string, value: string): PatchOperation {
+export function buildDomEditStylePatchOperation(
+  property: string,
+  value: string | null,
+  childLocator?: DomEditChildLocator,
+): PatchOperation {
   return {
     type: "inline-style",
     property,
     value,
+    ...childLocator,
   };
 }
 
-export function buildDomEditTextPatchOperation(value: string): PatchOperation {
-  return {
-    type: "text-content",
-    property: "text",
-    value,
-  };
+export function buildDomEditTextPatchOperation(
+  value: string,
+  childLocator?: DomEditChildLocator,
+): PatchOperation {
+  return { type: "text-content", property: "text", value, ...childLocator };
+}
+
+/** Replace an element's contents with markup, for a change no per-child operation
+ * can express (a text layer added, removed or reordered). Sanitized at both ends. */
+export function buildDomEditRichTextPatchOperation(value: string): PatchOperation {
+  return { type: "rich-text", property: "", value };
 }
 
 // ─── Non-editable reason ─────────────────────────────────────────────────────
@@ -484,10 +566,11 @@ export function getDomEditNonEditableReason(
 }
 
 export function getDomEditTargetKey(
-  selection: Pick<DomEditSelection, "id" | "selector" | "selectorIndex" | "sourceFile">,
+  selection: Pick<DomEditSelection, "id" | "hfId" | "selector" | "selectorIndex" | "sourceFile">,
 ): string {
   return [
     selection.sourceFile || "index.html",
+    selection.hfId ?? "",
     selection.id ?? "",
     selection.selector ?? "",
     selection.selectorIndex ?? "",
@@ -495,11 +578,22 @@ export function getDomEditTargetKey(
 }
 
 export function isTextEditableSelection(selection: DomEditSelection): boolean {
-  return (
-    selection.textFields.length > 0 &&
-    !selection.isCompositionHost &&
-    !selection.isInsideLockedComposition
-  );
+  return resolveEditingSections(domEditSelectionToFacts(selection)).text;
 }
 
 // buildElementAgentPrompt is in domEditingAgentPrompt.ts
+
+export function readHfId(element: Element): string | undefined {
+  return element.getAttribute("data-hf-id")?.trim() || undefined;
+}
+
+export function buildDomEditPatchTarget(
+  selection: Pick<DomEditSelection, "id" | "hfId" | "selector" | "selectorIndex">,
+): { id?: string | null; hfId?: string; selector?: string; selectorIndex?: number } {
+  return {
+    id: selection.id,
+    hfId: selection.hfId,
+    selector: selection.selector,
+    selectorIndex: selection.selectorIndex,
+  };
+}

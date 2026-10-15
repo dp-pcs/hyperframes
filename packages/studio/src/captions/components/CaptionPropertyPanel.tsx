@@ -2,7 +2,29 @@ import { memo, useCallback, useState } from "react";
 import { useCaptionStore } from "../store";
 import type { CaptionStyle } from "../types";
 import { CaptionAnimationPanel } from "./CaptionAnimationPanel";
-import { Section, Row, inputCls } from "./shared";
+import { Section, Row, NumberField } from "./shared";
+
+/** True when the given style key differs across the selected segments. */
+function isMixedValue(
+  model: { segments: Map<string, { style: Partial<CaptionStyle> }> } | null,
+  selectedSegmentIds: Set<string>,
+  key: "x" | "y" | "scaleX" | "rotation",
+  fallback: number,
+): boolean {
+  if (!model || selectedSegmentIds.size < 2) return false;
+  let first: number | undefined;
+  let seen = false;
+  for (const segId of selectedSegmentIds) {
+    const v = model.segments.get(segId)?.style[key] ?? fallback;
+    if (!seen) {
+      first = v;
+      seen = true;
+    } else if (v !== first) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -180,25 +202,32 @@ export const CaptionPropertyPanel = memo(function CaptionPropertyPanel({
   const rotation = effectiveStyle.rotation ?? 0;
   const scaleX = effectiveStyle.scaleX ?? 1;
 
+  const xMixed = isMixedValue(model, selectedSegmentIds, "x", 0);
+  const yMixed = isMixedValue(model, selectedSegmentIds, "y", 0);
+  const scaleMixed = isMixedValue(model, selectedSegmentIds, "scaleX", 1);
+  const rotationMixed = isMixedValue(model, selectedSegmentIds, "rotation", 0);
+
   // Count label
   const countLabel = selectedSegmentIds.size === 1 ? "1 word" : `${selectedSegmentIds.size} words`;
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-neutral-800 flex-shrink-0">
+      <div className="px-3 py-2 border-b border-neutral-800 shrink-0">
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-2xs text-neutral-500">{countLabel}</span>
         </div>
         {/* Tab switcher */}
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="tablist" aria-label="Caption editing tabs">
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === "style"}
             onClick={() => setActiveTab("style")}
             className={[
-              "flex-1 py-0.5 rounded text-2xs font-medium transition-colors",
+              "flex-1 py-0.5 rounded-sm text-2xs font-medium transition-colors",
               activeTab === "style"
-                ? "bg-studio-accent/20 text-studio-accent border border-studio-accent/50"
+                ? "bg-studio-accent/20 text-accent-ink border border-studio-accent/50"
                 : "text-neutral-500 border border-neutral-800 hover:text-neutral-300 hover:border-neutral-600",
             ].join(" ")}
           >
@@ -206,11 +235,13 @@ export const CaptionPropertyPanel = memo(function CaptionPropertyPanel({
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === "animation"}
             onClick={() => setActiveTab("animation")}
             className={[
-              "flex-1 py-0.5 rounded text-2xs font-medium transition-colors",
+              "flex-1 py-0.5 rounded-sm text-2xs font-medium transition-colors",
               activeTab === "animation"
-                ? "bg-studio-accent/20 text-studio-accent border border-studio-accent/50"
+                ? "bg-studio-accent/20 text-accent-ink border border-studio-accent/50"
                 : "text-neutral-500 border border-neutral-800 hover:text-neutral-300 hover:border-neutral-600",
             ].join(" ")}
           >
@@ -227,44 +258,39 @@ export const CaptionPropertyPanel = memo(function CaptionPropertyPanel({
         <div className="flex-1 overflow-y-auto px-3 py-2">
           <Section label="Position">
             <Row label="X">
-              <input
-                type="number"
+              <NumberField
                 value={x}
-                onChange={(e) => handleStyleChange({ x: Number(e.target.value) })}
-                className={inputCls}
+                mixed={xMixed}
+                ariaLabel="X position"
+                onCommit={(v) => handleStyleChange({ x: v })}
               />
             </Row>
             <Row label="Y">
-              <input
-                type="number"
+              <NumberField
                 value={y}
-                onChange={(e) => handleStyleChange({ y: Number(e.target.value) })}
-                className={inputCls}
+                mixed={yMixed}
+                ariaLabel="Y position"
+                onCommit={(v) => handleStyleChange({ y: v })}
               />
             </Row>
           </Section>
 
           <Section label="Transform">
             <Row label="Scale">
-              <input
-                type="number"
+              <NumberField
                 value={scaleX}
+                mixed={scaleMixed}
                 step={0.1}
-                onChange={(e) =>
-                  handleStyleChange({
-                    scaleX: Number(e.target.value),
-                    scaleY: Number(e.target.value),
-                  })
-                }
-                className={inputCls}
+                ariaLabel="Scale"
+                onCommit={(v) => handleStyleChange({ scaleX: v, scaleY: v })}
               />
             </Row>
             <Row label="Rotation">
-              <input
-                type="number"
+              <NumberField
                 value={rotation}
-                onChange={(e) => handleStyleChange({ rotation: Number(e.target.value) })}
-                className={inputCls}
+                mixed={rotationMixed}
+                ariaLabel="Rotation"
+                onCommit={(v) => handleStyleChange({ rotation: v })}
               />
             </Row>
           </Section>

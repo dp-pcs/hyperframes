@@ -1,10 +1,12 @@
 import type { TimelineElement } from "../store/playerStore";
 
+export const CLIP_TRIM_HIT_PX = 14;
+
 export interface TimelineTrackStyle {
   clip: string;
   accent: string;
   label: string;
-  iconBackground: string;
+  clipActive?: string;
 }
 
 export interface TimelineTheme {
@@ -22,53 +24,69 @@ export interface TimelineTheme {
   tickMinor: string;
   clipBackground: string;
   clipBackgroundActive: string;
+  clipBackgroundHover: string;
+  clipBackgroundDragging: string;
   clipBorder: string;
   clipBorderHover: string;
   clipBorderActive: string;
-  clipShadow: string;
-  clipShadowHover: string;
-  clipShadowActive: string;
-  clipShadowDragging: string;
   handleColor: string;
   panelResizeSeam: string;
   panelResizeActive: string;
   clipRadius: string;
+  audioClipRadius: string;
+  transitionZone: string;
+  transitionBadge: string;
+  transitionBadgeInk: string;
 }
 
 const TRACK_STYLE: TimelineTrackStyle = {
-  clip: "#1c2028",
-  accent: "#3CE6AC",
-  label: "#dde1e8",
-  iconBackground: "rgba(255,255,255,0.06)",
+  clip: "var(--timeline-track-clip-fill)",
+  clipActive: "var(--timeline-track-clip-active)",
+  accent: "var(--color-accent)",
+  label: "var(--timeline-track-label)",
 };
 
+// Every field reads a CSS custom property (declared in styles/theme.css)
+// rather than a literal, so a host themes the timeline the same way it
+// themes the rest of Studio: by overriding the token, not this object.
 export const defaultTimelineTheme: TimelineTheme = {
-  shellBackground: "#0A0A0B",
-  shellBorder: "rgba(255,255,255,0.05)",
-  rulerBorder: "rgba(255,255,255,0.045)",
-  rowBackground: "#0A0A0B",
-  rowBorder: "rgba(255,255,255,0.05)",
-  gutterBackground: "#0A0A0B",
-  gutterBorder: "rgba(255,255,255,0.05)",
-  textPrimary: "#E8EDF5",
-  textSecondary: "#8391A8",
-  tickText: "rgba(131,145,168,0.92)",
-  tickMajor: "rgba(255,255,255,0.13)",
-  tickMinor: "rgba(255,255,255,0.08)",
-  clipBackground: "#141922",
-  clipBackgroundActive: "#181e28",
-  clipBorder: "rgba(255,255,255,0.10)",
-  clipBorderHover: "rgba(255,255,255,0.18)",
-  clipBorderActive: "rgba(255,255,255,0.24)",
-  clipShadow: "none",
-  clipShadowHover: "0 2px 8px rgba(0,0,0,0.2)",
-  clipShadowActive: "0 2px 8px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,255,255,0.04)",
-  clipShadowDragging: "0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.06)",
-  handleColor: "rgba(255,255,255,0.2)",
-  panelResizeSeam: "rgba(255,255,255,0.12)",
-  panelResizeActive: "rgba(255,255,255,0.24)",
-  clipRadius: "6px",
+  shellBackground: "var(--timeline-shell-bg)",
+  shellBorder: "var(--timeline-shell-border)",
+  rulerBorder: "var(--timeline-ruler-border)",
+  rowBackground: "var(--timeline-row-bg)",
+  rowBorder: "var(--timeline-row-border)",
+  gutterBackground: "var(--timeline-gutter-bg)",
+  gutterBorder: "var(--timeline-gutter-border)",
+  textPrimary: "var(--timeline-text-primary)",
+  textSecondary: "var(--timeline-text-secondary)",
+  tickText: "var(--timeline-tick-text)",
+  tickMajor: "var(--timeline-tick-major)",
+  tickMinor: "var(--timeline-tick-minor)",
+  clipBackground: "var(--timeline-clip-bg)",
+  clipBackgroundActive: "var(--timeline-clip-bg-active)",
+  clipBackgroundHover: "var(--timeline-clip-bg-hover)",
+  clipBackgroundDragging: "var(--timeline-clip-bg-dragging)",
+  clipBorder: "var(--timeline-clip-border)",
+  clipBorderHover: "var(--timeline-clip-border-hover)",
+  clipBorderActive: "var(--timeline-clip-border-active)",
+  handleColor: "var(--timeline-handle)",
+  panelResizeSeam: "var(--timeline-resize-seam)",
+  panelResizeActive: "var(--timeline-resize-active)",
+  clipRadius: "var(--timeline-clip-radius)",
+  audioClipRadius: "var(--timeline-clip-audio-radius)",
+  transitionZone: "var(--timeline-transition-zone)",
+  transitionBadge: "var(--timeline-transition-badge)",
+  transitionBadgeInk: "var(--timeline-transition-badge-ink)",
 };
+
+export type ClipWidthLadder = "labeled" | "picture" | "frame";
+
+/** Label chip from 60px. Under 24px the clip is one cropped frame. */
+export function clipWidthLadder(widthPx: number): ClipWidthLadder {
+  if (widthPx < 24) return "frame";
+  if (widthPx < 60) return "picture";
+  return "labeled";
+}
 
 export function getTimelineTrackStyle(_tag: string): TimelineTrackStyle {
   return TRACK_STYLE;

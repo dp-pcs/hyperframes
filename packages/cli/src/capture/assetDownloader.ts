@@ -5,56 +5,358 @@
  * resolution) as the single source of truth for images. Favicon links are passed separately.
  */
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { isBlockedNetworkHost } from "@hyperframes/engine";
+import { ensureCaptureDirSync, writeCaptureFileSync } from "./captureFile.js";
 import { join, extname } from "node:path";
+import { createHash } from "node:crypto";
 import type { DesignTokens, DownloadedAsset } from "./types.js";
 import type { CatalogedAsset } from "./assetCataloger.js";
+import { CAPTURE_USER_AGENT } from "./userAgent.js";
+import { rankIconCandidates, type IconCandidate } from "./faviconRanker.js";
+import { classifyIcon, type IconShape } from "./iconClassifier.js";
+import {
+  readBoundedResponse,
+  createCaptureDownloadBudget,
+  type DownloadByteBudget,
+} from "./readBoundedResponse.js";
+import { captureFontExtension, captureFontFilename } from "./captureFontValidation.js";
+import { captureImageExtension } from "./captureImageValidation.js";
 
+interface DownloadBudgetOptions {
+  byteBudget?: DownloadByteBudget;
+  remainingMs?: () => number;
+}
+
+/**
+ * Why an asset the page referenced is not in the capture.
+ *
+ * Three of these are DECISIONS this downloader made and one is a FAILURE it hit, which is the
+ * split a reader actually needs: a capture that is thin because the page is thin looks exactly
+ * like a capture that is thin because a limit truncated it, and neither used to say so.
+ *
+ * Every member is counted at the single line that performs the drop, so a count can never
+ * disagree with the branch it describes.
+ */
+export type AssetDropReason =
+  /** Fetched, then judged too small to be a real asset rather than a spacer or tracking pixel. */
+  | "size-floor"
+  /** The post-navigation clock ran out before this one was reached. */
+  | "budget-exhausted"
+  /** A per-run or per-family limit was already met. */
+  | "cap-reached"
+  /** The request or the write failed: network error, timeout, refused address, bad status, disk. */
+  | "unavailable";
+
+export type AssetDropCounts = Record<AssetDropReason, number>;
+
+/** A tally with every reason at zero — the shape a caller merges into. */
+export function noDrops(): AssetDropCounts {
+  return { "size-floor": 0, "budget-exhausted": 0, "cap-reached": 0, unavailable: 0 };
+}
+
+/** Sum two tallies. Used to fold the font pass and the asset pass into one capture-wide count. */
+export function mergeDrops(a: AssetDropCounts, b: AssetDropCounts): AssetDropCounts {
+  const total = noDrops();
+  for (const reason of Object.keys(total) as AssetDropReason[]) {
+    total[reason] = a[reason] + b[reason];
+  }
+  return total;
+}
+
+/** How many assets were dropped in total, for a caller deciding whether to say anything at all. */
+export function totalDrops(drops: AssetDropCounts): number {
+  return Object.values(drops).reduce((sum, n) => sum + n, 0);
+}
+
+// SVGs: hash-of-bytes filename so it can't drift from content; label-derived names mis-assigned brands.
+function svgContentHashSlug(svgSource: string | Buffer, isLogo: boolean): string {
+  const hash = createHash("sha1").update(svgSource).digest("hex").slice(0, 8);
+  return isLogo ? `logo-${hash}` : `svg-${hash}`;
+}
+
+/**
+ * Make a scraped inline `<svg>` usable as a standalone `.svg` file.
+ *
+ * An inline SVG in an HTML document inherits the SVG namespace from the parser, so the DOM's
+ * `outerHTML` does not serialize `xmlns`. That string is fine pasted back into HTML but is NOT
+ * a valid standalone document: `<img src="logo-abc123.svg">` renders a broken-image icon, which
+ * is how these assets are actually consumed downstream. Declare the namespaces on the way to disk.
+ *
+ * `xlink:href` is deprecated but still emitted by plenty of sites; an undeclared `xlink:` prefix
+ * is a parse error in a standalone document, so declare that too — but only when it is used.
+ */
+export function toStandaloneSvg(outerHTML: string): string {
+  const open = outerHTML.match(/<svg\b[^>]*>/i);
+  if (!open) return outerHTML;
+  const original = open[0];
+  let tag = original;
+  const add: string[] = [];
+  if (!/\sxmlns\s*=/i.test(tag)) add.push('xmlns="http://www.w3.org/2000/svg"');
+  if (/\sxlink:[a-z-]+\s*=/i.test(outerHTML) && !/\sxmlns:xlink\s*=/i.test(tag)) {
+    add.push('xmlns:xlink="http://www.w3.org/1999/xlink"');
+  }
+  if (!add.length) return outerHTML;
+  tag = tag.replace(/^<svg\b/i, `<svg ${add.join(" ")}`);
+  return outerHTML.replace(original, tag);
+}
+
+/** One icon the page declared, as downloaded and inspected. */
+export interface IconRecord {
+  /** Path inside the capture, e.g. `assets/icon-apple-touch-icon-180x180.png`. */
+  file: string;
+  url: string;
+  rel: string;
+  sizes: string | null;
+  type: string | null;
+  /** Position in the declared-quality ranking; 0 is the best-ranked icon. */
+  rank: number;
+  shape: IconShape;
+  shapeReason: string;
+}
+
+/**
+ * Every icon a page declared, plus which one became `assets/favicon.<ext>` and why.
+ *
+ * The `reason` field is the point of this file. The downloader chooses among candidates, and a
+ * choice whose losers are invisible is indistinguishable from having had no choice at all — the
+ * failure mode that let a silent 403 substitute a worse icon without anything recording it.
+ */
+export interface IconManifest {
+  schema: "hyperframes.capture.icons.v1";
+  headline: {
+    /** The backwards-compatible stem, e.g. `assets/favicon.png`. */
+    file: string;
+    /** The `icons[].file` it was copied from, so a consumer can avoid showing it twice. */
+    source: string;
+    rank: number;
+    shape: IconShape;
+    reason: string;
+  } | null;
+  icons: IconRecord[];
+}
+
+function emptyIconManifest(): IconManifest {
+  return { schema: "hyperframes.capture.icons.v1", headline: null, icons: [] };
+}
+
+/** Icons downloaded per capture. Pages declare up to a dozen apple-touch sizes; a few is plenty. */
+const MAX_ICONS = 8;
+
+/**
+ * Headline preference, deliberately BINARY: a positively identified bare mark first, then the
+ * existing declared-quality ranking for everything else.
+ *
+ * `unknown` is not promoted above `badge`. Ranking it in between looked reasonable and is wrong:
+ * a `.ico` cannot be decoded for inspection, so on a site whose icons are all badges the
+ * undecodable legacy file would outrank the good SVG purely for being unexaminable. Absence of
+ * evidence is not evidence of a bare mark.
+ */
+const SHAPE_PREFERENCE: Record<IconShape, number> = { "bare-mark": 0, unknown: 1, badge: 1 };
+
+/** `<link rel="apple-touch-icon" sizes="180x180">` -> `icon-apple-touch-icon-180x180`. */
+function iconFileStem(icon: IconCandidate): string {
+  const slug = `${icon.rel} ${icon.sizes ?? "unsized"}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `icon-${slug || "unknown"}`;
+}
+
+function headlineReason(chosen: IconRecord, all: IconRecord[]): string {
+  const badges = all.filter((i) => i.shape === "badge").length;
+  if (chosen.shape === "bare-mark") {
+    return badges > 0
+      ? `bare mark preferred over ${badges} badge(s)`
+      : "the only candidate is a bare mark";
+  }
+  const bare = all.filter((i) => i.shape === "bare-mark").length;
+  if (bare > 0) return `best-ranked bare mark was unavailable; used a ${chosen.shape}`;
+  return `no bare-mark candidate among ${all.length} icon(s); used the best-ranked ${chosen.shape}`;
+}
+
+/**
+ * Download every icon the page declared, classify each, and copy the best onto the historical
+ * `assets/favicon.<ext>` stem.
+ *
+ * Downloading all of them rather than stopping at the first success is what makes the choice
+ * possible: shape can only be read from bytes, so a ranking that stops early can never know
+ * whether the candidate it skipped was the bare mark the brand band actually wants.
+ */
+/** A stem not yet used in this capture; sites declare the same rel+sizes pair more than once. */
+function uniqueStem(icon: IconCandidate, used: Set<string>): string {
+  const base = iconFileStem(icon);
+  let stem = base;
+  for (let n = 2; used.has(stem); n++) stem = `${base}-${n}`;
+  used.add(stem);
+  return stem;
+}
+
+/** Fetch one icon, write it under `stem`, and inspect what it is. Null when it did not arrive. */
+async function fetchAndInspectIcon(
+  icon: IconCandidate,
+  rank: number,
+  stem: string,
+  outputDir: string,
+  timeoutMs: number,
+  byteBudget?: DownloadByteBudget,
+): Promise<{ record: IconRecord; buffer: Buffer } | null> {
+  const buffer = await fetchBuffer(icon.href, timeoutMs, 2 * 1024 * 1024, byteBudget);
+  if (!buffer) return null;
+  const ext = await captureImageExtension(buffer);
+  if (!ext) return null;
+
+  const file = `assets/${stem}${ext}`;
+  writeCaptureFileSync(join(outputDir, file), buffer);
+  const verdict = await classifyIcon(buffer, ext);
+  return {
+    buffer,
+    record: {
+      file,
+      url: icon.href,
+      rel: icon.rel,
+      sizes: icon.sizes ?? null,
+      type: icon.type ?? null,
+      rank,
+      shape: verdict.shape,
+      shapeReason: verdict.reason,
+    },
+  };
+}
+
+/** Copy the winning icon onto the historical `assets/favicon.<ext>` stem consumers match on. */
+function promoteHeadline(
+  manifest: IconManifest,
+  bytesByFile: Map<string, Buffer>,
+  outputDir: string,
+): DownloadedAsset | null {
+  const chosen = [...manifest.icons].sort(
+    (a, b) => SHAPE_PREFERENCE[a.shape] - SHAPE_PREFERENCE[b.shape] || a.rank - b.rank,
+  )[0];
+  if (!chosen) return null;
+
+  const file = `assets/favicon${extname(chosen.file)}`;
+  writeCaptureFileSync(join(outputDir, file), bytesByFile.get(chosen.file)!);
+  manifest.headline = {
+    file,
+    source: chosen.file,
+    rank: chosen.rank,
+    shape: chosen.shape,
+    reason: headlineReason(chosen, manifest.icons),
+  };
+  return { url: chosen.url, localPath: file, type: "favicon" };
+}
+
+/**
+ * Download every icon the page declared, classify each, and promote the best one.
+ *
+ * Downloading all of them rather than stopping at the first success is what makes the choice
+ * possible: shape can only be read from bytes, so a ranking that stops early can never know
+ * whether the candidate it skipped was the bare mark the brand band actually wants.
+ */
+async function downloadDeclaredIcons(
+  faviconLinks: IconCandidate[],
+  outputDir: string,
+  drops: AssetDropCounts,
+  options: DownloadBudgetOptions,
+): Promise<{ assets: DownloadedAsset[]; manifest: IconManifest }> {
+  const ranked = rankIconCandidates(faviconLinks);
+  const attempted = ranked.slice(0, MAX_ICONS);
+  drops["cap-reached"] += ranked.length - attempted.length;
+
+  const assets: DownloadedAsset[] = [];
+  const manifest = emptyIconManifest();
+  const bytesByFile = new Map<string, Buffer>();
+  const usedStems = new Set<string>();
+
+  for (const [rank, icon] of attempted.entries()) {
+    const remainingMs = options.remainingMs?.() ?? 10_000;
+    if (remainingMs <= 0) {
+      drops["budget-exhausted"] += attempted.length - rank;
+      break;
+    }
+    try {
+      const stem = uniqueStem(icon, usedStems);
+      const got = await fetchAndInspectIcon(
+        icon,
+        rank,
+        stem,
+        outputDir,
+        Math.min(10_000, remainingMs),
+        options.byteBudget,
+      );
+      if (!got) {
+        drops.unavailable++;
+        continue;
+      }
+      bytesByFile.set(got.record.file, got.buffer);
+      manifest.icons.push(got.record);
+      assets.push({ url: icon.href, localPath: got.record.file, type: "favicon" });
+    } catch {
+      drops.unavailable++;
+    }
+  }
+
+  try {
+    const headline = promoteHeadline(manifest, bytesByFile, outputDir);
+    if (headline) assets.push(headline);
+  } catch {
+    drops.unavailable++;
+  }
+
+  return { assets, manifest };
+}
+
+// fallow-ignore-next-line complexity
 export async function downloadAssets(
   tokens: DesignTokens,
   outputDir: string,
   catalogedAssets?: CatalogedAsset[],
-  faviconLinks?: Array<{ rel: string; href: string }>,
-): Promise<DownloadedAsset[]> {
+  faviconLinks?: IconCandidate[],
+  options: DownloadBudgetOptions = {},
+): Promise<{ assets: DownloadedAsset[]; drops: AssetDropCounts; icons: IconManifest }> {
+  options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets");
-  mkdirSync(assetsDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, assetsDir);
 
   const assets: DownloadedAsset[] = [];
+  const drops = noDrops();
   const downloadedUrls = new Set<string>();
+  let icons: IconManifest = emptyIconManifest();
 
-  // 1. ALL inline SVGs — save as files (logos get priority naming)
-  mkdirSync(join(outputDir, "assets", "svgs"), { recursive: true });
-  for (let i = 0; i < tokens.svgs.length && i < 30; i++) {
+  ensureCaptureDirSync(outputDir, join(outputDir, "assets", "svgs"));
+  const usedSvgNames = new Set<string>();
+  const MAX_INLINE_SVGS = 30;
+  drops["cap-reached"] += Math.max(0, tokens.svgs.length - MAX_INLINE_SVGS);
+  for (let i = 0; i < tokens.svgs.length && i < MAX_INLINE_SVGS; i++) {
     const svg = tokens.svgs[i]!;
-    if (!svg.outerHTML || svg.outerHTML.length < 50) continue;
-    const label = svg.label?.replace(/[^a-zA-Z0-9-_ ]/g, "").trim();
-    const name = label ? slugify(label) + ".svg" : svg.isLogo ? `logo-${i}.svg` : `icon-${i}.svg`;
+    if (!svg.outerHTML || svg.outerHTML.length < 50) {
+      drops["size-floor"]++;
+      continue;
+    }
+    // Hash the bytes that actually land on disk, so the filename still can't drift from content.
+    const svgFile = toStandaloneSvg(svg.outerHTML);
+    const slug = svgContentHashSlug(svgFile, !!svg.isLogo);
+    let finalSlug = slug;
+    let suffix = 2;
+    while (usedSvgNames.has(finalSlug)) {
+      finalSlug = `${slug}-${suffix}`;
+      suffix++;
+    }
+    usedSvgNames.add(finalSlug);
+    const name = `${finalSlug}.svg`;
     const localPath = `assets/svgs/${name}`;
     try {
-      writeFileSync(join(outputDir, localPath), svg.outerHTML, "utf-8");
+      writeCaptureFileSync(join(outputDir, localPath), svgFile, "utf-8");
       assets.push({ url: "", localPath, type: "svg" });
     } catch {
-      /* skip */
+      drops.unavailable++;
     }
   }
 
-  // 2. Favicon
-  for (const icon of faviconLinks || []) {
-    if (!icon.href) continue;
-    try {
-      const ext = extname(new URL(icon.href).pathname) || ".ico";
-      const name = `favicon${ext}`;
-      const localPath = `assets/${name}`;
-      const buffer = await fetchBuffer(icon.href);
-      if (buffer) {
-        writeFileSync(join(outputDir, localPath), buffer);
-        assets.push({ url: icon.href, localPath, type: "favicon" });
-        break;
-      }
-    } catch {
-      /* skip */
-    }
-  }
+  // 2. Icons — keep every one the page declares, then choose the headline among them.
+  const iconPass = await downloadDeclaredIcons(faviconLinks || [], outputDir, drops, options);
+  assets.push(...iconPass.assets);
+  icons = iconPass.manifest;
 
   // 3. Images — use the catalog as the single source of truth (highest resolution, deduplicated)
   // If the catalog is empty, asset download produces zero images — this is surfaced as a warning
@@ -86,81 +388,129 @@ export async function downloadAssets(
     }
   }
 
-  // Download all images (no arbitrary cap) — Claude Code needs to see every asset to use them creatively.
-  // The 10KB minimum size filter handles tracking pixels and tiny icons.
+  // Download all images — use catalog context for human-readable filenames.
   // Pre-filter to deduplicate before downloading.
-  const toDownload: { url: string; isPoster: boolean; normalized: string }[] = [];
+  const toDownload: {
+    url: string;
+    isPoster: boolean;
+    normalized: string;
+    catalog?: CatalogedAsset;
+  }[] = [];
   for (const { url, isPoster } of imageUrls) {
     const normalized = normalizeUrl(url);
     if (downloadedUrls.has(normalized)) continue;
-    downloadedUrls.add(normalized); // Reserve to prevent duplicates in parallel batches
-    toDownload.push({ url, isPoster, normalized });
+    downloadedUrls.add(normalized);
+    const catalog = catalogedAssets?.find((a) => normalizeUrl(a.url) === normalized);
+    toDownload.push({ url, isPoster, normalized, catalog });
   }
 
   // Download in parallel batches of 5
   const BATCH_SIZE = 5;
   let imgIdx = 0;
+  const usedNames = new Set<string>();
   for (let i = 0; i < toDownload.length; i += BATCH_SIZE) {
+    const remainingMs = options.remainingMs?.() ?? 10_000;
+    if (remainingMs <= 0) {
+      drops["budget-exhausted"] += toDownload.length - i;
+      break;
+    }
     const batch = toDownload.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
-      batch.map(async ({ url, isPoster }) => {
+      batch.map(async ({ url, isPoster, catalog }) => {
         const parsedUrl = new URL(url);
-        const pathExt = extname(parsedUrl.pathname);
-        const ext = pathExt && pathExt.length <= 5 ? pathExt : ".jpg";
-        const buffer = await fetchBuffer(url);
-        if (!buffer) return null;
-        // SVGs are inherently small — don't apply the 10KB minimum to them
-        const isSvg = ext === ".svg" || url.includes(".svg");
+        const buffer = await fetchBuffer(
+          url,
+          Math.min(10_000, remainingMs),
+          20 * 1024 * 1024,
+          options.byteBudget,
+        );
+        if (!buffer) {
+          drops.unavailable++;
+          return null;
+        }
+        const ext = await captureImageExtension(buffer);
+        if (!ext) {
+          drops.unavailable++;
+          return null;
+        }
+        const isSvg = ext === ".svg";
         const minSize = isSvg ? 200 : 10000;
-        if (buffer.length < minSize) return null;
-        return { url, isPoster, parsedUrl, ext, buffer };
+        if (buffer.length < minSize) {
+          drops["size-floor"]++;
+          return null;
+        }
+        return { url, isPoster, parsedUrl, ext, buffer, catalog };
       }),
     );
     for (const result of results) {
-      if (result.status !== "fulfilled" || !result.value) continue;
-      const { url, isPoster, parsedUrl, ext, buffer } = result.value;
+      // A rejection never reached a drop site of its own, so it is counted here. A fulfilled
+      // `null` already counted itself above; counting it again here would double it.
+      if (result.status === "rejected") {
+        drops.unavailable++;
+        continue;
+      }
+      if (!result.value) continue;
+      const { url, isPoster, parsedUrl, ext, buffer, catalog } = result.value;
       try {
-        const prefix = isPoster ? "poster" : "image";
-        const rawName =
-          parsedUrl.pathname
-            .split("/")
-            .pop()
-            ?.replace(/\.[^.]+$/, "") || "";
-        const isMeaningful =
-          rawName.length > 2 &&
-          rawName.length < 50 &&
-          !/^[a-f0-9]{8,}$/i.test(rawName) &&
-          !/^\d+$/.test(rawName) &&
-          !rawName.includes("_next") &&
-          !rawName.includes("?");
-        const slug = isMeaningful ? slugify(rawName) : `${prefix}-${imgIdx}`;
+        let slug: string;
+        if (ext === ".svg") {
+          const c = catalog;
+          const brandRe = /logo|brand|wordmark/i;
+          const isLogo = !!(
+            c?.inBanner ||
+            c?.inHomeLink ||
+            c?.matchesTitleBrand ||
+            c?.contexts?.some((s) => brandRe.test(s)) ||
+            (c?.description && brandRe.test(c.description)) ||
+            (c?.nearestHeading && brandRe.test(c.nearestHeading)) ||
+            (c?.sectionClasses && brandRe.test(c.sectionClasses))
+          );
+          slug = svgContentHashSlug(buffer, isLogo);
+        } else {
+          slug = deriveAssetName(parsedUrl, catalog, isPoster, imgIdx, usedNames);
+        }
         const name = `${slug}${ext}`;
+        usedNames.add(slug);
         const localPath = `assets/${name}`;
-        writeFileSync(join(outputDir, localPath), buffer);
+        writeCaptureFileSync(join(outputDir, localPath), buffer);
         assets.push({ url, localPath, type: "image" });
         imgIdx++;
       } catch {
-        /* skip */
+        drops.unavailable++;
       }
     }
   }
 
   // 4. OG image (if not already downloaded)
   if (tokens.ogImage && !downloadedUrls.has(normalizeUrl(tokens.ogImage))) {
+    const remainingMs = options.remainingMs?.() ?? 10_000;
     try {
-      const ext = extname(new URL(tokens.ogImage).pathname) || ".jpg";
-      const localPath = `assets/og-image${ext}`;
-      const buffer = await fetchBuffer(tokens.ogImage);
-      if (buffer && buffer.length > 5000) {
-        writeFileSync(join(outputDir, localPath), buffer);
-        assets.push({ url: tokens.ogImage, localPath, type: "image" });
+      if (remainingMs <= 0) {
+        drops["budget-exhausted"]++;
+      } else {
+        const buffer = await fetchBuffer(
+          tokens.ogImage,
+          Math.min(10_000, remainingMs),
+          20 * 1024 * 1024,
+          options.byteBudget,
+        );
+        const ext = buffer && (await captureImageExtension(buffer));
+        if (!buffer || !ext) {
+          drops.unavailable++;
+        } else if (buffer.length <= 5000) {
+          drops["size-floor"]++;
+        } else {
+          const localPath = `assets/og-image${ext}`;
+          writeCaptureFileSync(join(outputDir, localPath), buffer);
+          assets.push({ url: tokens.ogImage, localPath, type: "image" });
+        }
       }
     } catch {
-      /* skip */
+      drops.unavailable++;
     }
   }
 
-  return assets;
+  return { assets, drops, icons };
 }
 
 /** Normalize URL for deduplication — unwrap Next.js image proxy, strip w/q params */
@@ -183,9 +533,16 @@ function normalizeUrl(u: string): string {
  * Download fonts referenced in CSS and rewrite URLs to local paths.
  * Returns the modified CSS string with local font paths.
  */
-export async function downloadAndRewriteFonts(css: string, outputDir: string): Promise<string> {
+// fallow-ignore-next-line complexity
+export async function downloadAndRewriteFonts(
+  css: string,
+  outputDir: string,
+  options: DownloadBudgetOptions = {},
+): Promise<{ css: string; drops: AssetDropCounts }> {
+  options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets", "fonts");
-  mkdirSync(assetsDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, assetsDir);
+  const drops = noDrops();
 
   const fontUrlRegex = /url\(['"]?(https?:\/\/[^'")\s]+\.(?:woff2?|ttf|otf)[^'")\s]*?)['"]?\)/g;
   const fontUrls = new Set<string>();
@@ -194,10 +551,12 @@ export async function downloadAndRewriteFonts(css: string, outputDir: string): P
     if (match[1]) fontUrls.add(match[1]);
   }
 
-  if (fontUrls.size === 0) return css;
+  if (fontUrls.size === 0) return { css, drops };
 
-  // Limit font downloads to avoid bloat. Google Fonts serves 20+ unicode-range
-  // subsets per weight — we only need a few per family for video production.
+  // Limit font download attempts to bound worst-case egress and latency. Google Fonts serves
+  // 20+ unicode-range subsets per weight, so successes alone cannot be the bound: six transient
+  // failures can intentionally suppress later URLs in that family. Latin-priority sorting below
+  // makes the limited attempts useful while keeping this failure tradeoff explicit.
   const MAX_FONTS_PER_FAMILY = 6;
   const MAX_TOTAL_FONTS = 30;
   const familyCounts = new Map<string, number>();
@@ -220,77 +579,119 @@ export async function downloadAndRewriteFonts(css: string, outputDir: string): P
     return aLatin - bLatin;
   });
 
+  const usedFontNames = new Set<string>();
   let rewritten = css;
   let count = 0;
 
-  for (const fontUrl of sortedUrls) {
-    if (count >= MAX_TOTAL_FONTS) break;
+  for (const [index, fontUrl] of sortedUrls.entries()) {
+    const remainingMs = options.remainingMs?.() ?? 10_000;
+    if (remainingMs <= 0) {
+      drops["budget-exhausted"] += sortedUrls.length - index;
+      break;
+    }
+    if (count >= MAX_TOTAL_FONTS) {
+      drops["cap-reached"] += sortedUrls.length - index;
+      break;
+    }
     const family = getFamilyForUrl(fontUrl);
     const familyCount = familyCounts.get(family) || 0;
-    if (familyCount >= MAX_FONTS_PER_FAMILY) continue;
+    if (familyCount >= MAX_FONTS_PER_FAMILY) {
+      drops["cap-reached"]++;
+      continue;
+    }
+    familyCounts.set(family, familyCount + 1);
+    count++;
 
     try {
-      const urlObj = new URL(fontUrl);
-      const filename = urlObj.pathname.split("/").pop() || `font-${count}.woff2`;
-      const localPath = join(assetsDir, filename);
-      const relativePath = `assets/fonts/${filename}`;
-
-      const buffer = await fetchBuffer(fontUrl);
-      if (buffer) {
-        writeFileSync(localPath, buffer);
+      const buffer = await fetchBuffer(
+        fontUrl,
+        Math.min(10_000, remainingMs),
+        10 * 1024 * 1024,
+        options.byteBudget,
+      );
+      const extension = buffer && captureFontExtension(buffer);
+      if (buffer && extension) {
+        const filename = captureFontFilename(fontUrl, extension, usedFontNames);
+        const localPath = join(assetsDir, filename);
+        const relativePath = `assets/fonts/${filename}`;
+        writeCaptureFileSync(localPath, buffer);
         rewritten = rewritten.split(fontUrl).join(relativePath);
-        familyCounts.set(family, familyCount + 1);
-        count++;
+      } else {
+        drops.unavailable++;
       }
     } catch {
-      /* skip */
+      drops.unavailable++;
     }
   }
 
-  return rewritten;
+  return { css: rewritten, drops };
 }
 
-/** Block requests to private/internal IP ranges to prevent SSRF */
+/**
+ * Block requests to private/internal hosts to prevent SSRF. WHATWG URL parsing
+ * canonicalizes alternate IPv4 encodings (decimal/octal/hex) to dotted-quad
+ * before we see them, so only dotted IPv4 and bracketed IPv6 literals reach the
+ * shared engine classifier.
+ */
 export function isPrivateUrl(url: string): boolean {
   try {
-    const { hostname } = new URL(url);
-    // Block cloud metadata, localhost, and private IP ranges
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") return true;
-    if (hostname === "169.254.169.254") return true; // AWS/GCP metadata
-    if (hostname.endsWith(".internal") || hostname.endsWith(".local")) return true;
-    // IPv4 private ranges
-    const parts = hostname.split(".").map(Number);
-    if (parts.length === 4 && parts.every((p) => !isNaN(p))) {
-      if (parts[0] === 10) return true; // 10.0.0.0/8
-      if (parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31) return true; // 172.16.0.0/12
-      if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.0.0/16
-      if (parts[0] === 169 && parts[1] === 254) return true; // 169.254.0.0/16 (link-local)
-    }
-    // Block non-HTTP(S) schemes
-    const scheme = new URL(url).protocol;
-    if (scheme !== "http:" && scheme !== "https:") return true;
-    return false;
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true; // no file:, etc.
+    return isBlockedNetworkHost(u.hostname);
   } catch {
     return true; // reject unparseable URLs
   }
 }
 
-async function fetchBuffer(url: string): Promise<Buffer | null> {
+/** Max redirect hops safeFetch will follow before giving up. */
+const MAX_FETCH_REDIRECTS = 5;
+
+/**
+ * fetch() that re-validates the SSRF denylist on EVERY redirect hop. A bare
+ * `redirect: "follow"` only checks the initial URL, so a public URL can 30x to
+ * an internal/metadata host. We resolve redirects manually and re-run
+ * isPrivateUrl on each Location. Returns null when blocked, on too many hops,
+ * or on network error.
+ */
+export async function safeFetch(url: string, init?: RequestInit): Promise<Response | null> {
+  let current = url;
+  for (let hop = 0; hop <= MAX_FETCH_REDIRECTS; hop++) {
+    if (isPrivateUrl(current)) return null;
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) return res;
+      try {
+        current = new URL(loc, current).toString();
+      } catch {
+        return null; // malformed Location header
+      }
+      continue;
+    }
+    return res;
+  }
+  return null; // too many redirects
+}
+
+async function fetchBuffer(
+  url: string,
+  timeoutMs: number,
+  maxBytes: number,
+  budget: DownloadByteBudget = createCaptureDownloadBudget(),
+): Promise<Buffer | null> {
+  if (budget.remainingBytes <= 0) return null;
   try {
-    if (isPrivateUrl(url)) return null;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { "User-Agent": "HyperFrames/1.0" },
-      redirect: "follow",
+    const res = await safeFetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { "User-Agent": CAPTURE_USER_AGENT },
     });
-    if (!res.ok) return null;
+    if (!res || !res.ok) return null;
     // Reject XML/HTML error pages disguised as 200 OK (common with S3/CloudFront)
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("text/xml") || ct.includes("text/html") || ct.includes("application/xml")) {
       return null;
     }
-    const ab = await res.arrayBuffer();
-    return Buffer.from(ab);
+    return await readBoundedResponse(res, maxBytes, budget);
   } catch {
     return null;
   }
@@ -302,4 +703,78 @@ function slugify(text: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 40);
+}
+
+/**
+ * Derive a human-readable filename from catalog context.
+ * Priority: alt text > nearest heading > meaningful URL path > fallback index.
+ */
+function deriveAssetName(
+  parsedUrl: URL,
+  catalog: CatalogedAsset | undefined,
+  isPoster: boolean,
+  idx: number,
+  usedNames: Set<string>,
+): string {
+  const candidates: string[] = [];
+
+  // 1. Alt text / description from catalog
+  if (catalog?.description) {
+    const desc = catalog.description.replace(/[^a-zA-Z0-9 -]/g, "").trim();
+    if (desc.length > 3 && desc.length < 80) candidates.push(desc);
+  }
+
+  // 2. Nearest heading context
+  if (catalog?.nearestHeading) {
+    const heading = catalog.nearestHeading.replace(/[^a-zA-Z0-9 -]/g, "").trim();
+    if (heading.length > 3 && heading.length < 60) candidates.push(heading);
+  }
+
+  // 3. Meaningful URL path segment
+  const rawName =
+    parsedUrl.pathname
+      .split("/")
+      .pop()
+      ?.replace(/\.[^.]+$/, "") || "";
+  const isMeaningful =
+    rawName.length > 2 &&
+    rawName.length < 50 &&
+    !/^[a-f0-9]{8,}$/i.test(rawName) &&
+    !/^\d+$/.test(rawName) &&
+    !rawName.includes("_next") &&
+    !rawName.includes("?");
+  if (isMeaningful) candidates.push(rawName);
+
+  // 4. Section classes as context
+  if (catalog?.sectionClasses) {
+    const classes = catalog.sectionClasses
+      .split(/\s+/)
+      .filter((c) => c.length > 3 && c.length < 30 && !/^(w-|h-|p-|m-|flex|grid|block)/.test(c))
+      .slice(0, 2)
+      .join("-");
+    if (classes.length > 3) candidates.push(classes);
+  }
+
+  // Pick the best candidate
+  const prefix = isPoster ? "poster" : catalog?.aboveFold ? "hero" : "image";
+  let slug = "";
+
+  for (const c of candidates) {
+    slug = slugify(c);
+    if (slug.length > 3 && !usedNames.has(slug)) break;
+  }
+
+  if (!slug || slug.length <= 3 || usedNames.has(slug)) {
+    slug = `${prefix}-${idx}`;
+  }
+
+  // Deduplicate
+  let final = slug;
+  let suffix = 2;
+  while (usedNames.has(final)) {
+    final = `${slug}-${suffix}`;
+    suffix++;
+  }
+
+  return final;
 }

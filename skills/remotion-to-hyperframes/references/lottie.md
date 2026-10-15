@@ -104,11 +104,11 @@ for the full supported feature list.
 
 ## Loop behavior
 
-Remotion's `loop={true}` plays the animation continuously. Translate to
-the lottie-web `loop: true` setting AND rely on the adapter's natural
-seek behavior (it'll seek modulo the animation's duration). For
-non-default playback rates, set `playbackRate` in `loadAnimation` and HF
-will respect it during seek.
+Remotion's `loop={true}` plays the animation continuously. Translate it
+to `loop: true` on the player: the HF adapter wraps composition time into
+the animation's own length, so the cycle repeats for the whole scene. It
+does not add playback-rate scaling; bake a non-default rate into the
+Lottie asset and verify the rendered output.
 
 ## Performance note
 

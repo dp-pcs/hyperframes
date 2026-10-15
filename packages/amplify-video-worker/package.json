@@ -17,6 +17,7 @@
     "@aws-sdk/client-sqs": "^3.1021.0",
     "@aws-sdk/lib-dynamodb": "^3.1021.0",
     "@hyperframes/core": "workspace:^",
+    "@hyperframes/lint": "workspace:^",
     "@hyperframes/producer": "workspace:^",
     "qrcode": "^1.5.4"
   },

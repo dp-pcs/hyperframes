@@ -33,18 +33,97 @@ Start the live preview studio in your browser:
 
 ```bash
 npx hyperframes preview
-# Studio running at http://localhost:3002
+# Studio: http://localhost:3002/#project/my-video
+# Server: http://localhost:3002
 
 npx hyperframes preview --port 4567
 ```
 
-### `render`
+In an interactive terminal, the preview stays attached until you press
+Ctrl+C. In a non-interactive shell such as a coding-agent session, the same
+command starts a managed preview that survives after the command returns. Use
+`--background` or `--foreground` to choose explicitly, and manage persistent
+previews with `--status`, `--stop`, `--list`, and `--kill-all`. Add `--json` to
+managed lifecycle commands for machine-readable output. `--foreground --json`
+prints the ready-session envelope once, then remains attached until stopped.
 
-Render a composition to MP4:
+### `audio`
+
+Measure where sounds land: onsets, the moment each sound peaks, loudness and
+silence. Give files, or query the film's own clips in film time:
 
 ```bash
-npx hyperframes render ./my-composition.html -o output.mp4
+npx hyperframes audio sfx/whoosh.mp3
+npx hyperframes audio --at 12 --json
 ```
+
+### `normalize-audio`
+
+Measure two local authored audio clips with integrated LUFS and match the target
+to the unchanged reference. The command is a dry run unless `--write` is passed:
+
+```bash
+npx hyperframes normalize-audio --reference target-audio --target user-audio
+npx hyperframes normalize-audio --reference target-audio --target user-audio --write
+```
+
+It updates only the target element's `data-volume` and refuses unsafe boosts
+that exceed Studio's +12 dB ceiling or would clip.
+
+### `render`
+
+Render a composition to MP4. Run from the project directory; the positional
+argument is the project directory (not a file), so render the project's
+`index.html` directly, or point at a specific composition file with `-c`:
+
+```bash
+npx hyperframes render -o output.mp4
+npx hyperframes render -c ./my-composition.html -o output.mp4
+```
+
+A render stops when the process that started it exits. To keep one running after
+its launcher exits, set `HYPERFRAMES_RENDER_DETACHED=1` and start it in its own
+process group, e.g. `bash -c 'set -m; HYPERFRAMES_RENDER_DETACHED=1 npx hyperframes render -o out.mp4 < /dev/null > render.log 2>&1 &'`.
+
+Piped, non-quiet renders emit a single `@hf-diagnostic ` JSON line when an audio
+failure reaches the CLI error handler. Version 1 has `operation: "render"` and
+at most 16 `audioFailures`: allowlisted stage, reason, owner, retryable, and
+optional subprocess exit code, signal, termination reason and OS code. It omits
+messages, stderr, source paths/URLs, element IDs and command arguments. Consumers
+must ignore unknown versions and fields. This is local CLI output; uploading it
+requires the caller's existing consent and privacy checks. Quiet mode (including
+batch JSON mode) emits no diagnostic line.
+
+This covers audio preparation and mix failures, including the typed external
+interruption path. Probe failures retain their existing stage/reason but do not
+gain subprocess evidence here; browser/FX failures remain classified as internal.
+Desktop ingestion and live report delivery are separate changes.
+
+### `publish`
+
+Upload a project directory and get a hosted URL that keeps working after the CLI exits.
+Published projects are private by default:
+
+```bash
+npx hyperframes publish
+npx hyperframes publish ./my-video
+npx hyperframes publish --public
+npx hyperframes publish --yes
+```
+
+Signed-out publishing returns an authentication-required claim URL; opening it
+lets someone sign in and claim the project. Sign in first with
+`npx hyperframes auth login` to publish an owned project you can update. Use
+`--public` to make the claimed project visible to anyone. `--yes` only skips the
+confirmation prompt and does not change visibility.
+
+Signed-in publishers can use `--update <url-or-id>` to target an existing project
+or `--space <space-id>` to publish into a shared team space. If the requested
+project is missing or inaccessible, publishing can create a new project instead;
+check the printed URL and status.
+
+See the [publish reference](https://hyperframes.heygen.com/packages/cli#publish)
+for all options, including video proxy settings.
 
 ### `lint`
 

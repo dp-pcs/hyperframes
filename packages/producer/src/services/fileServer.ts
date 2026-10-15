@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication complexity
 /**
  * File Server for Render Mode
  *
@@ -10,10 +11,28 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import type { IncomingMessage } from "node:http";
-import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  realpathSync,
+  statSync,
+  createReadStream,
+  openSync,
+  fstatSync,
+  closeSync,
+  constants,
+  readFile,
+} from "node:fs";
+import { promisify } from "node:util";
+
+import { Readable } from "node:stream";
 import { join, extname, resolve, sep } from "node:path";
 import { injectScriptsAtHeadStart, injectScriptsIntoHtml } from "@hyperframes/core/compiler";
+import { fpsToNumber, type Fps } from "@hyperframes/core";
 import { getVerifiedHyperframeRuntimeSource } from "./hyperframeRuntimeLoader.js";
+import { getHfEarlyStub } from "../generated/hf-early-stub-inline.js";
+import { defaultLogger, type ProducerLogger } from "../logger.js";
+
+const readFileAsync = promisify(readFile);
 
 export { injectScriptsAtHeadStart };
 
@@ -73,24 +92,111 @@ const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".cube": "text/plain; charset=utf-8",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".ico": "image/vnd.microsoft.icon",
   ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
   ".webm": "video/webm",
   ".mp3": "audio/mpeg",
   ".wav": "audio/wav",
   ".ogg": "audio/ogg",
   ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".m4a": "audio/mp4",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
   ".ttf": "font/ttf",
   ".otf": "font/otf",
 };
+
+/**
+ * Result of parsing a `Range:` request header against a known total size.
+ *
+ * - `kind: "satisfiable"`: `start <= end < size`. The response should be 206
+ *   with `Content-Range: bytes start-end/size` and the sliced body.
+ * - `kind: "unsatisfiable"`: the header was syntactically valid (`bytes=...`)
+ *   but the resolved range falls outside `[0, size)` (e.g. `start >= size`,
+ *   `end < start`, or a suffix request on a zero-byte file). Per RFC 7233
+ *   the response should be 416 with `Content-Range: bytes (asterisk)/size`.
+ * - `kind: "absent"`: there is no `Range:` header on the request, or it is
+ *   syntactically malformed, uses a non-`bytes` unit, or requests multiple
+ *   ranges. RFC 7233 allows ignoring such headers and serving the full body
+ *   with a 200, which is what callers should do.
+ */
+export type RangeRequest =
+  | { kind: "satisfiable"; start: number; end: number }
+  | { kind: "unsatisfiable" }
+  | { kind: "absent" };
+
+/**
+ * Parse a single-range `Range:` request header per RFC 7233 §2.1.
+ *
+ * Supports the three forms of `bytes=...`:
+ *   - `bytes=START-END`: closed range, both bounds inclusive.
+ *   - `bytes=START-`: open-ended, serve from START to EOF.
+ *   - `bytes=-SUFFIX`: last SUFFIX bytes.
+ *
+ * Multi-range requests (`bytes=0-99,200-299`) are treated as `absent`. The
+ * caller serves the full body with 200. The hyperframes producer's use case
+ * (Chrome `<video>` seeks, range-aware media stack) only ever issues single
+ * ranges, so we don't take on the multipart-byteranges complexity here.
+ *
+ * Exported for unit tests; not part of the public package surface.
+ */
+export function parseRangeHeader(header: string | null | undefined, size: number): RangeRequest {
+  if (!header) return { kind: "absent" };
+  const match = /^\s*bytes\s*=\s*(.*?)\s*$/i.exec(header);
+  if (!match) return { kind: "absent" };
+  const specList = match[1];
+  if (!specList || specList.includes(",")) {
+    // Multi-range: bail to full-body 200 rather than reassemble
+    // multipart/byteranges. Single-range is the only shape we serve.
+    return { kind: "absent" };
+  }
+  const dashIdx = specList.indexOf("-");
+  if (dashIdx < 0) return { kind: "absent" };
+  const rawStart = specList.slice(0, dashIdx).trim();
+  const rawEnd = specList.slice(dashIdx + 1).trim();
+
+  // Suffix form: `bytes=-N` returns the last N bytes.
+  if (rawStart === "" && rawEnd !== "") {
+    if (!/^\d+$/.test(rawEnd)) return { kind: "absent" };
+    const suffixLen = Number(rawEnd);
+    if (!Number.isFinite(suffixLen)) return { kind: "absent" };
+    if (size === 0 || suffixLen === 0) return { kind: "unsatisfiable" };
+    const start = Math.max(0, size - suffixLen);
+    return { kind: "satisfiable", start, end: size - 1 };
+  }
+
+  if (!/^\d+$/.test(rawStart)) return { kind: "absent" };
+  const start = Number(rawStart);
+  if (!Number.isFinite(start)) return { kind: "absent" };
+
+  // Open-ended form: `bytes=START-` returns from START to EOF.
+  if (rawEnd === "") {
+    if (start >= size) return { kind: "unsatisfiable" };
+    return { kind: "satisfiable", start, end: size - 1 };
+  }
+
+  // Closed form: `bytes=START-END`
+  if (!/^\d+$/.test(rawEnd)) return { kind: "absent" };
+  const requestedEnd = Number(rawEnd);
+  if (!Number.isFinite(requestedEnd)) return { kind: "absent" };
+  if (requestedEnd < start) return { kind: "unsatisfiable" };
+  if (start >= size) return { kind: "unsatisfiable" };
+  // Clamp the end to the last valid byte.
+  const end = Math.min(requestedEnd, size - 1);
+  return { kind: "satisfiable", start, end };
+}
 
 /**
  * Options for {@link buildVirtualTimeShim}.
@@ -135,7 +241,7 @@ export function buildVirtualTimeShim(options: VirtualTimeShimOptions): string {
   const seededRandomBlock = seedRandomFromFrame
     ? String.raw`
   // Seeded Math.random / crypto.getRandomValues, keyed by virtual time.
-  // Mulberry32 — single uint32 state, deterministic, fast.
+  // Mulberry32: single uint32 state, deterministic, fast.
   var rngState = 0;
   function mulberry32() {
     rngState |= 0; rngState = (rngState + 0x6D2B79F5) | 0;
@@ -146,7 +252,7 @@ export function buildVirtualTimeShim(options: VirtualTimeShimOptions): string {
   }
   function reseedRngFromTime(ms) {
     var ms32 = Math.max(0, Math.floor(Number(ms) || 0)) | 0;
-    // Knuth's multiplicative hash + golden-ratio offset — gives a well-
+    // Knuth's multiplicative hash + golden-ratio offset gives a well-
     // distributed seed even for frame 0 (otherwise rngState=0 degenerates
     // the PRNG's first few outputs).
     rngState = (Math.imul(ms32, -1640531527) + 0x9E3779B9) | 0;
@@ -304,7 +410,22 @@ const RENDER_SEEK_OFFSET_FRACTION = Math.max(
   Math.min(0.95, Number(process.env.PRODUCER_RUNTIME_RENDER_SEEK_OFFSET_FRACTION || 0.5)),
 );
 
-const RENDER_MODE_SCRIPT = `(function() {
+export function resolveRenderFpsConfig(fps: Fps | undefined): {
+  value: number;
+  source: "render-options" | "default";
+  fallbackReason?: "missing" | "invalid";
+} {
+  if (!fps) return { value: 30, source: "default", fallbackReason: "missing" };
+  const value = fpsToNumber(fps);
+  if (!Number.isFinite(value) || value <= 0) {
+    return { value: 30, source: "default", fallbackReason: "invalid" };
+  }
+  return { value, source: "render-options" };
+}
+
+function buildRenderModeScript(fps: Fps | undefined): string {
+  const renderFps = resolveRenderFpsConfig(fps);
+  return `(function() {
   var __realSetTimeout =
     window.__HF_VIRTUAL_TIME__ && typeof window.__HF_VIRTUAL_TIME__.originalSetTimeout === "function"
       ? window.__HF_VIRTUAL_TIME__.originalSetTimeout
@@ -313,11 +434,17 @@ const RENDER_MODE_SCRIPT = `(function() {
   var __seekDiagnostics = ${RENDER_SEEK_DIAGNOSTICS ? "true" : "false"};
   var __seekStep = ${RENDER_SEEK_STEP};
   var __seekOffsetFraction = ${RENDER_SEEK_OFFSET_FRACTION};
+  var __renderFps = ${renderFps.value};
+  var __renderFpsSource = ${JSON.stringify(renderFps.source)};
+  var __renderFpsFallbackReason = ${JSON.stringify(renderFps.fallbackReason ?? null)};
   window.__HF_EXPORT_RENDER_SEEK_CONFIG = {
     mode: __seekMode,
     diagnostics: __seekDiagnostics,
     step: __seekStep,
     offsetFraction: __seekOffsetFraction,
+    fps: __renderFps,
+    fpsSource: __renderFpsSource,
+    fpsFallbackReason: __renderFpsFallbackReason || undefined,
     owner: "runtime",
   };
   function installMediaFallbackPlayer() {
@@ -390,6 +517,8 @@ const RENDER_MODE_SCRIPT = `(function() {
       },
     };
     window.__playerReady = true;
+    // Media-fallback player has no timeline to bind, so render-ready is immediate.
+    // init.ts defers __renderReady until the timeline is bound (a different runtime).
     window.__renderReady = true;
     return true;
   }
@@ -399,7 +528,6 @@ const RENDER_MODE_SCRIPT = `(function() {
     if (hasComposition) {
       if (window.__player && typeof window.__player.renderSeek === "function") {
         window.__playerReady = true;
-        window.__renderReady = true;
         return;
       }
       __realSetTimeout(waitForPlayer, 50);
@@ -412,21 +540,19 @@ const RENDER_MODE_SCRIPT = `(function() {
   }
   waitForPlayer();
 })();`;
+}
 
 /**
  * Early stub: ensures `window.__hf` exists *before* any user `<script>` in
- * `<body>` executes. Without this, libraries that opportunistically write to
- * `__hf` during page-script execution (notably `@hyperframes/shader-transitions`,
- * which writes the active transition map to `__hf.transitions` inside its
- * `init()` call) silently no-op because `__hf` hasn't been created yet — the
- * full bridge script is injected at end-of-body and runs *after* user scripts.
+ * `<body>` executes, and batches GSAP timeline construction via
+ * requestAnimationFrame to prevent the main-thread hang described in
+ * https://github.com/heygen-com/hyperframes/issues/1231.
  *
+ * Source: packages/producer/stubs/hf-early-stub.ts
+ * Generated: packages/producer/src/generated/hf-early-stub-inline.ts
  * Injected at the very start of `<head>` so it runs before all other scripts.
  */
-const HF_EARLY_STUB = `(function() {
-  if (typeof window === "undefined") return;
-  if (!window.__hf) window.__hf = {};
-})();`;
+const HF_EARLY_STUB = getHfEarlyStub();
 
 /**
  * Page-side compositing opt-in flag stub.
@@ -472,7 +598,16 @@ const HF_BRIDGE_SCRIPT = `(function() {
     var root = document.querySelector('[data-composition-id]');
     if (!root) return 0;
     var d = Number(root.getAttribute('data-duration'));
-    return Number.isFinite(d) && d > 0 ? d : 0;
+    if (Number.isFinite(d) && d > 0) return d;
+    var comps = document.querySelectorAll('[data-composition-src]');
+    var maxEnd = 0;
+    for (var i = 0; i < comps.length; i++) {
+      var start = Number(comps[i].getAttribute('data-start')) || 0;
+      var dur = Number(comps[i].getAttribute('data-duration')) || 0;
+      if (dur > 0) maxEnd = Math.max(maxEnd, start + dur);
+    }
+    if (maxEnd > 0) console.warn('[HF Bridge] No root data-duration; derived ' + maxEnd + 's from sub-compositions');
+    return maxEnd;
   }
   function seekSameOriginChildFrames(frameWindow, nextTimeMs) {
     var frames;
@@ -509,12 +644,19 @@ const HF_BRIDGE_SCRIPT = `(function() {
       configurable: true,
       enumerable: true,
       get: function() {
+        // While the GSAP tween-batching interceptor (HF_EARLY_STUB) is draining
+        // queued tweens via rAF, the real timelines are still empty. Return 0
+        // here so pollHfReady in the engine keeps waiting (its condition is
+        // __hf.duration > 0), preventing the capture pipeline from seeking
+        // empty timelines and producing blank/incorrect frames.
+        if (window.__hfTimelinesBuilding) return 0;
+        if (!window.__renderReady) return 0;
         var d = p.getDuration();
         return d > 0 ? d : getDeclaredDuration();
       },
     });
-    hf.seek = function(t) {
-      p.renderSeek(t);
+    hf.seek = function(t, options) {
+      p.renderSeek(t, options);
       var nextTimeMs = (Math.max(0, Number(t) || 0)) * 1000;
       if (window.__HF_VIRTUAL_TIME__ && typeof window.__HF_VIRTUAL_TIME__.seekToTime === "function") {
         window.__HF_VIRTUAL_TIME__.seekToTime(nextTimeMs);
@@ -540,6 +682,8 @@ export interface FileServerOptions {
   headScripts?: string[];
   /** Scripts injected before </body> of index.html. Default: render mode extension. */
   bodyScripts?: string[];
+  /** Actual render fps so page-side runtime quantization matches the output container. */
+  fps?: Fps;
   /** Strip embedded runtime scripts from HTML before injection. Default: true. */
   stripEmbeddedRuntime?: boolean;
 }
@@ -551,6 +695,66 @@ export interface FileServerHandle {
   addPreHeadScript: (script: string) => void;
 }
 
+/**
+ * Set before the Hyperframes runtime executes so render/probe pages can avoid
+ * preview-only initialization work that mutates the live visual timeline.
+ * Audio automation is discovered by the producer in an isolated pass and
+ * baked before frame capture.
+ */
+export const RENDER_CAPTURE_MODE_SHIM = "globalThis.__HF_RENDER_CAPTURE_MODE = true;";
+
+/**
+ * Close a file server handle, swallowing and logging any error.
+ *
+ * `FileServerHandle.close` tears down the underlying http.Server, whose
+ * `close()` throws `ERR_SERVER_NOT_RUNNING` if the server is already torn down
+ * (for example a cancellation path that closed it once already). An unguarded
+ * throw inside a cleanup or `finally` block would mask the original render or
+ * plan result, so cleanup callers must go through this instead of calling
+ * `close()` directly.
+ */
+export function closeFileServerSafely(
+  fileServer: Pick<FileServerHandle, "close">,
+  label: string,
+  log: ProducerLogger = defaultLogger,
+): void {
+  try {
+    fileServer.close();
+  } catch (err) {
+    log.warn(`[${label}] file server close failed`, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function openRegularFile(filePath: string) {
+  let fd: number;
+  try {
+    // Reject FIFOs with fstat without waiting for a writer to connect.
+    fd = openSync(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    )
+      return null;
+    // A failed open of a directory/socket has platform-specific errors.
+    // Classifying it here never authorizes a later pathname read.
+    if (!statSync(filePath, { throwIfNoEntry: false })?.isFile()) return null;
+    throw error;
+  }
+  let accepted = false;
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return null;
+    accepted = true;
+    return { fd, stat, filePath };
+  } finally {
+    if (!accepted) closeSync(fd);
+  }
+}
+
 export function createFileServer(options: FileServerOptions): Promise<FileServerHandle> {
   const { projectDir, compiledDir, port = 0, stripEmbeddedRuntime = true } = options;
 
@@ -560,14 +764,18 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
   // bodyScripts later upgrades this stub with `seek` / `duration` once the
   // Hyperframe runtime's __player is ready, while preserving any fields
   // already written.
-  const preHeadScripts = [HF_EARLY_STUB, ...(options.preHeadScripts ?? [])];
+  const preHeadScripts = [
+    HF_EARLY_STUB,
+    RENDER_CAPTURE_MODE_SHIM,
+    ...(options.preHeadScripts ?? []),
+  ];
   // Default scripts: Hyperframe runtime in <head>, render mode in </body>
   const headScripts = options.headScripts ?? [getVerifiedHyperframeRuntimeSource()];
-  const bodyScripts = options.bodyScripts ?? [RENDER_MODE_SCRIPT, HF_BRIDGE_SCRIPT];
+  const bodyScripts = options.bodyScripts ?? [buildRenderModeScript(options.fps), HF_BRIDGE_SCRIPT];
 
   const app = new Hono();
 
-  app.get("/*", (c) => {
+  app.get("/*", async (c) => {
     let requestPath = c.req.path;
     if (requestPath === "/") requestPath = "/index.html";
 
@@ -590,56 +798,105 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
     // containment, so a request like `GET /../etc/passwd` would otherwise
     // be served straight off the filesystem. Keep this lexical so project
     // symlinks to sibling asset directories behave like preview mode.
-    let filePath: string | null = null;
-    if (compiledDir) {
-      const candidate = join(compiledDir, relativePath);
-      if (
-        existsSync(candidate) &&
-        isPathInside(candidate, compiledDir) &&
-        statSync(candidate).isFile()
-      ) {
-        filePath = candidate;
-      }
-    }
-    if (!filePath) {
-      const candidate = join(projectDir, relativePath);
-      if (
-        existsSync(candidate) &&
-        isPathInside(candidate, projectDir) &&
-        statSync(candidate).isFile()
-      ) {
-        filePath = candidate;
-      }
+    let file: ReturnType<typeof openRegularFile> = null;
+    for (const root of compiledDir ? [compiledDir, projectDir] : [projectDir]) {
+      const candidate = join(root, relativePath);
+      if (isPathInside(candidate, root)) file = openRegularFile(candidate);
+      if (file) break;
     }
 
-    if (!filePath) {
+    if (!file) {
       if (!/favicon\.ico$/i.test(requestPath)) {
         console.warn(`[FileServer] 404 Not Found: ${requestPath}`);
       }
       return c.text("Not found", 404);
     }
 
-    const ext = extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || "application/octet-stream";
+    const { fd, stat, filePath } = file;
+    let streamOwnsFd = false;
+    try {
+      const ext = extname(filePath).toLowerCase();
+      const contentType = MIME_TYPES[ext] || "application/octet-stream";
 
-    if (ext === ".html") {
-      const rawHtml = readFileSync(filePath, "utf-8");
-      const isIndex = relativePath === "index.html";
-      let html = rawHtml;
-      if (preHeadScripts.length > 0) {
-        html = injectScriptsAtHeadStart(html, preHeadScripts);
+      if (ext === ".html") {
+        // Use the async read here so we don't block the Node event loop while
+        // reading an HTML file (typically small, but a 200KB+ AI-generated
+        // composition during a concurrent render still costs a ms of stall).
+        // The injection step is sync — it's pure string ops on the buffered
+        // HTML — but the read itself is the only step that touches the disk.
+        const rawHtml = await readFileAsync(fd, "utf-8");
+        const isIndex = relativePath === "index.html";
+        let html = rawHtml;
+        if (preHeadScripts.length > 0) {
+          html = injectScriptsAtHeadStart(html, preHeadScripts);
+        }
+        html = isIndex
+          ? injectScriptsIntoHtml(html, headScripts, bodyScripts, stripEmbeddedRuntime)
+          : html;
+        return c.text(html, 200, { "Content-Type": contentType });
       }
-      html = isIndex
-        ? injectScriptsIntoHtml(html, headScripts, bodyScripts, stripEmbeddedRuntime)
-        : html;
-      return c.text(html, 200, { "Content-Type": contentType });
-    }
 
-    const content = readFileSync(filePath);
-    return new Response(content, {
-      status: 200,
-      headers: { "Content-Type": contentType },
-    });
+      // Stream binary file content rather than buffering it with readFileSync.
+      // On video-heavy compositions Chrome requests several 32MB video files
+      // back-to-back through this server; each readFileSync(32MB) blocked the
+      // Node event loop long enough to wedge concurrent /health responses (see
+      // renderOrchestrator.ts:1277-1306 documenting the same regression class).
+      // createReadStream() pipes bounded chunks asynchronously, so the event
+      // loop stays responsive even when several large assets are in flight
+      // simultaneously. Chrome reassembles the chunks transparently.
+      //
+      // We also honor `Range:` requests (RFC 7233) so Chrome's <video> element
+      // can seek into and partial-load large media without re-pulling the whole
+      // file. `Accept-Ranges: bytes` is advertised on every response (including
+      // full-body 200s) so the client knows ranges are supported.
+      const totalSize = stat.size;
+      const rangeHeader = c.req.header("range");
+      const rangeRequest = parseRangeHeader(rangeHeader, totalSize);
+
+      if (rangeRequest.kind === "unsatisfiable") {
+        // 416 Range Not Satisfiable. RFC 7233 §4.4 mandates `Content-Range`
+        // carry the total length as `bytes */<size>` so clients know how to
+        // re-issue a valid range.
+        return new Response(null, {
+          status: 416,
+          headers: {
+            "Content-Type": contentType,
+            "Content-Range": `bytes */${totalSize}`,
+            "Accept-Ranges": "bytes",
+          },
+        });
+      }
+
+      const range = rangeRequest.kind === "satisfiable" ? rangeRequest : null;
+      const responseOptions = {
+        status: range ? 206 : 200,
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(range ? range.end - range.start + 1 : totalSize),
+          "Accept-Ranges": "bytes",
+          ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${totalSize}` } : {}),
+        },
+      };
+      // HEAD has no body consumer to take ownership of a stream's descriptor.
+      if (c.req.method === "HEAD") return new Response(null, responseOptions);
+      const stream = createReadStream(filePath, {
+        fd,
+        autoClose: true,
+        ...(range ? { start: range.start, end: range.end } : {}),
+      });
+      streamOwnsFd = true;
+      try {
+        const webStream = Readable.toWeb(stream) as unknown as ReadableStream;
+        return new Response(webStream, responseOptions);
+      } catch (error) {
+        stream.destroy();
+        throw error;
+      }
+    } finally {
+      // Streams close on completion, error or cancellation. HTML/416/errors
+      // before stream creation remain owned by this request.
+      if (!streamOwnsFd) closeSync(fd);
+    }
   });
 
   return new Promise((resolve) => {
@@ -651,7 +908,12 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
     // @hono/node-server serve() returns the http.Server directly.
     // Register the connection tracker before the listen callback fires
     // to avoid missing early connections.
-    const server = serve({ fetch: app.fetch, port }, (info) => {
+    // Bind loopback only (SECURITY F-001, matching the studio/preview servers
+    // in cli/server/portUtils.ts): this is an internal capture transport for
+    // the co-located headless Chrome (the URL above is already localhost), so
+    // it must not listen on 0.0.0.0 where an IDE's port auto-forward surfaces
+    // it as a transient, breakage-prone "preview".
+    const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
       resolve({
         url: `http://localhost:${info.port}`,
         port: info.port,

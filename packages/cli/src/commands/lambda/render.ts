@@ -1,3 +1,4 @@
+import { setCommandExitCode } from "../../utils/commandResult.js";
 /**
  * `hyperframes lambda render <projectDir>` — start a distributed render
  * against the deployed stack. Wraps {@link renderToLambda}. Does NOT
@@ -10,12 +11,14 @@ import type {
   DistributedFormat,
   SerializableDistributedRenderConfig,
 } from "@hyperframes/aws-lambda/sdk";
+import type { CanvasResolution } from "@hyperframes/core";
 import { c } from "../../ui/colors.js";
 import {
   reportVariableIssues,
   resolveVariablesArg,
   validateVariablesAgainstProject,
 } from "../../utils/variables.js";
+import { warnOnDimensionMismatch } from "./_dimensions.js";
 import { requireStack, stateFilePath } from "./state.js";
 
 // Dynamic-import the SDK so tsup keeps it out of the static-import head of
@@ -32,11 +35,29 @@ export interface RenderArgs {
   fps: 24 | 30 | 60;
   width: number;
   height: number;
+  /**
+   * Optional output resolution preset that engages Chrome `deviceScaleFactor`
+   * supersampling. When set, the composition is laid out at the canvas size
+   * declared by `data-width`/`data-height` (or `--width`/`--height`) and
+   * supersampled to the preset's dimensions — `landscape-4k` (3840×2160)
+   * from a 1920×1080 layout uses DPR 2, etc.
+   */
+  outputResolution?: CanvasResolution;
+  /**
+   * True when {@link outputResolution} was normalized from an aspect-agnostic
+   * alias (`1080p` / `hd` / `4k` / `uhd`). Threaded through
+   * `SerializableDistributedRenderConfig` so the Lambda worker's compile stage
+   * remaps `landscape` → `portrait` / `square` when the composition's
+   * orientation demands it. Dropping this field is what shipped the
+   * portrait-1080p regression at the sibling entrypoints (see PR #2529).
+   */
+  outputResolutionAspectAgnostic?: boolean;
   format: DistributedFormat;
   codec?: "h264" | "h265";
   quality?: "draft" | "standard" | "high";
   chunkSize?: number;
   maxParallelChunks?: number;
+  targetChunkFrames?: number;
   executionName?: string;
   outputKey?: string;
   /** Inline JSON for `--variables '{...}'`. Mutually exclusive with `variablesFile`. */
@@ -62,6 +83,14 @@ export interface RenderArgs {
 export async function runRender(args: RenderArgs): Promise<void> {
   const stack = requireStack(args.stackName);
   const projectDir = resolvePath(args.projectDir);
+
+  warnOnDimensionMismatch({
+    projectDir,
+    cliWidth: args.width,
+    cliHeight: args.height,
+    outputResolution: args.outputResolution,
+    quiet: args.json,
+  });
 
   // Resolve --variables / --variables-file using the same parser the local
   // `hyperframes render` uses. `resolveVariablesArg` exits(1) with a friendly
@@ -95,18 +124,7 @@ export async function runRender(args: RenderArgs): Promise<void> {
     }
   }
 
-  const config: SerializableDistributedRenderConfig = {
-    fps: args.fps,
-    width: args.width,
-    height: args.height,
-    format: args.format,
-    codec: args.codec,
-    quality: args.quality,
-    chunkSize: args.chunkSize,
-    maxParallelChunks: args.maxParallelChunks,
-    runtimeCap: "lambda",
-    variables,
-  };
+  const config: SerializableDistributedRenderConfig = buildLambdaRenderConfig(args, variables);
 
   // When the caller passes only --site-id, synthesise the minimum-shape
   // SiteHandle pointing at the deterministic content-addressed key. The
@@ -201,7 +219,7 @@ async function waitForCompletion(
         for (const err of progress.errors) {
           console.log(`  ${c.dim(err.state)}: ${err.error} — ${err.cause}`);
         }
-        process.exitCode = 1;
+        setCommandExitCode(1);
       }
       return;
     }
@@ -211,4 +229,37 @@ async function waitForCompletion(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+/**
+ * Build the wire {@link SerializableDistributedRenderConfig} for
+ * `hyperframes lambda render`. Extracted for boundary-test coverage of the
+ * aspect-agnostic flag threading — the field this helper preserves is what
+ * lets the Lambda worker's compile stage remap `landscape` → `portrait` on
+ * an aspect-agnostic alias (`1080p` / `hd` / `4k` / `uhd`).
+ */
+export function buildLambdaRenderConfig(
+  args: RenderArgs,
+  variables: Record<string, unknown> | undefined,
+): SerializableDistributedRenderConfig {
+  const config: SerializableDistributedRenderConfig = {
+    fps: args.fps,
+    width: args.width,
+    height: args.height,
+    outputResolution: args.outputResolution,
+    format: args.format,
+    codec: args.codec,
+    quality: args.quality,
+    chunkSize: args.chunkSize,
+    maxParallelChunks: args.maxParallelChunks,
+    targetChunkFrames: args.targetChunkFrames,
+    runtimeCap: "lambda",
+    variables,
+  };
+  // Keep the wire shape sparse when the alias flag wasn't set — matches how
+  // `SerializableDistributedRenderConfig` is emitted at every other adapter.
+  if (args.outputResolutionAspectAgnostic) {
+    config.outputResolutionAspectAgnostic = true;
+  }
+  return config;
 }

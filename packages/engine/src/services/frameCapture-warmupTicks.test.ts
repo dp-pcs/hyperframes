@@ -12,7 +12,11 @@
 import { describe, expect, it } from "vitest";
 import {
   LOCKED_WARMUP_TICKS,
+  deriveBeginFrameTimelineTicks,
+  deriveBeginFrameTimeTicks,
+  cancelWarmupOnError,
   driveWarmupTicks,
+  prepareBeginFrameTimeline,
   warmupFrameTimeTicks,
   type WarmupTickState,
 } from "./frameCapture.js";
@@ -50,6 +54,45 @@ async function runWithSimulatedPageLoad(
   );
   return state;
 }
+
+describe("driveWarmupTicks — cancelled", () => {
+  it.each([false, true])(
+    "stops once cancelled even while every tick fails (locked: %s)",
+    async (locked) => {
+      const state = makeState();
+      let calls = 0;
+      await driveWarmupTicks(
+        {
+          intervalMs: 33,
+          lockWarmupTicks: locked,
+          // Yields to the event loop so a loop that never stops fails on the test timeout instead of hanging.
+          sleep: () => new Promise((settle) => setImmediate(settle)),
+          tick: async () => {
+            if (++calls === 3) state.cancelled = true;
+            throw new Error("Target closed");
+          },
+        },
+        state,
+      );
+      expect(calls).toBe(3);
+    },
+  );
+});
+
+describe("cancelWarmupOnError", () => {
+  it("stops the warm-up loop when setup fails and leaves it alone when setup succeeds", async () => {
+    const failed = makeState();
+    const setupError = new Error("render_cancelled");
+    await expect(cancelWarmupOnError(failed, () => Promise.reject(setupError))).rejects.toBe(
+      setupError,
+    );
+    expect(failed.cancelled).toBe(true);
+
+    const succeeded = makeState();
+    await expect(cancelWarmupOnError(succeeded, async () => "ready")).resolves.toBe("ready");
+    expect(succeeded.cancelled).toBeUndefined();
+  });
+});
 
 describe("driveWarmupTicks — unlocked", () => {
   it("stops when state.running flips false", async () => {
@@ -170,5 +213,83 @@ describe("driveWarmupTicks — locked", () => {
     // tick count — locked mode pins this to a host-independent value.
     const state = await runWithSimulatedPageLoad(true, 5);
     expect(warmupFrameTimeTicks(state, 33)).toBe(LOCKED_WARMUP_TICKS * 33);
+  });
+});
+
+describe("deriveBeginFrameTimeTicks", () => {
+  const warmupIntervalMs = 33;
+  const state: WarmupTickState = {
+    running: false,
+    ticks: LOCKED_WARMUP_TICKS,
+  };
+  const expectMonotonicTimeline = (
+    warmupState: WarmupTickState,
+    captureIntervalMs: number,
+  ): void => {
+    const timeline = deriveBeginFrameTimelineTicks(
+      warmupState,
+      warmupIntervalMs,
+      captureIntervalMs,
+    );
+    const lastWarmupTick = (warmupState.ticks - 1) * warmupIntervalMs;
+
+    expect(timeline.commit).toBeGreaterThan(lastWarmupTick);
+    expect(timeline.probe).toBeGreaterThan(timeline.commit);
+    expect(timeline.capture).toBeGreaterThan(timeline.probe);
+  };
+
+  it.each([60, 120, 240, 60_000 / 1001])(
+    "keeps warmup, commit, probe, and capture monotonic at %ifps",
+    (fps) => {
+      expectMonotonicTimeline(state, 1000 / fps);
+    },
+  );
+
+  it.each([24, 30, 30_000 / 1001, 31, 32])(
+    "preserves the legacy capture baseline when it is already monotonic at %ifps",
+    (fps) => {
+      const captureIntervalMs = 1000 / fps;
+
+      expect(deriveBeginFrameTimeTicks(state, warmupIntervalMs, captureIntervalMs)).toBeCloseTo(
+        (LOCKED_WARMUP_TICKS + 10) * captureIntervalMs,
+      );
+    },
+  );
+
+  it("keeps an unlocked warmup timeline monotonic", () => {
+    const unlockedState: WarmupTickState = { running: false, ticks: 7 };
+    expectMonotonicTimeline(unlockedState, 1000 / 60);
+  });
+
+  it("raises the capture baseline only when the warmup clock is ahead", () => {
+    const captureIntervalMs = 1000 / 60;
+
+    expect(deriveBeginFrameTimeTicks(state, warmupIntervalMs, captureIntervalMs)).toBeCloseTo(
+      LOCKED_WARMUP_TICKS * warmupIntervalMs + 10 * captureIntervalMs,
+    );
+  });
+
+  it("raises the baseline just above the safe legacy boundary", () => {
+    const captureIntervalMs = 1000 / 33;
+
+    expect(deriveBeginFrameTimeTicks(state, warmupIntervalMs, captureIntervalMs)).toBeCloseTo(
+      LOCKED_WARMUP_TICKS * warmupIntervalMs + 10 * captureIntervalMs,
+    );
+  });
+
+  it("wires the canonical capture and commit ticks into session initialization", () => {
+    const session = {
+      beginFrameIntervalMs: 1000 / 60,
+      beginFrameTimeTicks: 0,
+    };
+    const prepared = prepareBeginFrameTimeline(session, state, warmupIntervalMs);
+
+    expect(session.beginFrameTimeTicks).toBe(prepared.timeline.capture);
+    expect(prepared.commitParams).toEqual({
+      frameTimeTicks: prepared.timeline.commit,
+      interval: session.beginFrameIntervalMs,
+      noDisplayUpdates: false,
+    });
+    expect(prepared.timeline.commit).toBeGreaterThan((LOCKED_WARMUP_TICKS - 1) * warmupIntervalMs);
   });
 });

@@ -15,31 +15,43 @@ import {
   getSelectorIndex,
   getSourceFileForElement,
   isHtmlElement,
+  isElementVisibleThroughAncestors,
   normalizeTimelineCompositionSource,
   querySelectorAllSafely,
 } from "./domEditingDom";
 
 // ─── Visibility ──────────────────────────────────────────────────────────────
 
-export function isElementComputedVisible(el: HTMLElement): boolean {
-  const win = el.ownerDocument.defaultView;
-  if (!win) return true;
-  let current: HTMLElement | null = el;
-  while (current) {
-    const computed = win.getComputedStyle(current);
-    if (computed.display === "none" || computed.visibility === "hidden") return false;
-    const opacity = Number.parseFloat(computed.opacity);
-    if (Number.isFinite(opacity) && opacity <= 0.01) return false;
-    current = current.parentElement;
-  }
-  return true;
+export function isElementComputedVisible(
+  el: HTMLElement,
+  memo?: Map<HTMLElement, boolean>,
+): boolean {
+  return isElementVisibleThroughAncestors(el, memo);
 }
 
 const VISUAL_LEAF_TAGS = new Set(["img", "video", "canvas", "svg", "audio"]);
 
+// fallow-ignore-next-line complexity
+function hasVisualPresence(el: HTMLElement): boolean {
+  const win = el.ownerDocument.defaultView;
+  if (!win) return false;
+  const cs = win.getComputedStyle(el);
+  if (cs.backgroundImage !== "none") return true;
+  if (
+    cs.backgroundColor &&
+    cs.backgroundColor !== "transparent" &&
+    cs.backgroundColor !== "rgba(0, 0, 0, 0)"
+  )
+    return true;
+  if (cs.borderWidth && parseFloat(cs.borderWidth) > 0 && cs.borderStyle !== "none") return true;
+  if (cs.boxShadow && cs.boxShadow !== "none") return true;
+  return false;
+}
+
 function isEmptyVisualContainer(el: HTMLElement): boolean {
   const tag = el.tagName.toLowerCase();
   if (VISUAL_LEAF_TAGS.has(tag)) return false;
+  if (hasVisualPresence(el)) return false;
 
   const { children } = el;
   if (children.length === 0) {
@@ -82,7 +94,13 @@ const DOM_LAYER_IGNORED_TAGS = new Set([
   "wbr",
 ]);
 
-function isInspectableLayerElement(el: HTMLElement): boolean {
+/**
+ * Is the element rendered at all? The half of `getDomLayerPatchTarget` that a
+ * plain style write can flip, and the only half that reads computed style.
+ * Exported so a caller memoizing a layer walk can give it its own (short)
+ * cache lifetime — see `domEditLayerWalkCache`.
+ */
+export function isInspectableLayerElement(el: HTMLElement): boolean {
   const tagName = el.tagName.toLowerCase();
   if (DOM_LAYER_IGNORED_TAGS.has(tagName)) return false;
 
@@ -92,19 +110,35 @@ function isInspectableLayerElement(el: HTMLElement): boolean {
   return true;
 }
 
-export function getDomLayerPatchTarget(
+/**
+ * How the element is ADDRESSED — its selector, that selector's occurrence index
+ * within the source file, and the file itself. Independent of whether the
+ * element currently renders, so it survives every style write and moves only
+ * when an identity attribute changes or the document's population of elements
+ * sharing the selector does.
+ */
+/**
+ * The selector an element is addressed by, or undefined when it cannot be a
+ * layer at all. Sole owner of that rule: `isDomLayerElement` answers the same
+ * question without paying for the occurrence index, and a second copy of the
+ * conditions would go stale the first time one of them changed.
+ */
+function resolveLayerSelector(el: HTMLElement): string | undefined {
+  if (el.hasAttribute("data-composition-id")) return undefined;
+  return buildStableSelector(el);
+}
+
+export function resolveDomLayerIdentity(
   el: HTMLElement,
   activeCompositionPath: string | null,
-): Pick<DomEditSelection, "id" | "selector" | "selectorIndex" | "sourceFile"> | null {
-  if (!isInspectableLayerElement(el)) return null;
-  if (el.hasAttribute("data-composition-id")) return null;
-
-  const selector = buildStableSelector(el);
+): Pick<DomEditSelection, "id" | "hfId" | "selector" | "selectorIndex" | "sourceFile"> | null {
+  const selector = resolveLayerSelector(el);
   if (!selector) return null;
 
   const { sourceFile } = getSourceFileForElement(el, activeCompositionPath);
   return {
     id: el.id || undefined,
+    hfId: el.getAttribute("data-hf-id") || undefined,
     selector,
     selectorIndex: getSelectorIndex(
       el.ownerDocument,
@@ -115,6 +149,26 @@ export function getDomLayerPatchTarget(
     ),
     sourceFile,
   };
+}
+
+export function getDomLayerPatchTarget(
+  el: HTMLElement,
+  activeCompositionPath: string | null,
+): Pick<DomEditSelection, "id" | "hfId" | "selector" | "selectorIndex" | "sourceFile"> | null {
+  return isInspectableLayerElement(el) ? resolveDomLayerIdentity(el, activeCompositionPath) : null;
+}
+
+/**
+ * Is `el` a layer at all? Exactly the condition under which
+ * `getDomLayerPatchTarget` returns non-null, for callers that want the yes/no
+ * and throw the target away.
+ *
+ * Worth its own function because the target carries the selector's OCCURRENCE
+ * INDEX, and resolving that is a whole-document query — which the yes/no does
+ * not depend on. Counting an element's layer children asked for one per child.
+ */
+export function isDomLayerElement(el: HTMLElement): boolean {
+  return isInspectableLayerElement(el) && resolveLayerSelector(el) !== undefined;
 }
 
 // ─── Clip ancestor / selection candidate ─────────────────────────────────────
@@ -153,31 +207,49 @@ export function resolveVisualDomEditSelectionTarget(
   elementsFromPoint: Iterable<Element | null | undefined>,
   options: Pick<DomEditContextOptions, "activeCompositionPath">,
 ): HTMLElement | null {
-  const candidates: HTMLElement[] = [];
+  const candidates = resolveAllVisualDomEditTargets(elementsFromPoint, options);
+  return candidates[0] ?? null;
+}
+
+/**
+ * Returns all independently-selectable elements at the given point, in paint
+ * order (topmost first). Used for click-cycling through stacked layers.
+ *
+ * Each entry in the returned array is an independent "layer" — an element
+ * that is not an ancestor of an earlier entry. This gives one result per
+ * z-stacked element rather than one per DOM node.
+ */
+export function resolveAllVisualDomEditTargets(
+  elementsFromPoint: Iterable<Element | null | undefined>,
+  options: Pick<DomEditContextOptions, "activeCompositionPath">,
+): HTMLElement[] {
+  const raw: HTMLElement[] = [];
 
   for (const entry of elementsFromPoint) {
     if (!isHtmlElement(entry)) continue;
     if (hasRenderedBox(entry) && getDomLayerPatchTarget(entry, options.activeCompositionPath)) {
-      candidates.push(entry);
+      raw.push(entry);
     }
   }
 
-  if (candidates.length === 0) return null;
+  if (raw.length === 0) return [];
 
-  // candidates are in visual stacking order (topmost first, from elementsFromPoint).
-  // Start with the topmost and only replace with a descendant that is more
-  // specific within the same visual subtree. Never jump to an unrelated
-  // element that happens to be painted behind the current pick.
-  let best = candidates[0];
-
-  for (let i = 1; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    if (best.contains(candidate)) {
-      best = candidate;
+  // First pass: for each contiguous ancestor-descendant run, keep only the
+  // deepest (most specific) element, matching the original single-pick logic.
+  const layers: HTMLElement[] = [];
+  let best = raw[0];
+  for (let i = 1; i < raw.length; i++) {
+    const el = raw[i];
+    if (best.contains(el)) {
+      best = el; // go deeper in this subtree
+    } else {
+      layers.push(best);
+      best = el;
     }
   }
+  layers.push(best);
 
-  return best;
+  return layers;
 }
 
 // ─── Raster detection ────────────────────────────────────────────────────────
@@ -209,45 +281,53 @@ export function isLargeRasterDomEditSelection(
 
 // ─── Element finders ──────────────────────────────────────────────────────────
 
+type FindElementSelection = Pick<DomEditSelection, "id" | "hfId" | "selector" | "selectorIndex"> & {
+  sourceFile?: string;
+};
+
 export function findElementForSelection(
   doc: Document,
-  selection: Pick<DomEditSelection, "id" | "selector" | "selectorIndex" | "sourceFile">,
+  selection: FindElementSelection,
   activeCompositionPath: string | null = null,
 ): HTMLElement | null {
+  const sourceMatches = (candidate: Element): candidate is HTMLElement =>
+    isHtmlElement(candidate) &&
+    (!selection.sourceFile ||
+      getSourceFileForElement(candidate, activeCompositionPath).sourceFile ===
+        selection.sourceFile);
+  const findAll = (selector: string): HTMLElement[] =>
+    querySelectorAllSafely(doc, selector).filter(sourceMatches);
+
+  if (selection.hfId) {
+    const byHfId = findAll(`[data-hf-id="${escapeCssString(selection.hfId)}"]`)[0];
+    if (byHfId) return byHfId;
+  }
+
   if (selection.id) {
-    const byId = doc.getElementById(selection.id);
-    if (
-      isHtmlElement(byId) &&
-      (!selection.sourceFile ||
-        getSourceFileForElement(byId, activeCompositionPath).sourceFile === selection.sourceFile)
-    ) {
-      return byId;
-    }
+    // Flattened sub-compositions can repeat authored ids. getElementById returns
+    // only the first document match, so filter every id match by source first.
+    const byId = findAll(`[id="${escapeCssString(selection.id)}"]`)[0];
+    if (byId) return byId;
   }
 
   if (!selection.selector) return null;
-
-  if (selection.selector.startsWith(".") && selection.selectorIndex != null) {
-    const matches = querySelectorAllSafely(doc, selection.selector).filter(
-      (candidate): candidate is HTMLElement =>
-        isHtmlElement(candidate) &&
-        (!selection.sourceFile ||
-          getSourceFileForElement(candidate, activeCompositionPath).sourceFile ===
-            selection.sourceFile),
-    );
-    return matches[selection.selectorIndex] ?? null;
-  }
-
-  const matches = querySelectorAllSafely(doc, selection.selector).filter(
-    (candidate): candidate is HTMLElement =>
-      isHtmlElement(candidate) &&
-      (!selection.sourceFile ||
-        getSourceFileForElement(candidate, activeCompositionPath).sourceFile ===
-          selection.sourceFile),
-  );
-  return matches[0] ?? null;
+  return findAll(selection.selector)[selection.selectorIndex ?? 0] ?? null;
 }
 
+// The selected node while mounted, else its copy in the selection's own file (ids repeat across files), else any copy.
+export function findPreviewNode(
+  doc: Document | null | undefined,
+  el: DomEditSelection,
+): Element | null {
+  if (!doc) return null;
+  if (el.element?.isConnected && el.element.ownerDocument === doc) return el.element;
+  return (
+    findElementForSelection(doc, el) ??
+    findElementForSelection(doc, { ...el, sourceFile: undefined })
+  );
+}
+
+// fallow-ignore-next-line complexity
 export function findElementForTimelineElement(
   doc: Document,
   element: TimelineElementDomTarget,
@@ -300,12 +380,10 @@ export function findElementForTimelineElement(
 
 // ─── Layer children ───────────────────────────────────────────────────────────
 
-export function getDirectLayerChildren(
-  el: HTMLElement,
-  options: DomEditContextOptions,
-): HTMLElement[] {
+/** `el`'s direct children that are layers. No longer takes the context options:
+ *  layer-ness does not depend on the active composition path. */
+export function getDirectLayerChildren(el: HTMLElement): HTMLElement[] {
   return Array.from(el.children).filter(
-    (child): child is HTMLElement =>
-      isHtmlElement(child) && getDomLayerPatchTarget(child, options.activeCompositionPath) !== null,
+    (child): child is HTMLElement => isHtmlElement(child) && isDomLayerElement(child),
   );
 }
